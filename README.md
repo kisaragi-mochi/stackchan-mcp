@@ -74,6 +74,24 @@ esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
 
 WiFi 設定は ESP32 が起動後にスマホで設定 UI に接続して行う (xiaozhi-esp32 標準フロー)。
 
+### Configuring the WebSocket gateway URL
+
+The firmware reads the gateway URL from NVS key `websocket.url`. For
+development, there are three practical ways to provide it:
+
+1. **Build-time default via Kconfig (recommended for developers)**:
+   run `idf.py menuconfig`, then open `Component config` → `Xiaozhi Assistant`
+   → `Default WebSocket gateway URL (fallback when NVS is empty)` and enter a
+   URL such as `ws://192.168.1.100:8765/`. This sets
+   `CONFIG_DEFAULT_WEBSOCKET_URL` in the build. If NVS `websocket.url` is
+   empty, the firmware automatically falls back to this value.
+2. **Write `websocket.url` directly to NVS**: this is the intended persistent
+   runtime configuration path, eventually via the WiFi config UI. The UI field
+   is not implemented yet and is tracked as a follow-up to Issue #17.
+3. **Temporary source hardcode (not recommended)**: editing
+   `websocket_protocol.cc` can unblock local experiments, but keep it out of
+   commits.
+
 ### 2. ゲートウェイ起動
 
 ```bash
