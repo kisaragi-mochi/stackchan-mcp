@@ -497,6 +497,7 @@ private:
         uint32_t move_duration_ms = 0;
         bool moving = false;
     };
+    // TODO: motion_mutex_/scs_bus_mutex_/servo_task_handle_ have no destroy path; board is singleton via DECLARE_BOARD.
     AxisMotion yaw_motion_;
     AxisMotion pitch_motion_;
     SemaphoreHandle_t motion_mutex_ = nullptr;     // protects AxisMotion fields
@@ -505,6 +506,20 @@ private:
     static constexpr uint32_t MOTION_TICK_MS = 20;
     static constexpr uint32_t MOTION_DEFAULT_DURATION_MS = 600;
     static constexpr uint32_t MOTION_PER_WRITE_TIME_MS = 30;
+
+    static int YawDegToPos(int deg) {
+        int pos = 460 + deg * 16 / 5;
+        if (pos < 0) pos = 0;
+        if (pos > 1000) pos = 1000;
+        return pos;
+    }
+
+    static int PitchDegToPos(int deg) {
+        int pos = 620 + deg * 16 / 5;
+        if (pos < 0) pos = 0;
+        if (pos > 1000) pos = 1000;
+        return pos;
+    }
 
     void InitializePowerSaveTimer() {
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
@@ -799,6 +814,20 @@ private:
         if (servo_ok_) {
             motion_mutex_ = xSemaphoreCreateMutex();
             scs_bus_mutex_ = xSemaphoreCreateMutex();
+            if (motion_mutex_ == nullptr || scs_bus_mutex_ == nullptr) {
+                ESP_LOGE(TAG, "Failed to create servo mutexes: motion=%p scs_bus=%p; disabling servo",
+                         motion_mutex_, scs_bus_mutex_);
+                if (motion_mutex_ != nullptr) {
+                    vSemaphoreDelete(motion_mutex_);
+                    motion_mutex_ = nullptr;
+                }
+                if (scs_bus_mutex_ != nullptr) {
+                    vSemaphoreDelete(scs_bus_mutex_);
+                    scs_bus_mutex_ = nullptr;
+                }
+                servo_ok_ = false;
+                return;
+            }
 
             int yaw_pos_actual = scs_bus_.ReadPos(SERVO_YAW_ID);
             int pitch_pos_actual = scs_bus_.ReadPos(SERVO_PITCH_ID);
@@ -821,7 +850,18 @@ private:
                                         "servo_motion", 4096, this, 5,
                                         &servo_task_handle_);
             if (ok != pdPASS) {
-                ESP_LOGE(TAG, "Failed to create servo_motion task");
+                ESP_LOGE(TAG, "Failed to create servo_motion task; disabling servo");
+                if (motion_mutex_ != nullptr) {
+                    vSemaphoreDelete(motion_mutex_);
+                    motion_mutex_ = nullptr;
+                }
+                if (scs_bus_mutex_ != nullptr) {
+                    vSemaphoreDelete(scs_bus_mutex_);
+                    scs_bus_mutex_ = nullptr;
+                }
+                servo_task_handle_ = nullptr;
+                servo_ok_ = false;
+                return;
             }
         }
     }
@@ -920,6 +960,7 @@ private:
 
         while (true) {
             vTaskDelay(pdMS_TO_TICKS(MOTION_TICK_MS));
+            if (!servo_ok_) continue;
 
             AxisMotion yaw_local;
             AxisMotion pitch_local;
@@ -962,9 +1003,7 @@ private:
 
             xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
             if (yaw_local.moving) {
-                int yaw_pos = 460 + new_yaw_current * 16 / 5;
-                if (yaw_pos < 0) yaw_pos = 0;
-                if (yaw_pos > 1000) yaw_pos = 1000;
+                int yaw_pos = YawDegToPos(new_yaw_current);
                 int r = scs_bus_.WritePos(SERVO_YAW_ID, yaw_pos, MOTION_PER_WRITE_TIME_MS, 0);
                 if (r <= 0) {
                     ESP_LOGW(TAG, "Motion yaw WritePos failed: r=%d (deg=%d, pos=%d)",
@@ -973,9 +1012,7 @@ private:
             }
             vTaskDelay(kInterFrameGap);
             if (pitch_local.moving) {
-                int pitch_pos = 620 + new_pitch_current * 16 / 5;
-                if (pitch_pos < 0) pitch_pos = 0;
-                if (pitch_pos > 1000) pitch_pos = 1000;
+                int pitch_pos = PitchDegToPos(new_pitch_current);
                 int r = scs_bus_.WritePos(SERVO_PITCH_ID, pitch_pos, MOTION_PER_WRITE_TIME_MS, 0);
                 if (r <= 0) {
                     ESP_LOGW(TAG, "Motion pitch WritePos failed: r=%d (deg=%d, pos=%d)",
@@ -985,12 +1022,16 @@ private:
             xSemaphoreGive(scs_bus_mutex_);
 
             xSemaphoreTake(motion_mutex_, portMAX_DELAY);
-            yaw_motion_.current_deg = new_yaw_current;
+            if (yaw_motion_.move_start_ms == yaw_local.move_start_ms) {
+                yaw_motion_.current_deg = new_yaw_current;
+            }
             if (!new_yaw_moving && yaw_motion_.target_deg == yaw_local.target_deg
                 && yaw_motion_.move_start_ms == yaw_local.move_start_ms) {
                 yaw_motion_.moving = false;
             }
-            pitch_motion_.current_deg = new_pitch_current;
+            if (pitch_motion_.move_start_ms == pitch_local.move_start_ms) {
+                pitch_motion_.current_deg = new_pitch_current;
+            }
             if (!new_pitch_moving && pitch_motion_.target_deg == pitch_local.target_deg
                 && pitch_motion_.move_start_ms == pitch_local.move_start_ms) {
                 pitch_motion_.moving = false;
@@ -1432,16 +1473,12 @@ private:
             [this](const PropertyList& properties) -> ReturnValue {
                 int yaw = properties["yaw"].value<int>();
                 int pitch = properties["pitch"].value<int>();
-                int yaw_pos = 460 + yaw * 16 / 5;
-                int pitch_pos = 620 + pitch * 16 / 5;
-                if (yaw_pos < 0) yaw_pos = 0;
-                if (yaw_pos > 1000) yaw_pos = 1000;
-                if (pitch_pos < 0) pitch_pos = 0;
-                if (pitch_pos > 1000) pitch_pos = 1000;
+                int yaw_pos = YawDegToPos(yaw);
+                int pitch_pos = PitchDegToPos(pitch);
                 WriteHeadAngles(yaw, pitch);
                 bool yaw_motion_started = false;
                 bool pitch_motion_started = false;
-                if (motion_mutex_ != nullptr) {
+                if (servo_ok_) {
                     xSemaphoreTake(motion_mutex_, portMAX_DELAY);
                     yaw_motion_started = yaw_motion_.moving;
                     pitch_motion_started = pitch_motion_.moving;
@@ -1465,12 +1502,12 @@ private:
             "Get the current head angles (yaw, pitch) of the robot in degrees.",
             PropertyList(),
             [this](const PropertyList& properties) -> ReturnValue {
-                if (scs_bus_mutex_ != nullptr) {
+                int yaw_pos = -1;
+                int pitch_pos = -1;
+                if (servo_ok_) {
                     xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
-                }
-                int yaw_pos = scs_bus_.ReadPos(SERVO_YAW_ID);
-                int pitch_pos = scs_bus_.ReadPos(SERVO_PITCH_ID);
-                if (scs_bus_mutex_ != nullptr) {
+                    yaw_pos = scs_bus_.ReadPos(SERVO_YAW_ID);
+                    pitch_pos = scs_bus_.ReadPos(SERVO_PITCH_ID);
                     xSemaphoreGive(scs_bus_mutex_);
                 }
                 int yaw = (yaw_pos - 460) * 5 / 16;
@@ -1532,27 +1569,41 @@ private:
             "self.robot.uart_diag",
             "Diagnostic: send raw 8 bytes (FF FF 01 04 03 E8 00 00) directly via uart_write_bytes. Returns sent byte count and rx buffer length before/after.",
             PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
+            [this](const PropertyList& properties) -> ReturnValue {
                 cJSON* root = cJSON_CreateObject();
 
                 size_t buf_before = 0;
-                esp_err_t err_b = uart_get_buffered_data_len(SERVO_UART_NUM, &buf_before);
+                esp_err_t err_b = ESP_ERR_INVALID_STATE;
+                int written = -1;
+                esp_err_t err_wait = ESP_ERR_INVALID_STATE;
+                esp_err_t err_a = ESP_ERR_INVALID_STATE;
+                size_t buf_after = 0;
+                const uint8_t bytes[] = {0xFF, 0xFF, 0x01, 0x04, 0x03, 0xE8, 0x00, 0x00};
+
+                if (servo_ok_) {
+                    xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
+
+                    err_b = uart_get_buffered_data_len(SERVO_UART_NUM, &buf_before);
+
+                    written = uart_write_bytes(SERVO_UART_NUM, (const char*)bytes, sizeof(bytes));
+
+                    // Wait for TX FIFO drain
+                    err_wait = uart_wait_tx_done(SERVO_UART_NUM, pdMS_TO_TICKS(100));
+
+                    vTaskDelay(pdMS_TO_TICKS(20));
+
+                    err_a = uart_get_buffered_data_len(SERVO_UART_NUM, &buf_after);
+
+                    xSemaphoreGive(scs_bus_mutex_);
+                }
                 cJSON_AddStringToObject(root, "buf_before_status", esp_err_to_name(err_b));
                 cJSON_AddNumberToObject(root, "buf_before", buf_before);
 
-                const uint8_t bytes[] = {0xFF, 0xFF, 0x01, 0x04, 0x03, 0xE8, 0x00, 0x00};
-                int written = uart_write_bytes(SERVO_UART_NUM, (const char*)bytes, sizeof(bytes));
                 cJSON_AddNumberToObject(root, "written", written);
                 cJSON_AddNumberToObject(root, "expected", (int)sizeof(bytes));
 
-                // Wait for TX FIFO drain
-                esp_err_t err_wait = uart_wait_tx_done(SERVO_UART_NUM, pdMS_TO_TICKS(100));
                 cJSON_AddStringToObject(root, "tx_done_status", esp_err_to_name(err_wait));
 
-                vTaskDelay(pdMS_TO_TICKS(20));
-
-                size_t buf_after = 0;
-                esp_err_t err_a = uart_get_buffered_data_len(SERVO_UART_NUM, &buf_after);
                 cJSON_AddStringToObject(root, "buf_after_status", esp_err_to_name(err_a));
                 cJSON_AddNumberToObject(root, "buf_after", buf_after);
 
