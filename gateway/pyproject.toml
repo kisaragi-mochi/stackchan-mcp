@@ -40,6 +40,7 @@ Issues = "https://github.com/kisaragi-mochi/stackchan-mcp/issues"
 dev = [
     "pytest",
     "pytest-asyncio",
+    "ruff>=0.15.12",
 ]
 
 [build-system]
