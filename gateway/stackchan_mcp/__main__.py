@@ -7,7 +7,6 @@ Starts the two-faced gateway:
 
 import asyncio
 import logging
-import os
 
 from dotenv import load_dotenv
 

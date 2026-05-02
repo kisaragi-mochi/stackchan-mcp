@@ -1,0 +1,73 @@
+name: Build
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware-build:
+    name: Firmware build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build firmware with ESP-IDF Docker image
+        working-directory: firmware
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD":/project \
+            -w /project \
+            espressif/idf:v5.5.2 \
+            python ./scripts/release.py stackchan
+
+      - name: Check firmware artifacts
+        run: |
+          set -euo pipefail
+          test -f firmware/build/merged-binary.bin
+          test -f firmware/releases/v2.2.6_stackchan.zip
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stackchan-firmware-${{ github.sha }}
+          retention-days: 7
+          path: |
+            firmware/build/merged-binary.bin
+            firmware/releases/v2.2.6_stackchan.zip
+
+  gateway-test:
+    name: Gateway test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: Install gateway dependencies
+        working-directory: gateway
+        run: uv sync --frozen
+
+      - name: Run ruff
+        working-directory: gateway
+        run: uv run ruff check .
+
+      - name: Run pytest
+        working-directory: gateway
+        run: uv run pytest

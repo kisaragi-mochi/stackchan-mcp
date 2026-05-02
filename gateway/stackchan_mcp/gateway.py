@@ -7,7 +7,6 @@ This module orchestrates both sides.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 
