@@ -19,6 +19,9 @@
 #include <esp_lcd_ili9341.h>
 #include <esp_timer.h>
 #include <esp_random.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 #include "esp_video.h"
 #include <cJSON.h>
 #include <lvgl.h>
@@ -481,6 +484,28 @@ private:
     int servo_wobble_step_ = 0;       // 0..3 sequence index
     bool servo_wobble_active_ = false;
 
+    // Issue #1: Servo motion task — interpolate WritePos to avoid SCS0009 bus
+    // collisions on large-angle reversals. A dedicated FreeRTOS task ticks at
+    // MOTION_TICK_MS, walks current_deg → target_deg over move_duration_ms, and
+    // issues short MOTION_PER_WRITE_TIME_MS WritePos commands so the servo never
+    // receives a discontinuous jump.
+    struct AxisMotion {
+        int target_deg = 0;
+        int start_deg = 0;
+        int current_deg = 0;
+        uint32_t move_start_ms = 0;
+        uint32_t move_duration_ms = 0;
+        bool moving = false;
+    };
+    AxisMotion yaw_motion_;
+    AxisMotion pitch_motion_;
+    SemaphoreHandle_t motion_mutex_ = nullptr;     // protects AxisMotion fields
+    SemaphoreHandle_t scs_bus_mutex_ = nullptr;    // serializes UART access (WritePos/ReadPos)
+    TaskHandle_t servo_task_handle_ = nullptr;
+    static constexpr uint32_t MOTION_TICK_MS = 20;
+    static constexpr uint32_t MOTION_DEFAULT_DURATION_MS = 600;
+    static constexpr uint32_t MOTION_PER_WRITE_TIME_MS = 30;
+
     void InitializePowerSaveTimer() {
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
@@ -770,6 +795,35 @@ private:
         // every WritePos after the first one ("starts moving once, then
         // never again" symptom).
         ESP_LOGI(TAG, "Servo bus init: %s (Level=1, ACK enabled)", servo_ok_ ? "OK" : "FAILED");
+
+        if (servo_ok_) {
+            motion_mutex_ = xSemaphoreCreateMutex();
+            scs_bus_mutex_ = xSemaphoreCreateMutex();
+
+            int yaw_pos_actual = scs_bus_.ReadPos(SERVO_YAW_ID);
+            int pitch_pos_actual = scs_bus_.ReadPos(SERVO_PITCH_ID);
+            if (yaw_pos_actual >= 0) {
+                yaw_motion_.current_deg = (yaw_pos_actual - 460) * 5 / 16;
+                ESP_LOGI(TAG, "Restored yaw_motion_.current_deg=%d from ReadPos=%d",
+                         yaw_motion_.current_deg, yaw_pos_actual);
+            } else {
+                ESP_LOGW(TAG, "Failed to ReadPos(yaw); current_deg stays at 0");
+            }
+            if (pitch_pos_actual >= 0) {
+                pitch_motion_.current_deg = (pitch_pos_actual - 620) * 5 / 16;
+                ESP_LOGI(TAG, "Restored pitch_motion_.current_deg=%d from ReadPos=%d",
+                         pitch_motion_.current_deg, pitch_pos_actual);
+            } else {
+                ESP_LOGW(TAG, "Failed to ReadPos(pitch); current_deg stays at 0");
+            }
+
+            BaseType_t ok = xTaskCreate(&StackChanBoard::ServoTaskTrampoline,
+                                        "servo_motion", 4096, this, 5,
+                                        &servo_task_handle_);
+            if (ok != pdPASS) {
+                ESP_LOGE(TAG, "Failed to create servo_motion task");
+            }
+        }
     }
 
     // ---- Phase 7: head-touch (Si12T) sensing + reaction ----------------
@@ -777,20 +831,32 @@ private:
     // Convenience wrapper around the existing servo write path. Mirrors the
     // math used in the self.robot.set_head_angles MCP tool so that touch
     // reactions and explicit MCP calls produce identical motion.
-    void WriteHeadAngles(int yaw_deg, int pitch_deg) {
-        int yaw_pos = 460 + yaw_deg * 16 / 5;
-        int pitch_pos = 620 + pitch_deg * 16 / 5;
-        if (yaw_pos < 0) yaw_pos = 0;
-        if (yaw_pos > 1000) yaw_pos = 1000;
-        if (pitch_pos < 0) pitch_pos = 0;
-        if (pitch_pos > 1000) pitch_pos = 1000;
-        scs_bus_.WritePos(SERVO_YAW_ID, yaw_pos, 100, 0);
-        // Inter-frame gap: SCS0009 needs a few ms between half-duplex frames
-        // even with Level=1 ACK wait. Empirically without this delay, the
-        // pitch WritePos can collide with the yaw servo's still-in-progress
-        // motion and time out, hanging the bus until power cycle.
-        vTaskDelay(pdMS_TO_TICKS(10));
-        scs_bus_.WritePos(SERVO_PITCH_ID, pitch_pos, 100, 0);
+    //
+    // Issue #1: previously this issued WritePos(id, pos, 100, 0) directly,
+    // which hung the SCS0009 bus on large-angle reversals (the second
+    // servo's frame collided with the first servo still being driven).
+    // Now it sets the target and lets the servo_motion task interpolate.
+    void WriteHeadAngles(int yaw_deg, int pitch_deg,
+                         uint32_t duration_ms = MOTION_DEFAULT_DURATION_MS) {
+        if (!servo_ok_) {
+            ESP_LOGW(TAG, "WriteHeadAngles skipped: servo not initialized");
+            return;
+        }
+        uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+
+        xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+        yaw_motion_.target_deg = yaw_deg;
+        yaw_motion_.start_deg = yaw_motion_.current_deg;
+        yaw_motion_.move_start_ms = now_ms;
+        yaw_motion_.move_duration_ms = duration_ms;
+        yaw_motion_.moving = (yaw_motion_.target_deg != yaw_motion_.current_deg);
+
+        pitch_motion_.target_deg = pitch_deg;
+        pitch_motion_.start_deg = pitch_motion_.current_deg;
+        pitch_motion_.move_start_ms = now_ms;
+        pitch_motion_.move_duration_ms = duration_ms;
+        pitch_motion_.moving = (pitch_motion_.target_deg != pitch_motion_.current_deg);
+        xSemaphoreGive(motion_mutex_);
     }
 
     // Servo wobble: yaw -A -> +A -> -A -> 0, each step SERVO_WOBBLE_STEP_MS.
@@ -803,10 +869,10 @@ private:
     void ServoWobbleStepAdvance() {
         const int A = SERVO_WOBBLE_AMPLITUDE_DEG;
         switch (servo_wobble_step_) {
-            case 0: WriteHeadAngles(-A, 0); break;
-            case 1: WriteHeadAngles(+A, 0); break;
-            case 2: WriteHeadAngles(-A, 0); break;
-            case 3: WriteHeadAngles(  0, 0); break;
+            case 0: WriteHeadAngles(-A, 0, SERVO_WOBBLE_STEP_MS); break;
+            case 1: WriteHeadAngles(+A, 0, SERVO_WOBBLE_STEP_MS); break;
+            case 2: WriteHeadAngles(-A, 0, SERVO_WOBBLE_STEP_MS); break;
+            case 3: WriteHeadAngles(  0, 0, SERVO_WOBBLE_STEP_MS); break;
             default:
                 servo_wobble_active_ = false;
                 return;
@@ -843,6 +909,94 @@ private:
         servo_wobble_active_ = true;
         // Kick off the first step immediately.
         ServoWobbleStepAdvance();
+    }
+
+    static void ServoTaskTrampoline(void* arg) {
+        static_cast<StackChanBoard*>(arg)->ServoTaskMain();
+    }
+
+    void ServoTaskMain() {
+        constexpr TickType_t kInterFrameGap = pdMS_TO_TICKS(10);
+
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(MOTION_TICK_MS));
+
+            AxisMotion yaw_local;
+            AxisMotion pitch_local;
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            yaw_local = yaw_motion_;
+            pitch_local = pitch_motion_;
+            xSemaphoreGive(motion_mutex_);
+
+            if (!yaw_local.moving && !pitch_local.moving) continue;
+
+            uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+
+            int new_yaw_current = yaw_local.current_deg;
+            bool new_yaw_moving = yaw_local.moving;
+            if (yaw_local.moving) {
+                uint32_t elapsed = now_ms - yaw_local.move_start_ms;
+                if (elapsed >= yaw_local.move_duration_ms) {
+                    new_yaw_current = yaw_local.target_deg;
+                    new_yaw_moving = false;
+                } else {
+                    int delta = yaw_local.target_deg - yaw_local.start_deg;
+                    new_yaw_current = yaw_local.start_deg +
+                        static_cast<int>(static_cast<int64_t>(delta) * elapsed / yaw_local.move_duration_ms);
+                }
+            }
+
+            int new_pitch_current = pitch_local.current_deg;
+            bool new_pitch_moving = pitch_local.moving;
+            if (pitch_local.moving) {
+                uint32_t elapsed = now_ms - pitch_local.move_start_ms;
+                if (elapsed >= pitch_local.move_duration_ms) {
+                    new_pitch_current = pitch_local.target_deg;
+                    new_pitch_moving = false;
+                } else {
+                    int delta = pitch_local.target_deg - pitch_local.start_deg;
+                    new_pitch_current = pitch_local.start_deg +
+                        static_cast<int>(static_cast<int64_t>(delta) * elapsed / pitch_local.move_duration_ms);
+                }
+            }
+
+            xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
+            if (yaw_local.moving) {
+                int yaw_pos = 460 + new_yaw_current * 16 / 5;
+                if (yaw_pos < 0) yaw_pos = 0;
+                if (yaw_pos > 1000) yaw_pos = 1000;
+                int r = scs_bus_.WritePos(SERVO_YAW_ID, yaw_pos, MOTION_PER_WRITE_TIME_MS, 0);
+                if (r <= 0) {
+                    ESP_LOGW(TAG, "Motion yaw WritePos failed: r=%d (deg=%d, pos=%d)",
+                             r, new_yaw_current, yaw_pos);
+                }
+            }
+            vTaskDelay(kInterFrameGap);
+            if (pitch_local.moving) {
+                int pitch_pos = 620 + new_pitch_current * 16 / 5;
+                if (pitch_pos < 0) pitch_pos = 0;
+                if (pitch_pos > 1000) pitch_pos = 1000;
+                int r = scs_bus_.WritePos(SERVO_PITCH_ID, pitch_pos, MOTION_PER_WRITE_TIME_MS, 0);
+                if (r <= 0) {
+                    ESP_LOGW(TAG, "Motion pitch WritePos failed: r=%d (deg=%d, pos=%d)",
+                             r, new_pitch_current, pitch_pos);
+                }
+            }
+            xSemaphoreGive(scs_bus_mutex_);
+
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            yaw_motion_.current_deg = new_yaw_current;
+            if (!new_yaw_moving && yaw_motion_.target_deg == yaw_local.target_deg
+                && yaw_motion_.move_start_ms == yaw_local.move_start_ms) {
+                yaw_motion_.moving = false;
+            }
+            pitch_motion_.current_deg = new_pitch_current;
+            if (!new_pitch_moving && pitch_motion_.target_deg == pitch_local.target_deg
+                && pitch_motion_.move_start_ms == pitch_local.move_start_ms) {
+                pitch_motion_.moving = false;
+            }
+            xSemaphoreGive(motion_mutex_);
+        }
     }
 
     // Schedule a single-shot revert to "idle" face REACTION_HOLD_MS later.
@@ -1284,18 +1438,24 @@ private:
                 if (yaw_pos > 1000) yaw_pos = 1000;
                 if (pitch_pos < 0) pitch_pos = 0;
                 if (pitch_pos > 1000) pitch_pos = 1000;
-                int r1 = scs_bus_.WritePos(SERVO_YAW_ID, yaw_pos, 100, 0);
-                vTaskDelay(pdMS_TO_TICKS(10));  // SCS0009 inter-frame gap
-                int r2 = scs_bus_.WritePos(SERVO_PITCH_ID, pitch_pos, 100, 0);
-                ESP_LOGI(TAG, "set_head_angles: yaw=%d (pos=%d) r=%d, pitch=%d (pos=%d) r=%d, uart=%d, servo_ok=%d",
-                         yaw, yaw_pos, r1, pitch, pitch_pos, r2, (int)scs_bus_.uart_num, servo_ok_);
+                WriteHeadAngles(yaw, pitch);
+                bool yaw_motion_started = false;
+                bool pitch_motion_started = false;
+                if (motion_mutex_ != nullptr) {
+                    xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+                    yaw_motion_started = yaw_motion_.moving;
+                    pitch_motion_started = pitch_motion_.moving;
+                    xSemaphoreGive(motion_mutex_);
+                }
+                ESP_LOGI(TAG, "set_head_angles: yaw=%d (pos=%d) motion_started=%d, pitch=%d (pos=%d) motion_started=%d, uart=%d, servo_ok=%d",
+                         yaw, yaw_pos, yaw_motion_started, pitch, pitch_pos, pitch_motion_started, (int)scs_bus_.uart_num, servo_ok_);
                 cJSON* root = cJSON_CreateObject();
                 cJSON_AddBoolToObject(root, "servo_init_ok", servo_ok_);
                 cJSON_AddNumberToObject(root, "uart_num", (int)scs_bus_.uart_num);
                 cJSON_AddNumberToObject(root, "yaw_pos", yaw_pos);
                 cJSON_AddNumberToObject(root, "pitch_pos", pitch_pos);
-                cJSON_AddNumberToObject(root, "write_yaw", r1);
-                cJSON_AddNumberToObject(root, "write_pitch", r2);
+                cJSON_AddNumberToObject(root, "yaw_motion_started", yaw_motion_started ? 1 : 0);
+                cJSON_AddNumberToObject(root, "pitch_motion_started", pitch_motion_started ? 1 : 0);
                 return root;
             });
 
@@ -1305,8 +1465,14 @@ private:
             "Get the current head angles (yaw, pitch) of the robot in degrees.",
             PropertyList(),
             [this](const PropertyList& properties) -> ReturnValue {
+                if (scs_bus_mutex_ != nullptr) {
+                    xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
+                }
                 int yaw_pos = scs_bus_.ReadPos(SERVO_YAW_ID);
                 int pitch_pos = scs_bus_.ReadPos(SERVO_PITCH_ID);
+                if (scs_bus_mutex_ != nullptr) {
+                    xSemaphoreGive(scs_bus_mutex_);
+                }
                 int yaw = (yaw_pos - 460) * 5 / 16;
                 int pitch = (pitch_pos - 620) * 5 / 16;
                 cJSON* root = cJSON_CreateObject();
