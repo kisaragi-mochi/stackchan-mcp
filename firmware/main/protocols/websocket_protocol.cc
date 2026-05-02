@@ -87,6 +87,14 @@ bool WebsocketProtocol::OpenAudioChannel() {
     // legacy OTA-config code path is disabled in application.cc by design —
     // this firmware always speaks to a stackchan-mcp gateway directly.
     std::string url = settings.GetString("url");
+#ifdef CONFIG_DEFAULT_WEBSOCKET_URL
+    if (url.empty()) {
+        url = CONFIG_DEFAULT_WEBSOCKET_URL;
+        if (!url.empty()) {
+            ESP_LOGI(TAG, "NVS websocket.url empty; using build-time default from Kconfig: %s", url.c_str());
+        }
+    }
+#endif
     std::string token = settings.GetString("token");
     int version = settings.GetInt("version");
     if (version != 0) {

@@ -6,6 +6,21 @@ config OTA_URL
     help
         The application will access this URL to check for new firmwares and server address.
 
+config DEFAULT_WEBSOCKET_URL
+    string "Default WebSocket gateway URL (fallback when NVS is empty)"
+    default ""
+    help
+        WebSocket URL used when NVS websocket.url is empty (typically the
+        case on a freshly flashed device that has not been configured via
+        the WiFi config UI). Set this via `idf.py menuconfig` to bake a
+        default URL into the firmware so the device can connect to your
+        local stackchan-mcp gateway out of the box.
+
+        Example: ws://192.168.1.100:8765/
+
+        Leave empty to require explicit NVS configuration (the original
+        behavior).
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE
