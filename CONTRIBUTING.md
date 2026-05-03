@@ -44,8 +44,9 @@ Link the related issue in the PR body when there is one.
 
 ## Pull Requests
 
-Use the pull request template in `.github/PULL_REQUEST_TEMPLATE.md`. Fill it in
-rather than deleting sections. A good PR should include:
+Use the pull request template in `.github/PULL_REQUEST_TEMPLATE.md`. It is a
+guide, not a gate. Fill in what you know, leave boxes unchecked when they do
+not apply, and explain anything you could not test.
 
 - Summary: what changed and why
 - Test plan: checks that passed, plus any checks intentionally skipped
@@ -65,8 +66,9 @@ pushes to `main`. It currently verifies:
   `espressif/idf:v5.5.2`
 - Gateway: `uv sync --frozen`, `uv run ruff check .`, and `uv run pytest`
 
-CI is the shared baseline, but it does not replace real hardware testing for
-firmware changes.
+CI is the shared baseline. For firmware changes, real hardware testing is still
+needed before merge, but contributors without hardware are welcome to open PRs
+and ask for maintainer verification.
 
 ## Gateway Checks
 
@@ -99,9 +101,14 @@ may build a different board configuration.
 
 ## Hardware Test Requirement
 
-Any pull request that changes `firmware/` must be flashed to and verified on
-real StackChan hardware before it is ready for review. Building without
-flashing is useful, but it is not sufficient for firmware behavior changes.
+Firmware changes should be flashed to and verified on real StackChan hardware
+before merge. Building without flashing is useful, but it is not sufficient as
+the final verification for firmware behavior changes.
+
+If you do not have hardware, you can still open a PR. Mark the Hardware section
+as not available and describe the code-level checks you did run. A maintainer
+can help decide whether to verify it on a device, keep it as a draft, or split
+out a smaller change.
 
 In the PR template's Hardware section, document what you verified. At minimum:
 
@@ -109,8 +116,8 @@ In the PR template's Hardware section, document what you verified. At minimum:
 - Existing MCP tools still work for the affected area
 - New firmware behavior is tested on the real device
 
-Gateway-only and documentation-only PRs do not require hardware testing. Write
-`N/A - gateway/docs only` in the Hardware section.
+Gateway-only and documentation-only PRs do not require hardware testing. Mark
+the Hardware section as not applicable.
 
 ## Do Not Commit Local Secrets
 
