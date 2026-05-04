@@ -206,6 +206,8 @@ These local files are ignored by git. When `avatar_images.local.cc` exists, the 
 
 The tracked `avatar_images.cc` / `avatar_images.h` files are public placeholder files. Maintainers who intentionally need to refresh those tracked files can pass `--tracked`, but personal avatars should use the default local output path.
 
+If you add a local avatar after you have already built the firmware once, remove `firmware/build/` and rebuild so CMake can pick up the new local override.
+
 Symbol list (see `avatar_images.h`):
 - Expressions (6): `avatar_idle`, `avatar_happy`, `avatar_thinking`, `avatar_sad`, `avatar_surprised`, `avatar_embarrassed`
 - Eyes (3): `avatar_eyes_open`, `avatar_eyes_half`, `avatar_eyes_closed`

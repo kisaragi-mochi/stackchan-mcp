@@ -183,6 +183,8 @@ python scripts/avatar_convert/convert_avatars.py
 
 追跡対象の `avatar_images.cc` / `avatar_images.h` は公開Repo用のプレースホルダです。メンテナが意図してこれらを更新する場合だけ `--tracked` を指定できますが、個人用アバターでは既定のローカル出力先を使ってください。
 
+すでに一度 firmware をビルドしたあとにローカルアバターを追加した場合は、CMake が新しい override を拾えるように `firmware/build/` を削除してから再ビルドしてください。
+
 シンボル一覧 (`avatar_images.h` 参照):
 - 表情系 (6): `avatar_idle`, `avatar_happy`, `avatar_thinking`, `avatar_sad`, `avatar_surprised`, `avatar_embarrassed`
 - 目 (3): `avatar_eyes_open`, `avatar_eyes_half`, `avatar_eyes_closed`
