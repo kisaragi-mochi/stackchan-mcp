@@ -76,11 +76,14 @@ class ESP32Connection:
             self._pending.pop(req_id, None)
             return None, {"code": -32000, "message": f"ESP32 communication error: {exc}"}
 
-    async def initialize(self, vision_url: str = "") -> bool:
+    async def initialize(self, vision_url: str = "", vision_token: str = "") -> bool:
         """Send MCP initialize to ESP32."""
         capabilities: dict[str, Any] = {}
         if vision_url:
-            capabilities["vision"] = {"url": vision_url}
+            vision: dict[str, Any] = {"url": vision_url}
+            if vision_token:
+                vision["token"] = vision_token
+            capabilities["vision"] = vision
         result, error = await self.send_mcp_request("initialize", {"capabilities": capabilities})
         if error:
             logger.error("ESP32 initialize failed: %s", error)
@@ -163,6 +166,7 @@ class ESP32Manager:
         self._lock = asyncio.Lock()
         self._init_tasks: list[asyncio.Task] = []
         self._vision_url: str = ""
+        self._vision_token: str = ""
 
     @property
     def device_connected(self) -> bool:
@@ -173,10 +177,15 @@ class ESP32Manager:
         return self._connection
 
     async def start(
-        self, host: str = "0.0.0.0", port: int = 8765, vision_url: str = ""
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8765,
+        vision_url: str = "",
+        vision_token: str = "",
     ) -> None:
         """Start the WebSocket server for ESP32 connections."""
         self._vision_url = vision_url
+        self._vision_token = vision_token
         logger.info("ESP32 WebSocket server starting on ws://%s:%d", host, port)
         self._server = await websockets.serve(
             self._handler,
@@ -291,7 +300,10 @@ class ESP32Manager:
 
     async def _init_device(self, connection: ESP32Connection, device_id: str) -> None:
         """Initialize MCP session with a newly connected device."""
-        if await connection.initialize(vision_url=self._vision_url):
+        if await connection.initialize(
+            vision_url=self._vision_url,
+            vision_token=self._vision_token,
+        ):
             await connection.discover_tools()
             logger.info(
                 "ESP32 ready: device=%s tools=%d",

@@ -27,6 +27,8 @@ Edit `.env`:
 - `STACKCHAN_TOKEN`: Bearer token for ESP32 auth (must match firmware setting)
 - `VISION_URL`: full public capture URL for remote access tunnels, such as
   `https://stackchan.example.ts.net:8443/capture`
+- `VISION_TOKEN`: optional separate Bearer token for capture uploads; if empty,
+  `STACKCHAN_TOKEN` is reused
 - `VISION_HOST`: LAN IP of this machine, as seen from the ESP32
   (something like `192.168.x.y` on a typical home network — run `ifconfig`
   or `ip addr` to find it). Required for `take_photo` when `VISION_URL` is not

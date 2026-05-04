@@ -59,6 +59,21 @@ class Gateway:
         port = int(os.getenv("CAPTURE_PORT", "8766"))
         return f"http://{host}:{port}/capture"
 
+    @property
+    def vision_token(self) -> str:
+        """Bearer token expected by the capture endpoint.
+
+        VISION_TOKEN can be set separately. By default, reuse the ESP32
+        WebSocket token so remote capture uploads are protected whenever the
+        gateway itself is protected.
+        """
+        return (
+            os.getenv("VISION_TOKEN")
+            or os.getenv("STACKCHAN_TOKEN")
+            or os.getenv("BEARER_TOKEN")
+            or ""
+        )
+
     async def start(self) -> None:
         """Start the ESP32 WebSocket server and HTTP capture server."""
         host = os.getenv("HOST", "0.0.0.0")
@@ -66,10 +81,15 @@ class Gateway:
         capture_port = int(os.getenv("CAPTURE_PORT", "8766"))
 
         # Start WebSocket server for ESP32
-        await self.esp32.start(host, ws_port, vision_url=self.vision_url)
+        await self.esp32.start(
+            host,
+            ws_port,
+            vision_url=self.vision_url,
+            vision_token=self.vision_token,
+        )
 
         # Start HTTP capture server
-        app = create_capture_app()
+        app = create_capture_app(capture_token=self.vision_token)
         self._http_runner = web.AppRunner(app)
         await self._http_runner.setup()
         site = web.TCPSite(self._http_runner, host, capture_port)

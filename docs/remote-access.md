@@ -8,7 +8,8 @@ The recommended first path is Tailscale Funnel:
 - no firmware feature work is required
 - the ESP32 connects to a public `wss://...ts.net` gateway URL
 - the gateway still verifies the ESP32 bearer token with `STACKCHAN_TOKEN`
-- photo uploads can use a second Funnel URL through `VISION_URL`
+- photo uploads can use a second Funnel URL through `VISION_URL` and are
+  protected with `VISION_TOKEN` or, by default, `STACKCHAN_TOKEN`
 
 Tailscale Funnel publishes local services on a device in your tailnet to the
 public internet over HTTPS. It requires Tailscale CLI support, MagicDNS, HTTPS
@@ -51,11 +52,12 @@ stackchan-mcp capture server :8766
 Funnel makes the selected service public. Keep `STACKCHAN_TOKEN` set and use a
 strong token for the WebSocket gateway.
 
-The `/capture` endpoint is a separate HTTP upload endpoint and does not
-currently enforce the ESP32 bearer token by itself. If you expose it with
-Funnel, treat the capture URL as public while the Funnel listener is enabled,
-turn it off when it is not needed, and do not expose captured photos or other
-user data in git.
+The `/capture` endpoint is a separate HTTP upload endpoint. Keep
+`STACKCHAN_TOKEN` set so the gateway can pass a bearer token to the ESP32 for
+photo uploads, or set `VISION_TOKEN` if you want a separate capture token. If
+you expose capture with Funnel, still treat the URL as public while the Funnel
+listener is enabled, turn it off when it is not needed, and do not expose
+captured photos or other user data in git.
 
 Do not publish personal tokens, LAN IP addresses, WiFi credentials, `.env`
 files, captures, or local firmware override files.
@@ -78,11 +80,15 @@ WS_PORT=8765
 CAPTURE_PORT=8766
 
 VISION_URL=https://<node>.<tailnet>.ts.net:8443/capture
+# Optional: leave empty to reuse STACKCHAN_TOKEN.
+VISION_TOKEN=
 ```
 
 `VISION_URL` is the full URL sent to the ESP32 for `take_photo` uploads. Use it
-for remote tunnel setups. `VISION_HOST` remains useful for LAN-only setups where
-the capture URL is `http://<lan-ip>:8766/capture`.
+for remote tunnel setups. `VISION_TOKEN` is sent to the ESP32 as the capture
+upload bearer token; if it is empty, the gateway reuses `STACKCHAN_TOKEN`.
+`VISION_HOST` remains useful for LAN-only setups where the capture URL is
+`http://<lan-ip>:8766/capture`.
 
 Start the gateway:
 

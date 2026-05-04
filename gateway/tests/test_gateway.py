@@ -41,6 +41,27 @@ def test_vision_url_uses_lan_host(monkeypatch):
     assert gw.vision_url == "http://192.0.2.10:8766/capture"
 
 
+def test_vision_token_prefers_explicit_token(monkeypatch):
+    """VISION_TOKEN can be separated from the WebSocket token."""
+    monkeypatch.setenv("VISION_TOKEN", "capture-token")
+    monkeypatch.setenv("STACKCHAN_TOKEN", "ws-token")
+
+    gw = Gateway()
+
+    assert gw.vision_token == "capture-token"
+
+
+def test_vision_token_falls_back_to_stackchan_token(monkeypatch):
+    """Capture uploads use the gateway token by default."""
+    monkeypatch.delenv("VISION_TOKEN", raising=False)
+    monkeypatch.setenv("STACKCHAN_TOKEN", "ws-token")
+    monkeypatch.setenv("BEARER_TOKEN", "legacy-token")
+
+    gw = Gateway()
+
+    assert gw.vision_token == "ws-token"
+
+
 @pytest.mark.asyncio
 async def test_gateway_start_stop(monkeypatch):
     """Gateway can start and stop."""

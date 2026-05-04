@@ -20,10 +20,27 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 CAPTURE_DIR = os.path.expanduser("~/.stackchan/captures")
+CAPTURE_TOKEN_KEY = web.AppKey("capture_token", str)
+
+
+def _is_authorized(auth_header: str, expected_token: str) -> bool:
+    """Return whether the bearer auth header matches the expected token."""
+    return auth_header == f"Bearer {expected_token}"
 
 
 async def handle_capture(request: web.Request) -> web.Response:
     """Handle photo upload from ESP32."""
+    expected_token = request.app[CAPTURE_TOKEN_KEY]
+    if expected_token and not _is_authorized(
+        request.headers.get("Authorization", ""), expected_token
+    ):
+        logger.warning("Capture upload auth rejected")
+        return web.Response(
+            text='{"error": "Unauthorized"}',
+            status=401,
+            content_type="application/json",
+        )
+
     os.makedirs(CAPTURE_DIR, exist_ok=True)
 
     reader = await request.multipart()
@@ -66,8 +83,9 @@ async def handle_capture(request: web.Request) -> web.Response:
     )
 
 
-def create_capture_app() -> web.Application:
+def create_capture_app(capture_token: str = "") -> web.Application:
     """Create the HTTP capture application."""
     app = web.Application()
+    app[CAPTURE_TOKEN_KEY] = capture_token
     app.router.add_post("/capture", handle_capture)
     return app
