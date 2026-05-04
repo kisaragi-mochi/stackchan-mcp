@@ -1,6 +1,6 @@
 # Architecture
 
-Target hardware: **M5Stack 公式 [StackChan](https://docs.m5stack.com/ja/StackChan)** kit (Kickstarter 2025 出荷版). The diagrams below describe how this repo's gateway and firmware bridge an MCP client to that kit.
+Target hardware: **M5Stack official [StackChan](https://docs.m5stack.com/ja/StackChan)** kit (2025 Kickstarter shipping version). The diagrams below describe how this repo's gateway and firmware bridge an MCP client to that kit.
 
 ## Component overview
 

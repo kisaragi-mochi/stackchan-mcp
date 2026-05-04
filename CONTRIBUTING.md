@@ -166,12 +166,23 @@ Significant firmware changes should receive especially careful review for race
 conditions, resource lifetime, boot behavior, NVS compatibility, and hardware
 failure modes.
 
-## Communication
+## Documentation Language
 
-Issue and PR descriptions should use English as the baseline. Japanese mixed
-in is fine where it helps the StackChan community, but public technical context
-should remain understandable to international contributors. Code comments
-should be in English.
+The top-level user guide is maintained in both English and Japanese:
+
+- `README.md`: English entry point for international contributors
+- `README.ja.md`: Japanese entry point for the StackChan community
+
+Developer-facing subdocuments such as `gateway/README.md`, `docs/*.md`, issue
+templates, and pull request templates should use English as the baseline. Add a
+Japanese companion file only when a document has clear end-user value for the
+Japanese community and can be kept reasonably in sync.
+
+Keep code comments, public issue descriptions, and pull request descriptions in
+English unless Japanese is needed for a hardware name, quoted source, or
+community-specific term.
+
+## Communication
 
 Be polite and concrete. This is a small hardware community, and clear technical
 notes help the next person reproduce what happened.

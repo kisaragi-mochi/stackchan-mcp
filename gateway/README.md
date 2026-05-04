@@ -1,11 +1,11 @@
 # gateway
 
-Python "two-faced" MCP gateway for the **M5Stack 公式 [StackChan](https://docs.m5stack.com/ja/StackChan)** kit (custom [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) firmware in [`../firmware/main/boards/stackchan/`](../firmware/main/boards/stackchan/)).
+Python "two-faced" MCP gateway for the **M5Stack official [StackChan](https://docs.m5stack.com/ja/StackChan)** kit (custom [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) firmware in [`../firmware/main/boards/stackchan/`](../firmware/main/boards/stackchan/)).
 
 ```
 ┌─────────────┐  stdio MCP  ┌──────────────┐  WebSocket MCP  ┌──────────┐
 │ MCP client  │ ──────────▶ │   gateway    │ ──────────────▶ │  ESP32   │
-│ (Claude等)  │ ◀────────── │  (this dir)  │ ◀────────────── │ StackChan│
+│ (Claude...) │ ◀────────── │  (this dir)  │ ◀────────────── │ StackChan│
 └─────────────┘             │              │                 └──────────┘
                             │  /capture    │ ◀─ HTTP POST ──┘  (JPEG)
                             └──────────────┘
