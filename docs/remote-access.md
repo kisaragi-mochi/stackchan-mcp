@@ -104,7 +104,7 @@ On the same host as the gateway, enable two Funnel listeners.
 Use port `443` for the WebSocket gateway:
 
 ```bash
-tailscale funnel --bg --tls-terminated-tcp=443 tcp://localhost:8765
+tailscale funnel --bg --https=443 http://localhost:8765
 ```
 
 Use port `8443` for the HTTP capture server:
@@ -127,7 +127,7 @@ The expected public endpoints are:
 To stop the listeners:
 
 ```bash
-tailscale funnel --tls-terminated-tcp=443 tcp://localhost:8765 off
+tailscale funnel --https=443 off
 tailscale funnel --https=8443 http://localhost:8766 off
 ```
 
