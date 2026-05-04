@@ -25,9 +25,12 @@ uv sync
 
 Edit `.env`:
 - `STACKCHAN_TOKEN`: Bearer token for ESP32 auth (must match firmware setting)
+- `VISION_URL`: full public capture URL for remote access tunnels, such as
+  `https://stackchan.example.ts.net:8443/capture`
 - `VISION_HOST`: LAN IP of this machine, as seen from the ESP32
   (something like `192.168.x.y` on a typical home network — run `ifconfig`
-  or `ip addr` to find it). Required for `take_photo`.
+  or `ip addr` to find it). Required for `take_photo` when `VISION_URL` is not
+  set.
 
 ## Run
 
@@ -38,6 +41,9 @@ uv run python -m stackchan_mcp
 Default ports:
 - WebSocket (ESP32 -> gateway): `0.0.0.0:8765`
 - HTTP capture (ESP32 -> gateway): `0.0.0.0:8766`
+
+For non-LAN setups, see [`../docs/remote-access.md`](../docs/remote-access.md)
+for the Tailscale Funnel flow.
 
 When you restart the gateway during development, an already-connected ESP32
 will notice the dropped WebSocket and retry while idle. The retry delay starts

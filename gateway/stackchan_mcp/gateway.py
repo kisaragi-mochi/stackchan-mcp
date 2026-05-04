@@ -36,18 +36,24 @@ class Gateway:
     def vision_url(self) -> str:
         """URL for ESP32 to POST captured photos to.
 
-        VISION_HOST should be the LAN IP of the host running this gateway,
-        as seen from the ESP32 (e.g. something like 192.168.x.y on a typical
-        home network). Falls back to "127.0.0.1" with a warning if unset; in
-        that case the ESP32 will not be able to reach the capture endpoint
-        over the network.
+        VISION_URL can be set to a complete public capture URL for remote
+        access setups such as Tailscale Funnel. Otherwise VISION_HOST should
+        be the LAN IP of the host running this gateway, as seen from the ESP32
+        (e.g. something like 192.168.x.y on a typical home network). Falls
+        back to "127.0.0.1" with a warning if unset; in that case the ESP32
+        will not be able to reach the capture endpoint over the network.
         """
+        explicit_url = os.getenv("VISION_URL")
+        if explicit_url:
+            return explicit_url
+
         host = os.getenv("VISION_HOST")
         if not host:
             logger.warning(
-                "VISION_HOST not set; defaulting to 127.0.0.1. "
+                "VISION_URL/VISION_HOST not set; defaulting to 127.0.0.1. "
                 "ESP32 will not reach the capture endpoint unless "
-                "VISION_HOST is set to this host's LAN IP."
+                "VISION_HOST is set to this host's LAN IP or VISION_URL is "
+                "set to a full capture URL."
             )
             host = "127.0.0.1"
         port = int(os.getenv("CAPTURE_PORT", "8766"))

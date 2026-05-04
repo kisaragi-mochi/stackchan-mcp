@@ -25,7 +25,7 @@
 |---|---|
 | `firmware/` | [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) フォーク全体（git subtree）。StackChan 用カスタムボードは `firmware/main/boards/stackchan/` に配置 |
 | `gateway/` | Python MCP ゲートウェイ。stdio MCP サーバー (LLM側) + WebSocket MCP クライアント (ESP32側) + HTTP capture サーバー |
-| `docs/` | [`architecture.md`](docs/architecture.md): 全体構成図・ツール名マッピング・写真フロー・認証・Phase ロードマップ。[`firmware-sync.md`](docs/firmware-sync.md): upstream xiaozhi-esp32 同期手順 |
+| `docs/` | [`architecture.md`](docs/architecture.md): 全体構成図・ツール名マッピング・写真フロー・認証・Phase ロードマップ。[`firmware-sync.md`](docs/firmware-sync.md): upstream xiaozhi-esp32 同期手順。[`remote-access.md`](docs/remote-access.md): Tailscale Funnel による非LAN接続手順 |
 
 ## 想定ハードウェア
 
@@ -141,6 +141,9 @@ uv run python -m stackchan_mcp
 ESP32 接続中にゲートウェイを再起動した場合、ファームウェアは idle 中に
 WebSocket 接続を自動再試行します。再試行間隔は 5 秒から始まり、最大 60 秒
 まで伸びます。デバイスが戻ったかどうかは `get_status` で確認できます。
+
+別ネットワークから使う場合は、Tailscale Funnel と `VISION_URL` による capture
+callback 設定を [`docs/remote-access.md`](docs/remote-access.md) にまとめています。
 
 ### 3. MCP クライアント登録 (Claude Code 例)
 

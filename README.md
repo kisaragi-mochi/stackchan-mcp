@@ -25,7 +25,7 @@ This repository is a monorepo.
 |---|---|
 | `firmware/` | Full git subtree of [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32). The custom StackChan board lives at `firmware/main/boards/stackchan/`. |
 | `gateway/` | Python MCP gateway. stdio MCP server (LLM side) + WebSocket MCP client (ESP32 side) + HTTP capture server. |
-| `docs/` | [`architecture.md`](docs/architecture.md): full component diagram, tool name mapping, photo flow, auth, phase roadmap. [`firmware-sync.md`](docs/firmware-sync.md): upstream xiaozhi-esp32 sync playbook. |
+| `docs/` | [`architecture.md`](docs/architecture.md): full component diagram, tool name mapping, photo flow, auth, phase roadmap. [`firmware-sync.md`](docs/firmware-sync.md): upstream xiaozhi-esp32 sync playbook. [`remote-access.md`](docs/remote-access.md): Tailscale Funnel setup for non-LAN use. |
 
 ## Target hardware
 
@@ -164,6 +164,9 @@ If the gateway is restarted while the ESP32 is already connected, the firmware
 automatically retries the WebSocket connection while idle. The retry delay starts
 at 5 seconds and backs off up to 60 seconds; use `get_status` to confirm that
 the device has reappeared.
+
+For non-LAN setups, see [`docs/remote-access.md`](docs/remote-access.md) for the
+Tailscale Funnel flow and the `VISION_URL` capture callback setting.
 
 ### 3. Register as an MCP client (Claude Code example)
 
