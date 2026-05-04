@@ -158,9 +158,19 @@ After the gateway, Funnel, and device settings are in place:
 1. Start the gateway.
 2. Start both Funnel listeners.
 3. Reboot or reset the StackChan device.
-4. Call `get_status` from the MCP client and confirm `connected=true`.
-5. Call `get_device_info`.
-6. Call `take_photo` and confirm the capture reaches the gateway.
+4. Press the StackChan main button to start a chat session. The firmware opens
+   the WebSocket connection when a session starts; an idle device may not appear
+   in `get_status` immediately after boot.
+5. Call `get_status` from the MCP client and confirm `connected=true`.
+6. Call `get_device_info`.
+7. Call `take_photo` and confirm the capture reaches the gateway.
+
+If the device and gateway are on the same physical LAN during validation, this
+still verifies that the firmware uses the public Funnel `wss://` URL, bearer
+auth, MCP initialization, and the authenticated capture callback. It does not
+prove behavior across every remote network path. For a stronger end-to-end
+remote proof, place the StackChan device on a different network, such as a phone
+hotspot, while keeping the gateway host behind Funnel.
 
 If `get_status` works but `take_photo` fails, the WebSocket path is working but
 the capture callback URL is wrong. Re-check `VISION_URL`, the `8443` Funnel
