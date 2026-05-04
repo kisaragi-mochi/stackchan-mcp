@@ -86,6 +86,7 @@ Same shape, under `mcpServers`.
 | `set_volume(volume)` | Speaker volume 0-100 |
 | `set_brightness(brightness)` | Screen brightness 0-100 |
 | `move_head(yaw, pitch, speed?)` | Drive yaw + pitch servos |
+| `get_head_angles` | Read current yaw + pitch servo angles |
 | `get_touch_state` | Touch sensor state (press/release/stroke) |
 | `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`) |
 | `set_blink(state)` | Blink animation on/off |

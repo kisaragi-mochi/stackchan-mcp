@@ -120,6 +120,14 @@ def create_server() -> Server:
                 },
             ),
             Tool(
+                name="get_head_angles",
+                description="Get the robot's current head angles: yaw and pitch in degrees.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
                 name="gpio_test",
                 description="Test GPIO6 pin by toggling HIGH/LOW 5 times. Check if servo reacts.",
                 inputSchema={"type": "object", "properties": {}},
@@ -254,6 +262,10 @@ def create_server() -> Server:
             "move_head": (
                 "self.robot.set_head_angles",
                 arguments,
+            ),
+            "get_head_angles": (
+                "self.robot.get_head_angles",
+                {},
             ),
             "gpio_test": (
                 "self.robot.gpio_test",
