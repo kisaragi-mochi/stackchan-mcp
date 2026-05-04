@@ -75,6 +75,16 @@ The token is set on both sides:
 - Gateway: `STACKCHAN_TOKEN` (or legacy `BEARER_TOKEN`) in `gateway/.env`
 - ESP32: configured via the xiaozhi-esp32 WiFi setup UI on first boot
 
+## Connection lifecycle
+
+The ESP32 is the WebSocket client and the gateway listens on port `8765`. If
+the gateway restarts, the existing socket drops. Firmware treats that as an
+audio-channel close, returns to idle, and retries the WebSocket connection in
+the background with bounded backoff from 5 seconds up to 60 seconds.
+
+Intentional device-side closes, such as ending a listening session, do not
+schedule this reconnect loop.
+
 ## Phase roadmap
 
 - **Phase 0**: stdio MCP shell, ESP32 WebSocket bridge, tool routing → done

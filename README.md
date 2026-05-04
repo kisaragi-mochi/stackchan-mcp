@@ -160,6 +160,11 @@ uv sync
 uv run python -m stackchan_mcp
 ```
 
+If the gateway is restarted while the ESP32 is already connected, the firmware
+automatically retries the WebSocket connection while idle. The retry delay starts
+at 5 seconds and backs off up to 60 seconds; use `get_status` to confirm that
+the device has reappeared.
+
 ### 3. Register as an MCP client (Claude Code example)
 
 Add to `~/.claude.json`:

@@ -138,6 +138,10 @@ uv sync
 uv run python -m stackchan_mcp
 ```
 
+ESP32 接続中にゲートウェイを再起動した場合、ファームウェアは idle 中に
+WebSocket 接続を自動再試行します。再試行間隔は 5 秒から始まり、最大 60 秒
+まで伸びます。デバイスが戻ったかどうかは `get_status` で確認できます。
+
 ### 3. MCP クライアント登録 (Claude Code 例)
 
 `~/.claude.json` に追加:

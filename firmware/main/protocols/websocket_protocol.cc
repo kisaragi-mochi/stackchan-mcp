@@ -8,16 +8,50 @@
 #include <cJSON.h>
 #include <esp_log.h>
 #include <arpa/inet.h>
+#include <algorithm>
 #include "assets/lang_config.h"
 
 #define TAG "WS"
 
 WebsocketProtocol::WebsocketProtocol() {
     event_group_handle_ = xEventGroupCreate();
+
+    esp_timer_create_args_t reconnect_timer_args = {
+        .callback = [](void* arg) {
+            auto protocol = static_cast<WebsocketProtocol*>(arg);
+            auto alive = protocol->alive_;
+            Application::GetInstance().Schedule([protocol, alive]() {
+                if (!*alive || !protocol->auto_reconnect_enabled_.load()) {
+                    return;
+                }
+
+                auto& app = Application::GetInstance();
+                if (app.GetDeviceState() != kDeviceStateIdle) {
+                    protocol->ScheduleReconnect();
+                    return;
+                }
+
+                ESP_LOGI(TAG, "Reconnecting to websocket server");
+                if (!protocol->OpenAudioChannelInternal(false)) {
+                    protocol->ScheduleReconnect();
+                }
+            });
+        },
+        .arg = this,
+    };
+    esp_timer_create(&reconnect_timer_args, &reconnect_timer_);
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
-    vEventGroupDelete(event_group_handle_);
+    *alive_ = false;
+    StopReconnectTimer();
+    if (reconnect_timer_ != nullptr) {
+        esp_timer_delete(reconnect_timer_);
+    }
+    websocket_.reset();
+    if (event_group_handle_ != nullptr) {
+        vEventGroupDelete(event_group_handle_);
+    }
 }
 
 bool WebsocketProtocol::Start() {
@@ -77,10 +111,24 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
+    auto_reconnect_enabled_.store(false);
+    StopReconnectTimer();
     websocket_.reset();
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
+    return OpenAudioChannelInternal(true);
+}
+
+bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
+    bool reconnect_was_enabled = auto_reconnect_enabled_.load();
+    auto_reconnect_enabled_.store(false);
+    StopReconnectTimer();
+    websocket_.reset();
+    auto_reconnect_enabled_.store(reconnect_was_enabled);
+    session_id_ = "";
+    xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
+
     Settings settings("websocket", false);
     // Read the gateway URL from NVS (set via the WiFi config UI's "websocket
     // url" field on first boot, e.g. "ws://<your-gateway-lan-ip>:8765"). The
@@ -216,17 +264,29 @@ bool WebsocketProtocol::OpenAudioChannel() {
     });
 
     websocket_->OnDisconnected([this]() {
+        if (on_disconnected_ != nullptr) {
+            on_disconnected_();
+        }
         ESP_LOGI(TAG, "Websocket disconnected");
         if (on_audio_channel_closed_ != nullptr) {
             on_audio_channel_closed_();
+        }
+        if (auto_reconnect_enabled_.load()) {
+            ScheduleReconnect();
         }
     });
 
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
     if (!websocket_->Connect(url.c_str())) {
         ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
-        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        if (report_error) {
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        }
         return false;
+    }
+
+    if (on_connected_ != nullptr) {
+        on_connected_();
     }
 
     // Send hello message to describe the client
@@ -239,15 +299,38 @@ bool WebsocketProtocol::OpenAudioChannel() {
     EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
-        SetError(Lang::Strings::SERVER_TIMEOUT);
+        if (report_error) {
+            SetError(Lang::Strings::SERVER_TIMEOUT);
+        }
         return false;
     }
+
+    auto_reconnect_enabled_.store(true);
+    reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
+    StopReconnectTimer();
 
     if (on_audio_channel_opened_ != nullptr) {
         on_audio_channel_opened_();
     }
 
     return true;
+}
+
+void WebsocketProtocol::ScheduleReconnect() {
+    if (reconnect_timer_ == nullptr || !auto_reconnect_enabled_.load()) {
+        return;
+    }
+
+    StopReconnectTimer();
+    ESP_LOGI(TAG, "Schedule websocket reconnect in %d seconds", reconnect_interval_ms_ / 1000);
+    esp_timer_start_once(reconnect_timer_, reconnect_interval_ms_ * 1000);
+    reconnect_interval_ms_ = std::min(reconnect_interval_ms_ * 2, WEBSOCKET_RECONNECT_MAX_INTERVAL_MS);
+}
+
+void WebsocketProtocol::StopReconnectTimer() {
+    if (reconnect_timer_ != nullptr) {
+        esp_timer_stop(reconnect_timer_);
+    }
 }
 
 std::string WebsocketProtocol::GetHelloMessage() {

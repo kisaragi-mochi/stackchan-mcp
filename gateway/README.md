@@ -39,6 +39,11 @@ Default ports:
 - WebSocket (ESP32 -> gateway): `0.0.0.0:8765`
 - HTTP capture (ESP32 -> gateway): `0.0.0.0:8766`
 
+When you restart the gateway during development, an already-connected ESP32
+will notice the dropped WebSocket and retry while idle. The retry delay starts
+at 5 seconds and backs off up to 60 seconds. After the gateway is listening
+again, check `get_status` from the stdio MCP side to confirm the device is back.
+
 ## Tests
 
 ```bash
