@@ -39,6 +39,8 @@ firmware/dependencies.lock
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/sdkconfig.defaults.local
+firmware/main/boards/stackchan/avatar_images.local.cc
+firmware/main/boards/stackchan/avatar_images.local.h
 
 # uv lockfile is OK to commit
 # (allow-listed by absence of uv.lock entry above)

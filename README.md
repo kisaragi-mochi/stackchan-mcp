@@ -188,14 +188,36 @@ See `gateway/README.md` for details.
 
 ## About the avatar images
 
-`firmware/main/boards/stackchan/avatar_images.cc` is a **pure black RGB565 placeholder**. The firmware builds and runs, but the screen will display nothing. To show an actual avatar, regenerate `avatar_images.cc` from your own PNG images (160×120).
+`firmware/main/boards/stackchan/avatar_images.cc` is a **pure black RGB565 placeholder**. The firmware builds and runs, but the screen will display nothing.
+
+For a personal avatar, keep PNG sources outside git and generate ignored local override files:
+
+```bash
+cd firmware
+python scripts/avatar_convert/convert_avatars.py
+```
+
+By default, the converter reads PNGs from `~/.stackchan/avatar/` and writes:
+
+- `firmware/main/boards/stackchan/avatar_images.local.cc`
+- `firmware/main/boards/stackchan/avatar_images.local.h`
+
+These local files are ignored by git. When `avatar_images.local.cc` exists, the StackChan firmware build uses it instead of the tracked black placeholder, so `git pull` will not overwrite your personal avatar.
+
+The tracked `avatar_images.cc` / `avatar_images.h` files are public placeholder files. Maintainers who intentionally need to refresh those tracked files can pass `--tracked`, but personal avatars should use the default local output path.
 
 Symbol list (see `avatar_images.h`):
 - Expressions (6): `avatar_idle`, `avatar_happy`, `avatar_thinking`, `avatar_sad`, `avatar_surprised`, `avatar_embarrassed`
 - Eyes (3): `avatar_eyes_open`, `avatar_eyes_half`, `avatar_eyes_closed`
 - Mouth (5): `avatar_mouth_closed`, `avatar_mouth_half`, `avatar_mouth_open`, `avatar_mouth_e`, `avatar_mouth_u`
 
-For the PNG → RGB565 array conversion, tools like LVGL's official [Online Image Converter](https://lvgl.io/tools/imageconverter) work well.
+Expected PNG filenames under `~/.stackchan/avatar/`:
+
+- Expressions: `idle.png`, `happy.png`, `thinking.png`, `sad.png`, `surprised.png`, `embarrassed.png`
+- Eyes: `eyes_open.png`, `eyes_half.png`, `eyes_closed.png`
+- Mouth: `mouth_closed.png`, `mouth_half.png`, `mouth_open.png`, `mouth_e.png`, `mouth_u.png`
+
+Do not commit personal PNGs, generated local avatar files, photos, or other user-specific assets.
 
 ## Known issues
 
