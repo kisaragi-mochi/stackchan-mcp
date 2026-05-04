@@ -25,7 +25,7 @@ This repository is a monorepo.
 |---|---|
 | `firmware/` | Full git subtree of [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32). The custom StackChan board lives at `firmware/main/boards/stackchan/`. |
 | `gateway/` | Python MCP gateway. stdio MCP server (LLM side) + WebSocket MCP client (ESP32 side) + HTTP capture server. |
-| `docs/` | [`architecture.md`](docs/architecture.md): full component diagram, tool name mapping, photo flow, auth, phase roadmap. |
+| `docs/` | [`architecture.md`](docs/architecture.md): full component diagram, tool name mapping, photo flow, auth, phase roadmap. [`firmware-sync.md`](docs/firmware-sync.md): upstream xiaozhi-esp32 sync playbook. |
 
 ## Target hardware
 
@@ -241,7 +241,7 @@ The `gateway/` runs as an independent Python process and only talks to the ESP32
 
 ### upstream
 
-`firmware/` is taken in via git subtree from [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) — specifically the [kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32) fork. SCServo_lib is a firmware component ported from the official [stack-chan](https://github.com/mongonta0716/stack-chan) (Takawo-san) repository.
+`firmware/` is taken in via git subtree from [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) — specifically the [kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32) fork. See [`docs/firmware-sync.md`](docs/firmware-sync.md) for the upstream sync playbook. SCServo_lib is a firmware component ported from the official [stack-chan](https://github.com/mongonta0716/stack-chan) (Takawo-san) repository.
 
 ## Related projects
 
