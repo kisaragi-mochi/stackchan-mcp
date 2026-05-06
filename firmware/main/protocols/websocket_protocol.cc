@@ -9,9 +9,26 @@
 #include <esp_log.h>
 #include <arpa/inet.h>
 #include <algorithm>
+#include <vector>
 #include "assets/lang_config.h"
 
 #define TAG "WS"
+
+namespace {
+
+void AddGatewayCandidate(std::vector<std::string>& candidates, const std::string& url, const char* source) {
+    if (url.empty()) {
+        return;
+    }
+    if (std::find(candidates.begin(), candidates.end(), url) != candidates.end()) {
+        ESP_LOGI(TAG, "Skipping duplicate websocket gateway candidate from %s: %s", source, url.c_str());
+        return;
+    }
+    ESP_LOGI(TAG, "Adding websocket gateway candidate from %s: %s", source, url.c_str());
+    candidates.push_back(url);
+}
+
+} // namespace
 
 WebsocketProtocol::WebsocketProtocol() {
     event_group_handle_ = xEventGroupCreate();
@@ -160,6 +177,35 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
     }
 #endif
 #endif
+    std::vector<std::string> gateway_candidates;
+    AddGatewayCandidate(gateway_candidates, url, "websocket.url");
+
+    std::string fallback_url = settings.GetString("fallback_url");
+#ifdef CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL
+#ifdef CONFIG_FORCE_DEFAULT_WEBSOCKET_URL
+    if (CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL[0] != '\0') {
+        if (!fallback_url.empty() && fallback_url != CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL) {
+            ESP_LOGI(TAG,
+                     "FORCE: overriding NVS websocket.fallback_url with Kconfig: NVS=%s -> %s",
+                     fallback_url.c_str(), CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL);
+        } else if (fallback_url.empty()) {
+            ESP_LOGI(TAG, "FORCE: using Kconfig fallback websocket URL: %s",
+                     CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL);
+        }
+        fallback_url = CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL;
+    }
+#else
+    if (fallback_url.empty()) {
+        fallback_url = CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL;
+        if (!fallback_url.empty()) {
+            ESP_LOGI(TAG, "NVS websocket.fallback_url empty; using build-time fallback from Kconfig: %s",
+                     fallback_url.c_str());
+        }
+    }
+#endif
+#endif
+    AddGatewayCandidate(gateway_candidates, fallback_url, "websocket.fallback_url");
+
     std::string token = settings.GetString("token");
 #ifdef CONFIG_DEFAULT_WEBSOCKET_TOKEN
 #ifdef CONFIG_FORCE_DEFAULT_WEBSOCKET_URL
@@ -190,130 +236,164 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
     error_occurred_ = false;
 
     auto network = Board::GetInstance().GetNetwork();
-    websocket_ = network->CreateWebSocket(1);
-    if (websocket_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to create websocket");
-        return false;
-    }
-
-    if (!token.empty()) {
-        // If token not has a space, add "Bearer " prefix
-        if (token.find(" ") == std::string::npos) {
-            token = "Bearer " + token;
-        }
-        websocket_->SetHeader("Authorization", token.c_str());
-    }
-    websocket_->SetHeader("Protocol-Version", std::to_string(version_).c_str());
-    websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
-    websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
-
-    websocket_->OnData([this](const char* data, size_t len, bool binary) {
-        if (binary) {
-            if (on_incoming_audio_ != nullptr) {
-                if (version_ == 2) {
-                    BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
-                    bp2->version = ntohs(bp2->version);
-                    bp2->type = ntohs(bp2->type);
-                    bp2->timestamp = ntohl(bp2->timestamp);
-                    bp2->payload_size = ntohl(bp2->payload_size);
-                    auto payload = (uint8_t*)bp2->payload;
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = bp2->timestamp,
-                        .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
-                    }));
-                } else if (version_ == 3) {
-                    BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
-                    bp3->type = bp3->type;
-                    bp3->payload_size = ntohs(bp3->payload_size);
-                    auto payload = (uint8_t*)bp3->payload;
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = 0,
-                        .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)
-                    }));
-                } else {
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = 0,
-                        .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
-                    }));
-                }
-            }
-        } else {
-            // Parse JSON data
-            auto root = cJSON_ParseWithLength(data, len);
-            auto type = cJSON_GetObjectItem(root, "type");
-            if (cJSON_IsString(type)) {
-                if (strcmp(type->valuestring, "hello") == 0) {
-                    ParseServerHello(root);
-                } else {
-                    if (on_incoming_json_ != nullptr) {
-                        on_incoming_json_(root);
-                    }
-                }
-            } else {
-                ESP_LOGE(TAG, "Missing message type, data: %s", std::string(data, len).c_str());
-            }
-            cJSON_Delete(root);
-        }
-        last_incoming_time_ = std::chrono::steady_clock::now();
-    });
-
-    websocket_->OnDisconnected([this]() {
-        if (on_disconnected_ != nullptr) {
-            on_disconnected_();
-        }
-        ESP_LOGI(TAG, "Websocket disconnected");
-        if (on_audio_channel_closed_ != nullptr) {
-            on_audio_channel_closed_();
-        }
-        if (auto_reconnect_enabled_.load()) {
-            ScheduleReconnect();
-        }
-    });
-
-    ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
-    if (!websocket_->Connect(url.c_str())) {
-        ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
+    if (gateway_candidates.empty()) {
+        ESP_LOGE(TAG, "No websocket gateway URL configured");
         if (report_error) {
             SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         }
         return false;
     }
 
-    if (on_connected_ != nullptr) {
-        on_connected_();
+    if (!token.empty() && token.find(" ") == std::string::npos) {
+        token = "Bearer " + token;
     }
 
-    // Send hello message to describe the client
-    auto message = GetHelloMessage();
-    if (!SendText(message)) {
-        return false;
-    }
+    bool server_hello_timed_out = false;
+    for (size_t i = 0; i < gateway_candidates.size(); ++i) {
+        const auto& candidate_url = gateway_candidates[i];
 
-    // Wait for server hello
-    EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
-    if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
-        ESP_LOGE(TAG, "Failed to receive server hello");
-        if (report_error) {
-            SetError(Lang::Strings::SERVER_TIMEOUT);
+        xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
+        websocket_ = network->CreateWebSocket(1);
+        if (websocket_ == nullptr) {
+            ESP_LOGE(TAG, "Failed to create websocket");
+            continue;
         }
-        return false;
+        auto notify_disconnect = std::make_shared<bool>(false);
+
+        if (!token.empty()) {
+            websocket_->SetHeader("Authorization", token.c_str());
+        }
+        websocket_->SetHeader("Protocol-Version", std::to_string(version_).c_str());
+        websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+        websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+
+        websocket_->OnData([this](const char* data, size_t len, bool binary) {
+            if (binary) {
+                if (on_incoming_audio_ != nullptr) {
+                    if (version_ == 2) {
+                        BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
+                        bp2->version = ntohs(bp2->version);
+                        bp2->type = ntohs(bp2->type);
+                        bp2->timestamp = ntohl(bp2->timestamp);
+                        bp2->payload_size = ntohl(bp2->payload_size);
+                        auto payload = (uint8_t*)bp2->payload;
+                        on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                            .sample_rate = server_sample_rate_,
+                            .frame_duration = server_frame_duration_,
+                            .timestamp = bp2->timestamp,
+                            .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
+                        }));
+                    } else if (version_ == 3) {
+                        BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
+                        bp3->type = bp3->type;
+                        bp3->payload_size = ntohs(bp3->payload_size);
+                        auto payload = (uint8_t*)bp3->payload;
+                        on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                            .sample_rate = server_sample_rate_,
+                            .frame_duration = server_frame_duration_,
+                            .timestamp = 0,
+                            .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)
+                        }));
+                    } else {
+                        on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                            .sample_rate = server_sample_rate_,
+                            .frame_duration = server_frame_duration_,
+                            .timestamp = 0,
+                            .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
+                        }));
+                    }
+                }
+            } else {
+                // Parse JSON data
+                auto root = cJSON_ParseWithLength(data, len);
+                auto type = cJSON_GetObjectItem(root, "type");
+                if (cJSON_IsString(type)) {
+                    if (strcmp(type->valuestring, "hello") == 0) {
+                        ParseServerHello(root);
+                    } else {
+                        if (on_incoming_json_ != nullptr) {
+                            on_incoming_json_(root);
+                        }
+                    }
+                } else {
+                    ESP_LOGE(TAG, "Missing message type, data: %s", std::string(data, len).c_str());
+                }
+                cJSON_Delete(root);
+            }
+            last_incoming_time_ = std::chrono::steady_clock::now();
+        });
+
+        websocket_->OnDisconnected([this, notify_disconnect]() {
+            if (!*notify_disconnect) {
+                ESP_LOGI(TAG, "Websocket candidate disconnected before server hello");
+                return;
+            }
+            if (on_disconnected_ != nullptr) {
+                on_disconnected_();
+            }
+            ESP_LOGI(TAG, "Websocket disconnected");
+            if (on_audio_channel_closed_ != nullptr) {
+                on_audio_channel_closed_();
+            }
+            if (auto_reconnect_enabled_.load()) {
+                ScheduleReconnect();
+            }
+        });
+
+        ESP_LOGI(TAG, "Connecting to websocket server candidate %d/%d: %s with version: %d",
+                 static_cast<int>(i + 1), static_cast<int>(gateway_candidates.size()), candidate_url.c_str(), version_);
+        if (!websocket_->Connect(candidate_url.c_str())) {
+            ESP_LOGE(TAG, "Failed to connect to websocket server candidate %d/%d, code=%d",
+                     static_cast<int>(i + 1), static_cast<int>(gateway_candidates.size()), websocket_->GetLastError());
+            websocket_.reset();
+            continue;
+        }
+
+        // Send hello message to describe the client
+        auto message = GetHelloMessage();
+        if (!websocket_->Send(message)) {
+            ESP_LOGE(TAG, "Failed to send hello to websocket server candidate %d/%d",
+                     static_cast<int>(i + 1), static_cast<int>(gateway_candidates.size()));
+            websocket_.reset();
+            continue;
+        }
+
+        // Wait for server hello
+        EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+        if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
+            ESP_LOGE(TAG, "Failed to receive server hello from websocket server candidate %d/%d",
+                     static_cast<int>(i + 1), static_cast<int>(gateway_candidates.size()));
+            server_hello_timed_out = true;
+            websocket_.reset();
+            continue;
+        }
+
+        *notify_disconnect = true;
+        auto_reconnect_enabled_.store(true);
+        reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
+        StopReconnectTimer();
+
+        if (on_connected_ != nullptr) {
+            on_connected_();
+        }
+
+        if (on_audio_channel_opened_ != nullptr) {
+            on_audio_channel_opened_();
+        }
+
+        ESP_LOGI(TAG, "Connected to websocket server candidate %d/%d: %s",
+                 static_cast<int>(i + 1), static_cast<int>(gateway_candidates.size()), candidate_url.c_str());
+        return true;
     }
 
-    auto_reconnect_enabled_.store(true);
-    reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
-    StopReconnectTimer();
-
-    if (on_audio_channel_opened_ != nullptr) {
-        on_audio_channel_opened_();
+    if (report_error) {
+        if (server_hello_timed_out) {
+            SetError(Lang::Strings::SERVER_TIMEOUT);
+        } else {
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        }
     }
-
-    return true;
+    return false;
 }
 
 void WebsocketProtocol::ScheduleReconnect() {

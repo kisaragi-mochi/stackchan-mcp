@@ -148,6 +148,21 @@ CONFIG_DEFAULT_WEBSOCKET_URL="wss://<node>.<tailnet>.ts.net/"
 CONFIG_DEFAULT_WEBSOCKET_TOKEN="<strong-shared-token>"
 ```
 
+To prefer a LAN gateway when the StackChan and gateway host are on the same
+network, while still keeping a remote Funnel path for travel, configure the
+local URL as primary and the Funnel URL as fallback:
+
+```text
+CONFIG_DEFAULT_WEBSOCKET_URL="ws://<gateway-host>:8765/"
+CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL="wss://<node>.<tailnet>.ts.net/"
+CONFIG_DEFAULT_WEBSOCKET_TOKEN="<strong-shared-token>"
+```
+
+At runtime the firmware tries the primary URL first. If the TCP/WebSocket
+connection fails, or if the stackchan-mcp server hello does not complete, it
+tries the fallback URL next. Leave the fallback empty for local-only or
+Tailscale-only setups.
+
 For existing devices with stale NVS values, use the documented
 `CONFIG_FORCE_DEFAULT_WEBSOCKET_URL=y` flow from the top-level README.
 

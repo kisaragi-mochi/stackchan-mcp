@@ -21,6 +21,20 @@ config DEFAULT_WEBSOCKET_URL
         Leave empty to require explicit NVS configuration (the original
         behavior).
 
+config DEFAULT_WEBSOCKET_FALLBACK_URL
+    string "Fallback WebSocket gateway URL"
+    default ""
+    help
+        Optional second WebSocket URL to try when the primary gateway URL
+        cannot be reached or does not complete the server hello flow.
+
+        This is useful for builds that should prefer a local LAN gateway
+        such as ws://<gateway-host>:8765/ but fall back to a remote tunnel
+        such as wss://<node>.<tailnet>.ts.net/ when the local gateway is
+        unavailable.
+
+        Leave empty to keep the original single-URL behavior.
+
 config DEFAULT_WEBSOCKET_TOKEN
     string "Default WebSocket auth token (fallback when NVS is empty)"
     default ""
@@ -36,14 +50,16 @@ config DEFAULT_WEBSOCKET_TOKEN
         value to override NVS.
 
 config FORCE_DEFAULT_WEBSOCKET_URL
-    bool "Force CONFIG_DEFAULT_WEBSOCKET_URL/TOKEN to override NVS"
+    bool "Force Kconfig WebSocket URL/TOKEN values to override NVS"
     default n
     help
         When enabled, non-empty Kconfig defaults
-        (CONFIG_DEFAULT_WEBSOCKET_URL / CONFIG_DEFAULT_WEBSOCKET_TOKEN)
-        override the NVS websocket.url / websocket.token values. Empty
-        Kconfig values still fall through to NVS, so leaving the token
-        Kconfig empty keeps any NVS-stored token in use. Useful when:
+        (CONFIG_DEFAULT_WEBSOCKET_URL,
+        CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL, and
+        CONFIG_DEFAULT_WEBSOCKET_TOKEN) override the corresponding NVS
+        websocket.url / websocket.fallback_url / websocket.token values.
+        Empty Kconfig values still fall through to NVS, so leaving the
+        token Kconfig empty keeps any NVS-stored token in use. Useful when:
 
         - The device's NVS still contains a stale upstream xiaozhi URL
           (e.g., wss://api.tenclass.net/...) from prior use, and there

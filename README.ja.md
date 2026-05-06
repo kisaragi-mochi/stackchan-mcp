@@ -78,9 +78,10 @@ WiFi 設定は ESP32 が起動後にスマホで設定 UI に接続して行う 
 
 ### WebSocket gateway URL と認証トークンの設定
 
-ファームウェアはゲートウェイ接続のために 2 つの NVS キーを参照します:
+ファームウェアはゲートウェイ接続のために以下の NVS キーを参照します:
 
 - `websocket.url` — ゲートウェイ WebSocket URL (例: `ws://192.168.1.100:8765/`)
+- `websocket.fallback_url` — `websocket.url` に接続できない、または server hello が完了しない場合に試す 2 番目の gateway URL
 - `websocket.token` — `Authorization: Bearer <token>` で送信される bearer トークン。ゲートウェイ側の `STACKCHAN_TOKEN` / `BEARER_TOKEN` と照合される (両方空にすれば認証スキップ)
 
 設定方法は実用的に 3 つ:
@@ -88,14 +89,24 @@ WiFi 設定は ESP32 が起動後にスマホで設定 UI に接続して行う 
 1. **Kconfig によるビルド時デフォルト (開発者推奨)**: `idf.py menuconfig` → `Component config` → `Xiaozhi Assistant` を開き、以下を設定:
    - `Default WebSocket gateway URL (fallback when NVS is empty)` →
      `CONFIG_DEFAULT_WEBSOCKET_URL` (例: `ws://192.168.1.100:8765/`)
+   - `Fallback WebSocket gateway URL` →
+     `CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL`
    - `Default WebSocket auth token (fallback when NVS is empty)` →
      `CONFIG_DEFAULT_WEBSOCKET_TOKEN` (ゲートウェイが認証不要なら空のままで OK)
 
-   デフォルトでは、対応する NVS キーが空のときだけこの値が使われます。新規デバイスへの初回フラッシュではちょうど期待通りに動作します。
+   デフォルトでは、対応する NVS キーが空のときだけこの値が使われます。新規デバイスへの初回フラッシュではちょうど期待通りに動作します。primary と fallback の両方を設定した場合、ファームウェアは決まった順番で候補を試し、WebSocket の server hello まで完了した最初の候補を使います。
 
 2. **NVS に直接 `websocket.url` / `websocket.token` を書き込む**: ランタイムでの永続設定の本来のパス。最終的には WiFi 設定 UI から行う想定ですが、現時点で UI フィールドは未実装で Issue #17 のフォローアップとして追跡しています。
 
 3. **一時的なソース hardcode (非推奨)**: `websocket_protocol.cc` を編集すればローカル実験はアンブロックできますが、commit には残さないようにしてください。
+
+よく使う gateway URL 構成:
+
+| モード | Primary URL | Fallback URL |
+| --- | --- | --- |
+| ローカルのみ | `ws://<gateway-host>:8765/` | 空 |
+| Tailscale のみ | `wss://<node>.<tailnet>.ts.net/` | 空 |
+| ローカル優先 + リモート fallback | `ws://<gateway-host>:8765/` | `wss://<node>.<tailnet>.ts.net/` |
 
 #### 既存デバイス (古い NVS) — `CONFIG_FORCE_DEFAULT_WEBSOCKET_URL`
 
@@ -120,6 +131,7 @@ NVS を全消去 (WiFi 認証も飛ぶ) せずにこれを回避するには、f
 cd firmware
 cat > sdkconfig.defaults.local <<'EOF'
 CONFIG_DEFAULT_WEBSOCKET_URL="ws://<your-lan-ip>:8765/"
+CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL="wss://<node>.<tailnet>.ts.net/"
 CONFIG_DEFAULT_WEBSOCKET_TOKEN="<your-dev-token>"
 CONFIG_FORCE_DEFAULT_WEBSOCKET_URL=y
 EOF

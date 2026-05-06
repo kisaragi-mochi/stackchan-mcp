@@ -78,9 +78,11 @@ WiFi configuration happens after the ESP32 boots — connect from a smartphone t
 
 ### Configuring the WebSocket gateway URL and auth token
 
-The firmware reads two NVS keys for the gateway connection:
+The firmware reads these NVS keys for the gateway connection:
 
 - `websocket.url` — the gateway WebSocket URL (e.g. `ws://192.168.1.100:8765/`)
+- `websocket.fallback_url` — optional second gateway URL to try when
+  `websocket.url` cannot be reached or does not complete the server hello flow
 - `websocket.token` — the bearer token sent as `Authorization: Bearer <token>`,
   matched against `STACKCHAN_TOKEN` / `BEARER_TOKEN` on the gateway side
   (leave both empty to skip authentication entirely)
@@ -91,12 +93,17 @@ There are three practical ways to provide them:
    `idf.py menuconfig` → `Component config` → `Xiaozhi Assistant`, and set:
    - `Default WebSocket gateway URL (fallback when NVS is empty)` →
      `CONFIG_DEFAULT_WEBSOCKET_URL` (e.g. `ws://192.168.1.100:8765/`)
+   - `Fallback WebSocket gateway URL` →
+     `CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL`
    - `Default WebSocket auth token (fallback when NVS is empty)` →
      `CONFIG_DEFAULT_WEBSOCKET_TOKEN` (leave empty if your gateway accepts
      unauthenticated connections)
 
    By default these only apply when the corresponding NVS key is empty.
    For first-time flashes onto a fresh device this is exactly what you want.
+   If both a primary and fallback URL are configured, the firmware tries them
+   in deterministic order and keeps the first candidate that completes the
+   WebSocket server hello flow.
 
 2. **Write `websocket.url` / `websocket.token` directly to NVS**: this is the
    intended persistent runtime configuration path, eventually via the WiFi
@@ -106,6 +113,14 @@ There are three practical ways to provide them:
 3. **Temporary source hardcode (not recommended)**: editing
    `websocket_protocol.cc` can unblock local experiments, but keep it out of
    commits.
+
+Common gateway URL setups:
+
+| Mode | Primary URL | Fallback URL |
+| --- | --- | --- |
+| Local only | `ws://<gateway-host>:8765/` | empty |
+| Tailscale only | `wss://<node>.<tailnet>.ts.net/` | empty |
+| Local with remote fallback | `ws://<gateway-host>:8765/` | `wss://<node>.<tailnet>.ts.net/` |
 
 #### Existing devices with stale NVS — `CONFIG_FORCE_DEFAULT_WEBSOCKET_URL`
 
@@ -142,6 +157,7 @@ tracked `firmware/sdkconfig.defaults`. Instead, create a gitignored local file:
 cd firmware
 cat > sdkconfig.defaults.local <<'EOF'
 CONFIG_DEFAULT_WEBSOCKET_URL="ws://<your-lan-ip>:8765/"
+CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL="wss://<node>.<tailnet>.ts.net/"
 CONFIG_DEFAULT_WEBSOCKET_TOKEN="<your-dev-token>"
 CONFIG_FORCE_DEFAULT_WEBSOCKET_URL=y
 EOF
