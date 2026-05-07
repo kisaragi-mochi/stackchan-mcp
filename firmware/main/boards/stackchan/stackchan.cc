@@ -420,6 +420,10 @@ private:
     esp_timer_handle_t blink_step_timer_ = nullptr;
     BlinkState blink_state_ = BlinkState::IDLE;
     bool blink_enabled_ = false;
+    // Captures blink_enabled_ at the moment SetAvatarOff() runs, so that a
+    // later set_avatar(<other face>) can restore the previous blink state.
+    // Only meaningful while current_avatar_face_ == "off".
+    bool blink_enabled_before_off_ = false;
 
     // Phase 7: Si12T head-touch sensing.
     // Polling every TOUCH_POLL_MS samples Output1 (CH1..CH3 -> 3 head zones).
@@ -1041,10 +1045,12 @@ private:
     }
 
     // Schedule a single-shot revert to "idle" face REACTION_HOLD_MS later.
-    // Re-arming overwrites any pending revert.
+    // Re-arming overwrites any pending revert. Skipped while the avatar
+    // has been hidden via set_avatar("off"), so a stale revert timer
+    // does not re-cover the LCD after the user explicitly hid it.
     static void TouchRevertCb(void* arg) {
         StackChanBoard* self = static_cast<StackChanBoard*>(arg);
-        self->SetAvatarExpression("idle");
+        self->SetAvatarExpressionIfActive("idle");
     }
 
     void ScheduleIdleRevert() {
@@ -1069,7 +1075,9 @@ private:
                  last_output1_raw_);
         last_event_ = TouchEvent::TAP;
         last_event_us_ = esp_timer_get_time();
-        SetAvatarExpression("surprised");
+        // Use the IfActive variant so a tap during set_avatar("off") does
+        // not pop the avatar back over the WiFi config / settings screens.
+        SetAvatarExpressionIfActive("surprised");
         ScheduleIdleRevert();
     }
 
@@ -1079,7 +1087,7 @@ private:
                  (unsigned long long)duration_ms, last_output1_raw_);
         last_event_ = TouchEvent::STROKE;
         last_event_us_ = esp_timer_get_time();
-        SetAvatarExpression("embarrassed");
+        SetAvatarExpressionIfActive("embarrassed");
         StartServoWobble();
         ScheduleIdleRevert();
     }
@@ -1244,17 +1252,83 @@ private:
 
     // Public-style entry that takes the display lock. Used by the MCP tool
     // and by the deferred init timer. Always safe to call from any task.
+    //
+    // Also handles the "resume from off" path: if the previous face was
+    // "off" (avatar layer hidden), the layer is unhidden here, and if blink
+    // was enabled before SetAvatarOff() ran it is restored automatically.
     bool SetAvatarExpression(const char* face) {
         if (display_ == nullptr) {
             ESP_LOGW(TAG, "SetAvatarExpression('%s') ignored: display_ not ready", face);
             return false;
         }
-        DisplayLockGuard lock(display_);
-        bool ok = SetAvatarExpressionLocked(face);
+        bool was_off = (current_avatar_face_ == "off");
+        bool ok;
+        {
+            DisplayLockGuard lock(display_);
+            if (avatar_img_ != nullptr) {
+                // Restore visibility if a previous SetAvatarOff() hid the
+                // layer. Cheap no-op when the flag is already clear.
+                lv_obj_clear_flag(avatar_img_, LV_OBJ_FLAG_HIDDEN);
+            }
+            ok = SetAvatarExpressionLocked(face);
+        }
         if (!ok) {
             ESP_LOGW(TAG, "SetAvatarExpression('%s') deferred (face unknown or screen not ready)", face);
+            return ok;
         }
+        // Coming back from "off": if blink was on before going off, restart
+        // it so the user does not have to re-issue set_blink. The default
+        // experience is "blink follows the avatar".
+        if (was_off && blink_enabled_before_off_) {
+            StartBlinkTimer();
+            ESP_LOGI(TAG, "Blink restored after avatar resume from OFF");
+        }
+        blink_enabled_before_off_ = false;
         return ok;
+    }
+
+    // Hide the avatar layer and disable blink so the underlying
+    // xiaozhi-esp32 screens (WiFi config UI, OTA, settings) become visible.
+    // The avatar lv_obj is kept allocated so a subsequent
+    // SetAvatarExpression(<other face>) can re-show it cheaply, and the
+    // previous blink state is remembered for restoration.
+    bool SetAvatarOff() {
+        if (display_ == nullptr) {
+            ESP_LOGW(TAG, "SetAvatarOff() ignored: display_ not ready");
+            return false;
+        }
+        // Capture the previous blink state only on the first transition
+        // into "off". A repeated set_avatar("off") while already off must
+        // not overwrite the saved state with the post-off (always-false)
+        // blink_enabled_.
+        if (current_avatar_face_ != "off") {
+            blink_enabled_before_off_ = blink_enabled_;
+        }
+        // StopBlinkTimer() takes the display lock internally for the
+        // resting-face restore step, so call it before grabbing our lock.
+        StopBlinkTimer();
+        {
+            DisplayLockGuard lock(display_);
+            if (avatar_img_ != nullptr) {
+                lv_obj_add_flag(avatar_img_, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        current_avatar_face_ = "off";
+        ESP_LOGI(TAG, "Avatar OFF: hidden + blink disabled (was %s)",
+                 blink_enabled_before_off_ ? "ON" : "OFF");
+        return true;
+    }
+
+    // Internal-only entry used by autonomous animations (touch reactions,
+    // idle revert, etc.). Skips the face change while the avatar is in
+    // the user-requested "off" state, so the underlying xiaozhi-esp32
+    // screens remain visible. Returns true if the face was applied.
+    bool SetAvatarExpressionIfActive(const char* face) {
+        if (current_avatar_face_ == "off") {
+            ESP_LOGD(TAG, "SetAvatarExpressionIfActive('%s') skipped: avatar is OFF", face);
+            return false;
+        }
+        return SetAvatarExpression(face);
     }
 
     // Schedule a one-shot/periodic timer that keeps trying to install the
@@ -1641,28 +1715,42 @@ private:
                 return root;
             });
 
-        // Set the avatar face (one of: idle, happy, thinking, sad, surprised, embarrassed).
+        // Set the avatar face (one of: idle, happy, thinking, sad, surprised,
+        // embarrassed, off).
         // The image is rendered as a 320x240 overlay on top of the chat UI's
         // emoji_label_ / emoji_image_; LVGL theme/Application emotion updates
         // will keep happening underneath but are visually masked.
+        // 'off' hides the avatar lv_obj and disables blink so the underlying
+        // xiaozhi-esp32 screens (WiFi config UI, OTA, settings) become visible.
+        // A subsequent set_avatar with any other face brings it back, and
+        // restores blink to whatever state it was in before going off.
         mcp_server.AddTool(
             "self.display.set_avatar",
             "Set the avatar face displayed on the LCD. face must be one of: "
-            "idle, happy, thinking, sad, surprised, embarrassed.",
+            "idle, happy, thinking, sad, surprised, embarrassed, off. "
+            "'off' hides the avatar and disables blink so the underlying "
+            "xiaozhi-esp32 screens (WiFi config UI, OTA, settings) are "
+            "visible; calling set_avatar with another face brings the avatar "
+            "back and restores the previous blink state.",
             PropertyList({Property("face", kPropertyTypeString)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 std::string face = properties["face"].value<std::string>();
-                bool valid = (AvatarImageFor(face.c_str()) != nullptr);
                 cJSON* root = cJSON_CreateObject();
                 cJSON_AddStringToObject(root, "face", face.c_str());
-                if (!valid) {
+
+                bool applied = false;
+                if (face == "off") {
+                    applied = SetAvatarOff();
+                } else if (AvatarImageFor(face.c_str()) != nullptr) {
+                    applied = SetAvatarExpression(face.c_str());
+                } else {
                     cJSON_AddBoolToObject(root, "ok", false);
                     cJSON_AddStringToObject(root, "error",
-                        "Unknown face. Allowed: idle, happy, thinking, sad, surprised, embarrassed.");
+                        "Unknown face. Allowed: idle, happy, thinking, sad, "
+                        "surprised, embarrassed, off.");
                     ESP_LOGW(TAG, "set_avatar rejected: unknown face '%s'", face.c_str());
                     return root;
                 }
-                bool applied = SetAvatarExpression(face.c_str());
                 cJSON_AddBoolToObject(root, "ok", applied);
                 if (!applied) {
                     cJSON_AddStringToObject(root, "error",

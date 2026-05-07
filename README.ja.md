@@ -52,7 +52,7 @@
 | `set_brightness(brightness)` | 画面明るさ (0-100) | ✅ |
 | `move_head(yaw, pitch, speed?)` | 首を動かす (サーボ) | ✅ |
 | `get_touch_state` | タッチセンサ状態 (press/release/stroke 等) | ✅ |
-| `set_avatar(face)` | アバター表情切替 (neutral/happy/sad 等 6種) | ✅ |
+| `set_avatar(face)` | アバター表情切替 (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`)、または `off` でアバターを隠し blink も停止して下層の WiFi 設定 / OTA / 設定画面を露出。他 face を指定するとアバター + blink が復帰 | ✅ |
 | `set_blink(state)` | 瞬き ON/OFF | ✅ |
 | `set_mouth(state)` | 口開閉 | ✅ |
 | `check_vm_en` | サーボ電源 (VM EN HIGH) 状態確認 | ✅ |

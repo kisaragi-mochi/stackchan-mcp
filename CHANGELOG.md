@@ -15,7 +15,16 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
-(no entries yet)
+### Added
+
+- `set_avatar` now accepts `"off"` as a face value. When called with
+  `"off"`, the avatar layer is hidden and autonomous blinking is
+  disabled so the underlying xiaozhi-esp32 screens (WiFi config UI,
+  OTA, settings) become visible on the LCD without erasing NVS.
+  Calling `set_avatar` with any other face brings the avatar back and
+  restores the previous blink state automatically. ([#3])
+
+[#3]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/3
 
 ## [0.1.0] - 2026-05-07
 

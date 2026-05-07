@@ -52,7 +52,7 @@ This repository is a monorepo.
 | `set_brightness(brightness)` | Screen brightness (0-100) | ✅ |
 | `move_head(yaw, pitch, speed?)` | Move the neck (servos) | ✅ |
 | `get_touch_state` | Touch sensor state (press / release / stroke / etc.) | ✅ |
-| `set_avatar(face)` | Switch avatar expression (neutral / happy / sad / etc., 6 total) | ✅ |
+| `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`), or `off` to hide the avatar and disable blink so the underlying WiFi config / OTA / settings screens are visible. Any other face brings the avatar back and restores blink. | ✅ |
 | `set_blink(state)` | Blink on/off | ✅ |
 | `set_mouth(state)` | Mouth open/close | ✅ |
 | `check_vm_en` | Check servo power supply (VM EN HIGH) state | ✅ |

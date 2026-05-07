@@ -150,8 +150,11 @@ def create_server() -> Server:
                 name="set_avatar",
                 description=(
                     "Switch the avatar face shown on the LCD. "
-                    "Pick the face that fits the current emotional beat — this is "
-                    "the robot's actual visible expression, not just a label."
+                    "Choose one of the supported faces; this is the robot's "
+                    "actual visible expression, not just a label. "
+                    "Pass 'off' to hide the avatar and disable blink, exposing the "
+                    "underlying xiaozhi-esp32 screens (WiFi config UI, OTA, settings); "
+                    "any other face brings the avatar back and restores blink."
                 ),
                 inputSchema={
                     "type": "object",
@@ -165,8 +168,12 @@ def create_server() -> Server:
                                 "sad",
                                 "surprised",
                                 "embarrassed",
+                                "off",
                             ],
-                            "description": "One of: idle, happy, thinking, sad, surprised, embarrassed.",
+                            "description": (
+                                "One of: idle, happy, thinking, sad, surprised, "
+                                "embarrassed, off."
+                            ),
                         },
                     },
                     "required": ["face"],
