@@ -222,8 +222,13 @@ maintainers can rebuild the chain:
 
 ### Per-release steps
 
-1. Bump the version in `gateway/pyproject.toml` (`project.version`) on a
-   topic branch and open a PR.
+1. On a topic branch, bump the version in `gateway/pyproject.toml`
+   (`project.version`) and update `CHANGELOG.md`: rename the
+   `## [Unreleased]` section to `## [X.Y.Z] - YYYY-MM-DD`, add a fresh
+   empty `## [Unreleased]` above it, and update the comparison links at
+   the bottom of the file (`[Unreleased]` should compare the new tag to
+   `HEAD`, and a new `[X.Y.Z]` link should point at the release tag).
+   Open a PR with these changes.
 2. After the PR is merged, tag the resulting commit on `main` with a
    matching `vX.Y.Z` tag and push the tag:
    ```bash
@@ -263,6 +268,45 @@ The publish workflow also supports `workflow_dispatch` so that
 maintainers can verify the build pipeline (lint / test / build)
 without cutting a tag. The publish job is gated on `push` events, so
 manual runs cannot release.
+
+### Fork-friendly publishing
+
+The Trusted Publisher and `pypi` GitHub Environment described above are
+reserved for the canonical `stackchan-mcp` project on PyPI, owned by
+`kisaragi-mochi/stackchan-mcp`. A fork that wants to publish its own
+builds should not reuse the upstream PyPI project name or assume the
+upstream `pypi` environment is reachable from the fork. PRs against
+this repository should leave the existing `publish.yml` and `pypi`
+environment configuration alone.
+
+Forks that want to ship under a different name (for example,
+`yourhandle-stackchan-mcp` on PyPI) have two practical paths:
+
+1. **Trusted Publishing on the fork.** Pick a different PyPI project
+   name, change `project.name` in `gateway/pyproject.toml` (and review
+   `project.urls` and the `[project.scripts]` console-script name if
+   the fork wants its own CLI command, plus the user-facing references
+   in `gateway/README.md`) to match, register the fork's
+   `<owner>/<repo>` and `publish.yml` against the new PyPI project
+   name as a Trusted Publisher, and recreate a `pypi` GitHub
+   Environment in the fork. Tag/version gates in `publish.yml` keep
+   working as-is because they only check the local repo and
+   `pyproject.toml`. This keeps the OIDC-based, no-API-token flow.
+2. **PyPI API token in the fork.** If Trusted Publishing is not an
+   option (publishing from a non-GitHub CI, an internal index, or
+   ad-hoc local releases), generate a project-scoped PyPI API token
+   for the fork's PyPI project and store it as a secret in the fork.
+   Replace the OIDC publish step in the fork's `publish.yml` (or the
+   equivalent step in the alternate CI) with a token-based upload such
+   as `twine upload --username __token__ --password $PYPI_API_TOKEN
+   dist/*`. Keep the publish job in a protected environment so the
+   secret is only exposed to the publish step, and prefer a
+   project-scoped token over a user-scoped one.
+
+In either case, do not push fork-only credentials, fork-only project
+names, or token-based upload steps back to upstream. The upstream
+pipeline is intentionally strict about the canonical project name and
+the OIDC-only path.
 
 ## Communication
 
