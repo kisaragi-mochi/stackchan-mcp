@@ -143,6 +143,38 @@ EOF
 
 ### 2. ゲートウェイ起動
 
+ゲートウェイは PyPI で公開されているパッケージをインストールする方法
+(エンドユーザー向け) と、このリポジトリのチェックアウトから動かす方法
+(`main` を追いたいコントリビュータ向け) のどちらでも使えます。
+
+#### オプション A: ツールとしてインストール (エンドユーザー向け、推奨)
+
+システム Python や他の Python プロジェクトと衝突しない、隔離された
+インストールを行うには、以下のいずれかを使います:
+
+```bash
+uv tool install stackchan-mcp
+# または
+pipx install stackchan-mcp
+```
+
+ゲートウェイ起動:
+
+```bash
+stackchan-mcp
+```
+
+プロジェクト管理の virtualenv で動かしたい場合は、有効化した venv の中で
+`pip install stackchan-mcp` でも動きます。その venv 内では
+`python -m stackchan_mcp` も `stackchan-mcp` と同等です。ただしシステム
+Python に対して直接 `pip install` するのは避けてください (PEP 668)。
+
+[`gateway/README.md`](gateway/README.md#setup) に記載されている
+`STACKCHAN_TOKEN` / `VISION_HOST` 等の設定値は、環境変数・シェル・
+カレントディレクトリの `.env` ファイルのいずれからでも渡せます。
+
+#### オプション B: ソースから uv で起動 (コントリビュータ向け)
+
 ```bash
 cd gateway
 cp .env.example .env       # STACKCHAN_TOKEN / VISION_HOST を設定
@@ -159,7 +191,26 @@ callback 設定を [`docs/remote-access.md`](docs/remote-access.md) にまとめ
 
 ### 3. MCP クライアント登録 (Claude Code 例)
 
-`~/.claude.json` に追加:
+`~/.claude.json` に追加します。
+
+`pip install stackchan-mcp` でインストールした場合:
+
+```json
+{
+  "mcpServers": {
+    "stackchan-mcp": {
+      "type": "stdio",
+      "command": "stackchan-mcp",
+      "env": {
+        "STACKCHAN_TOKEN": "your-secret-token-here",
+        "VISION_HOST": "your.host.lan.ip"
+      }
+    }
+  }
+}
+```
+
+ソースから `uv` で動かす場合:
 
 ```json
 {

@@ -182,6 +182,74 @@ Keep code comments, public issue descriptions, and pull request descriptions in
 English unless Japanese is needed for a hardware name, quoted source, or
 community-specific term.
 
+## Releasing the gateway to PyPI
+
+Maintainers publish the gateway to PyPI by tagging a release on `main`.
+The `.github/workflows/publish.yml` workflow runs on every tag matching
+`v*`, builds an sdist and a wheel from `gateway/`, and uploads them to
+PyPI via Trusted Publishing.
+
+### Release gates
+
+The publish workflow only succeeds if all of the following hold:
+
+- The tag commit is an ancestor of `origin/main` (no publishing from
+  feature branches or arbitrary commits).
+- The tag has a `v` prefix and matches the `project.version` field of
+  `gateway/pyproject.toml` after PEP 440 normalization, so `v0.1.0-rc.1`
+  matches a `pyproject.toml` version of `0.1.0rc1`, etc.
+- The version is not a PEP 440 local version (e.g. `1.0+local`).
+- `uv run ruff check .` and `uv run pytest` succeed inside `gateway/`.
+- The build produces a `dist/` containing both an sdist and a wheel.
+
+Pre-release tags (`v0.2.0a1`, `v1.0.0rc1`, etc.) are allowed.
+
+### One-time setup
+
+Already configured for the current maintainer; documented here so future
+maintainers can rebuild the chain:
+
+1. Register `stackchan-mcp` on PyPI as a Trusted Publisher pointing at
+   this repository, the `publish.yml` workflow file name, and the `pypi`
+   environment.
+2. Create a GitHub Environment named `pypi` on this repository
+   (Settings → Environments). Trusted Publishing uses short-lived OIDC
+   tokens, so no API secret needs to be stored. Adding required
+   reviewers on the `pypi` environment provides a manual gate before
+   each publish.
+3. Mark `v*` tags as protected (Settings → Tags → New protection rule)
+   so only maintainers can create or move release tags.
+
+### Per-release steps
+
+1. Bump the version in `gateway/pyproject.toml` (`project.version`) on a
+   topic branch and open a PR.
+2. After the PR is merged, tag the resulting commit on `main` with a
+   matching `vX.Y.Z` tag and push the tag:
+   ```bash
+   git switch main
+   git pull
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+3. The publish workflow validates the gates above, builds, and publishes
+   to PyPI. If any gate fails the workflow stops before the upload step.
+4. Confirm the new version on https://pypi.org/p/stackchan-mcp and try a
+   fresh `pipx install stackchan-mcp` (or `uv tool install stackchan-mcp`,
+   or `pip install stackchan-mcp` inside a virtualenv) in a clean
+   environment.
+
+PyPI does not allow re-uploading the same version. If a release goes out
+and you need to retract it, mark it yanked on PyPI rather than deleting
+it, and ship the fix under the next version.
+
+### Pinning policy for the publish workflow
+
+`pypa/gh-action-pypi-publish` is pinned to a specific minor.patch tag
+because it has direct upload access to PyPI; supporting actions
+(`actions/checkout`, `astral-sh/setup-uv`) are pinned to a major-version
+tag. Bumping the publish action's pin should be done in its own PR.
+
 ## Communication
 
 Be polite and concrete. This is a small hardware community, and clear technical

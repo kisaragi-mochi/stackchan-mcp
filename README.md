@@ -169,6 +169,38 @@ cannot be added accidentally with `git add -A`.
 
 ### 2. Start the gateway
 
+The gateway can either be installed as the published PyPI package
+(recommended for end users) or run from this repository as a checkout
+(recommended for contributors who want to follow `main`).
+
+#### Option A: install as a tool (recommended for end users)
+
+For an isolated install that does not collide with your system Python or
+other Python projects, use one of:
+
+```bash
+uv tool install stackchan-mcp
+# or
+pipx install stackchan-mcp
+```
+
+Then run the gateway:
+
+```bash
+stackchan-mcp
+```
+
+If you prefer a project-managed virtualenv, `pip install stackchan-mcp`
+inside an active venv works as well, and `python -m stackchan_mcp`
+inside that venv is equivalent to `stackchan-mcp`. Just avoid
+`pip install` against the system Python (PEP 668).
+
+The `STACKCHAN_TOKEN`, `VISION_HOST`, and other settings documented in
+[`gateway/README.md`](gateway/README.md#setup) can be supplied via environment
+variables, the active shell, or a `.env` file in the working directory.
+
+#### Option B: from source via uv (contributors)
+
 ```bash
 cd gateway
 cp .env.example .env       # set STACKCHAN_TOKEN / VISION_HOST
@@ -186,7 +218,26 @@ Tailscale Funnel flow and the `VISION_URL` capture callback setting.
 
 ### 3. Register as an MCP client (Claude Code example)
 
-Add to `~/.claude.json`:
+Add to `~/.claude.json`.
+
+If you installed via `pip install stackchan-mcp`:
+
+```json
+{
+  "mcpServers": {
+    "stackchan-mcp": {
+      "type": "stdio",
+      "command": "stackchan-mcp",
+      "env": {
+        "STACKCHAN_TOKEN": "your-secret-token-here",
+        "VISION_HOST": "your.host.lan.ip"
+      }
+    }
+  }
+}
+```
+
+If you installed from source via `uv`:
 
 ```json
 {

@@ -15,6 +15,37 @@ The gateway exposes a clean stdio MCP server to the LLM client (left) while
 speaking the xiaozhi-esp32 WebSocket MCP dialect to the device (right). It
 also runs a small HTTP server (`/capture`) so the ESP32 can upload photos.
 
+The package name on PyPI, the installed CLI command, and the MCP server id
+in your client config are all `stackchan-mcp`.
+
+## Install (end users)
+
+The gateway is published to PyPI as `stackchan-mcp`. For end users, install
+it as an isolated CLI tool:
+
+```bash
+uv tool install stackchan-mcp
+# or
+pipx install stackchan-mcp
+```
+
+Then run:
+
+```bash
+stackchan-mcp
+```
+
+`stackchan-mcp` reads its configuration (`STACKCHAN_TOKEN`, `VISION_HOST`,
+etc.) from environment variables or a `.env` file in the working directory.
+See the [Setup](#setup) section below for the supported variables. For the
+firmware side (WebSocket gateway URL, auth token, NVS configuration), see
+[`../README.md`](../README.md#configuring-the-websocket-gateway-url-and-auth-token).
+
+If you prefer a project-managed virtualenv, `pip install stackchan-mcp`
+inside an active venv works as well, and `python -m stackchan_mcp` inside
+that venv is equivalent to `stackchan-mcp`. Just avoid `pip install`
+against the system Python (PEP 668).
+
 ## Setup
 
 ```bash
@@ -165,3 +196,12 @@ asyncio.run(smoke())
 - **Phase 2** (done): real servo / volume / brightness via ESP32
 - **Phase 3** (done): camera capture (JPEG over HTTP)
 - **Phase 4** (planned): Opus audio stream (STT/TTS pipeline)
+
+## License
+
+The gateway is distributed under the MIT License (see `LICENSE`). The
+parent monorepo's `firmware/` directory contains SCServo_lib code under
+GPL-3.0, but those files live only inside
+`firmware/main/boards/stackchan/` and never enter this package. The
+gateway and firmware communicate only over WebSocket, so the GPL/MIT
+boundary is preserved at the process level.

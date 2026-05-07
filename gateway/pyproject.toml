@@ -5,6 +5,7 @@ description = "Two-faced MCP gateway for StackChan (xiaozhi-esp32): bridges stdi
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "kisaragi-mochi" },
 ]
@@ -35,6 +36,9 @@ dependencies = [
 Homepage = "https://github.com/kisaragi-mochi/stackchan-mcp"
 Repository = "https://github.com/kisaragi-mochi/stackchan-mcp"
 Issues = "https://github.com/kisaragi-mochi/stackchan-mcp/issues"
+
+[project.scripts]
+stackchan-mcp = "stackchan_mcp.cli:main"
 
 [dependency-groups]
 dev = [

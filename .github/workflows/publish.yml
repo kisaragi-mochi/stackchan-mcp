@@ -1,0 +1,138 @@
+name: Publish gateway to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Default permissions: nothing. Each job opts in to what it needs.
+permissions: {}
+
+# Only one publish run at a time per tag.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, lint, and test
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Need full history so the "is this tag on main?" check below
+          # can resolve origin/main.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag commit is on origin/main
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag commit $GITHUB_SHA is not an ancestor of origin/main."
+            echo "Refusing to publish from a non-main commit."
+            echo "Release tags must point at a commit that has been reviewed and merged into main."
+            exit 1
+          fi
+          echo "Tag commit verified to be on origin/main."
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+
+      - name: Verify tag matches gateway/pyproject.toml version (PEP 440)
+        working-directory: gateway
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "::error::Release tags must start with 'v' (got: $GITHUB_REF)"
+            exit 1
+          fi
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+
+          PYPROJECT_VERSION=$(python3 -c "import tomllib, sys; print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
+
+          # Use packaging.version.Version for PEP 440 normalization, so that
+          # tags like v0.1.0-rc.1 / 0.1.0rc1 / 0.1.0a1 compare correctly
+          # against the version recorded in pyproject.toml.
+          python3 -m pip install --quiet --user "packaging>=24"
+
+          NORMALIZED_TAG=$(python3 -c "from packaging.version import Version; print(Version('$TAG_VERSION'))")
+          NORMALIZED_PROJECT=$(python3 -c "from packaging.version import Version; print(Version('$PYPROJECT_VERSION'))")
+          echo "Tag (raw -> normalized):       $TAG_VERSION -> $NORMALIZED_TAG"
+          echo "Pyproject (raw -> normalized): $PYPROJECT_VERSION -> $NORMALIZED_PROJECT"
+          if [ "$NORMALIZED_TAG" != "$NORMALIZED_PROJECT" ]; then
+            echo "::error::Tag $TAG_VERSION does not match gateway/pyproject.toml version $PYPROJECT_VERSION"
+            exit 1
+          fi
+
+          # Reject local versions (e.g. 1.0+local) for public releases.
+          # Pre-release tags (rc / a / b) are intentionally allowed.
+          python3 - <<PY
+          from packaging.version import Version
+          v = Version("$NORMALIZED_TAG")
+          if v.local is not None:
+              raise SystemExit("::error::Local versions (e.g. 1.0+local) are not allowed for public releases")
+          print("Version policy: OK (pre-release allowed; local version rejected)")
+          PY
+
+      - name: Install gateway dependencies
+        working-directory: gateway
+        run: uv sync --frozen
+
+      - name: Run ruff
+        working-directory: gateway
+        run: uv run ruff check .
+
+      - name: Run pytest
+        working-directory: gateway
+        run: uv run pytest
+
+      - name: Build distributions
+        working-directory: gateway
+        run: uv build
+
+      - name: List built artifacts
+        working-directory: gateway
+        run: ls -la dist/
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: gateway/dist/
+          retention-days: 7
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+
+    # Trusted Publishing — short-lived OIDC token, no API secret needed.
+    # The `pypi` environment must be configured on GitHub (Settings ->
+    # Environments) and the project must be registered as a Trusted
+    # Publisher on PyPI before this job can succeed.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/stackchan-mcp
+
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@v1.14.0
