@@ -23,8 +23,19 @@ change is called out under a `Firmware` subsection of the release entry.
   OTA, settings) become visible on the LCD without erasing NVS.
   Calling `set_avatar` with any other face brings the avatar back and
   restores the previous blink state automatically. ([#3])
+- The on-device WiFi configuration UI now exposes a **WebSocket
+  Gateway URL** field on the **Advanced** tab. The value is persisted
+  to the `websocket` NVS namespace (`websocket.url`), which is the
+  same key the firmware connection logic reads on the next boot. End
+  users running a pre-built firmware can now point a fresh device at
+  their stackchan-mcp gateway from `http://192.168.4.1` without
+  rebuilding from source. The upstream `78/esp-wifi-connect` managed
+  component is kept in `firmware/components/78__esp-wifi-connect/` as
+  a project-level component override so the patch is explicit and
+  versioned in this repository. ([#25])
 
 [#3]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/3
+[#25]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/25
 
 ## [0.1.0] - 2026-05-07
 

@@ -105,12 +105,22 @@ There are three practical ways to provide them:
    in deterministic order and keeps the first candidate that completes the
    WebSocket server hello flow.
 
-2. **Write `websocket.url` / `websocket.token` directly to NVS**: this is the
-   intended persistent runtime configuration path, eventually via the WiFi
-   config UI. The UI fields are not implemented yet and are tracked under
-   Issue #17 follow-ups.
+2. **Use the on-device WiFi config UI (recommended for fresh users)**: while
+   the device is in WiFi configuration mode, open the captive portal at
+   `http://192.168.4.1`, switch to the **Advanced** tab, fill in the
+   **WebSocket Gateway URL** field (e.g. `ws://<gateway-host>:8765/`), and
+   submit. The value is persisted to the `websocket` NVS namespace
+   (`websocket.url`) and used on the next boot. This is the intended path
+   for end users running a pre-built firmware. To clear the URL and fall
+   back to `CONFIG_DEFAULT_WEBSOCKET_URL`, hit the ❌ button next to the
+   field and submit again.
 
-3. **Temporary source hardcode (not recommended)**: editing
+3. **Write `websocket.url` / `websocket.token` directly to NVS** (advanced):
+   for example with a custom NVS-write tool over serial. Same persistence
+   semantics as the WiFi config UI; primarily useful for batch
+   provisioning.
+
+4. **Temporary source hardcode (not recommended)**: editing
    `websocket_protocol.cc` can unblock local experiments, but keep it out of
    commits.
 

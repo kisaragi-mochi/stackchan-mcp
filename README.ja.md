@@ -96,9 +96,11 @@ WiFi 設定は ESP32 が起動後にスマホで設定 UI に接続して行う 
 
    デフォルトでは、対応する NVS キーが空のときだけこの値が使われます。新規デバイスへの初回フラッシュではちょうど期待通りに動作します。primary と fallback の両方を設定した場合、ファームウェアは決まった順番で候補を試し、WebSocket の server hello まで完了した最初の候補を使います。
 
-2. **NVS に直接 `websocket.url` / `websocket.token` を書き込む**: ランタイムでの永続設定の本来のパス。最終的には WiFi 設定 UI から行う想定ですが、現時点で UI フィールドは未実装で Issue #17 のフォローアップとして追跡しています。
+2. **デバイス上の WiFi 設定 UI を使う（新規ユーザー向け推奨）**: デバイスが WiFi 設定モードになっているとき、`http://192.168.4.1` のキャプティブポータルを開き、**Advanced** タブに切り替えて **WebSocket Gateway URL** フィールド（例: `ws://<gateway-host>:8765/`）を入力して送信します。値は `websocket` NVS namespace（`websocket.url`）に永続化され、次回起動時に使われます。pre-built ファームウェアを使うエンドユーザー向けの想定経路です。URL をクリアして `CONFIG_DEFAULT_WEBSOCKET_URL` に戻したい場合は、フィールド横の ❌ ボタンを押してから再度送信してください。
 
-3. **一時的なソース hardcode (非推奨)**: `websocket_protocol.cc` を編集すればローカル実験はアンブロックできますが、commit には残さないようにしてください。
+3. **NVS に直接 `websocket.url` / `websocket.token` を書き込む（上級者向け）**: 例えば独自の NVS 書き込みツールをシリアル経由で使うケース。WiFi 設定 UI と同じ永続化セマンティクス。バッチ provisioning などで主に使います。
+
+4. **一時的なソース hardcode (非推奨)**: `websocket_protocol.cc` を編集すればローカル実験はアンブロックできますが、commit には残さないようにしてください。
 
 よく使う gateway URL 構成:
 
