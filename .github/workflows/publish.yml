@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+  # Allow maintainers to manually run the build/test pipeline without
+  # cutting a tag — useful for verifying the workflow itself or
+  # dry-running a CI change. The publish job is skipped when the
+  # workflow is invoked this way, so this cannot accidentally release.
+  workflow_dispatch:
 
 # Default permissions: nothing. Each job opts in to what it needs.
 permissions: {}
@@ -31,6 +36,9 @@ jobs:
           persist-credentials: false
 
       - name: Verify tag commit is on origin/main
+        # Tag-only check. workflow_dispatch dry-runs skip this so they
+        # can validate the build/test pipeline from any branch.
+        if: github.event_name == 'push'
         run: |
           set -euo pipefail
           git fetch origin main
@@ -43,11 +51,17 @@ jobs:
           echo "Tag commit verified to be on origin/main."
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        # `astral-sh/setup-uv` ships immutable releases starting with
+        # v8 — no `@v8` alias exists, so a full version pin is required.
+        # See CONTRIBUTING.md "Pinning policy for the publish workflow".
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
 
       - name: Verify tag matches gateway/pyproject.toml version (PEP 440)
+        # Tag-only check. workflow_dispatch dry-runs skip this since
+        # there is no tag to compare against.
+        if: github.event_name == 'push'
         working-directory: gateway
         run: |
           set -euo pipefail
@@ -114,6 +128,12 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: build
+    # Only publish on tag pushes. workflow_dispatch invocations stop at
+    # the build job above, so manual runs cannot release. The
+    # `startsWith(github.ref, 'refs/tags/v')` guard makes the intent
+    # explicit and survives future trigger additions (e.g. push to
+    # branches).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
     # Trusted Publishing — short-lived OIDC token, no API secret needed.

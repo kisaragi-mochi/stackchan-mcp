@@ -245,10 +245,24 @@ it, and ship the fix under the next version.
 
 ### Pinning policy for the publish workflow
 
-`pypa/gh-action-pypi-publish` is pinned to a specific minor.patch tag
-because it has direct upload access to PyPI; supporting actions
-(`actions/checkout`, `astral-sh/setup-uv`) are pinned to a major-version
-tag. Bumping the publish action's pin should be done in its own PR.
+`pypa/gh-action-pypi-publish` is pinned to a specific `minor.patch` tag
+because it has direct upload access to PyPI. Supporting actions are
+pinned to the most stable form their upstream maintains:
+
+- `actions/checkout`, `actions/upload-artifact`, `actions/download-artifact`:
+  major-version tag (e.g. `@v4`). Upstream maintains `v4`, `v5`, ... as
+  moving aliases.
+- `astral-sh/setup-uv`: full `vX.Y.Z` tag. Starting with v8 the upstream
+  ships immutable releases only and does not maintain a moving major-
+  version alias, so `@v8` does not exist. Bump to a new full version in
+  its own PR.
+
+Bumping the publish action's pin should be done in its own PR.
+
+The publish workflow also supports `workflow_dispatch` so that
+maintainers can verify the build pipeline (lint / test / build)
+without cutting a tag. The publish job is gated on `push` events, so
+manual runs cannot release.
 
 ## Communication
 
