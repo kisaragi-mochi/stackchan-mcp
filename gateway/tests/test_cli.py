@@ -193,6 +193,62 @@ def test_check_port_bind_error_when_host_not_local() -> None:
     assert info.startswith("bind error:")
 
 
+def test_check_port_unresolvable_host_returns_bind_error() -> None:
+    """``getaddrinfo`` failure is reported as a bind error, not a crash."""
+    # ``.invalid`` is reserved by RFC 6761 and never resolves.
+    available, info = _check_port("nonexistent.invalid", 0)
+    assert available is False
+    assert info is not None
+    assert info.startswith("bind error:")
+    assert "getaddrinfo failed" in info
+
+
+def test_check_port_resolves_via_getaddrinfo_for_localhost() -> None:
+    """``localhost`` should be probed across every resolved address family.
+
+    This is the regression guard for the IPv6 fix: the previous probe
+    pinned ``AF_INET``, which would misreport an IPv6-only or
+    dual-stack ``localhost`` setup. We just need the call not to raise
+    and to produce a sensible boolean — the actual availability is
+    racy for any specific port, so we only assert the contract.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    available, info = _check_port("localhost", port)
+    # Either outcome is fine in principle (the port may have been
+    # grabbed between close() and probe); the regression we're catching
+    # is "the call raises an exception because of an AF mismatch".
+    assert isinstance(available, bool)
+    if not available:
+        assert info is None or info.startswith("bind error:") or "pid" in info
+
+
+@pytest.mark.skipif(
+    not socket.has_ipv6, reason="IPv6 stack not available on this host"
+)
+def test_check_port_against_unbound_ipv6_loopback_reports_available() -> None:
+    """``::1`` (IPv6 loopback) must be reachable through the new probe.
+
+    Pre-fix this would have raised because the socket was hard-coded
+    to ``AF_INET``; the new ``getaddrinfo`` resolver picks ``AF_INET6``
+    for the literal address.
+    """
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        sock.bind(("::1", 0))
+    except OSError:
+        pytest.skip("IPv6 loopback not configured on this host")
+    port = sock.getsockname()[1]
+    sock.close()
+
+    available, holder = _check_port("::1", port)
+    assert available is True
+    assert holder is None
+
+
 def test_check_port_against_unbound_port_reports_available() -> None:
     """Ask the OS for an ephemeral port, release it, then probe.
 
