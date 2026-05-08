@@ -313,3 +313,153 @@ def test_main_check_flag_runs_preflight_and_exits(
     out = capsys.readouterr().out
     assert "preflight" in out
     assert "Result: ready" in out
+
+
+# --- Port resolution tests (must mirror gateway.py) -------------------------
+
+
+def test_resolve_ws_port_defaults_to_8765(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WS_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+    port, source = cli._resolve_ws_port()
+    assert port == 8765
+    assert source == "default"
+
+
+def test_resolve_ws_port_prefers_ws_port_over_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WS_PORT", "9000")
+    monkeypatch.setenv("PORT", "9001")
+    port, source = cli._resolve_ws_port()
+    assert port == 9000
+    assert source == "WS_PORT"
+
+
+def test_resolve_ws_port_falls_back_to_PORT(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """gateway.py: int(os.getenv("WS_PORT", os.getenv("PORT", "8765")))."""
+    monkeypatch.delenv("WS_PORT", raising=False)
+    monkeypatch.setenv("PORT", "9001")
+    port, source = cli._resolve_ws_port()
+    assert port == 9001
+    assert source == "PORT"
+
+
+def test_resolve_ws_port_invalid_value_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WS_PORT", "abc")
+    port, source = cli._resolve_ws_port()
+    assert port is None
+    assert "WS_PORT" in source
+    assert "not an integer" in source
+
+
+def test_resolve_capture_port_defaults_to_8766(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CAPTURE_PORT", raising=False)
+    port, source = cli._resolve_capture_port()
+    assert port == 8766
+    assert source == "default"
+
+
+def test_resolve_capture_port_invalid_value_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CAPTURE_PORT", "not-a-number")
+    port, source = cli._resolve_capture_port()
+    assert port is None
+    assert "CAPTURE_PORT" in source
+    assert "not an integer" in source
+
+
+def test_run_preflight_invalid_ws_port_is_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``WS_PORT=<garbage>`` must NOT silently fall back to the default.
+
+    The gateway itself wraps the lookup in ``int(...)`` without a
+    try/except — silent fallback in preflight would mean reporting
+    "ready" for an environment the gateway would actually refuse to
+    start. That is the exact failure mode --check is meant to catch.
+    """
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("WS_PORT", "not-a-number")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "INVALID" in out
+    assert "WS_PORT" in out
+    assert "Result: 1 issue. Exit 1." in out
+
+
+def test_run_preflight_invalid_capture_port_is_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("CAPTURE_PORT", "garbage")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "INVALID" in out
+    assert "CAPTURE_PORT" in out
+
+
+def test_run_preflight_uses_PORT_fallback_for_ws_port(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``PORT=<value>`` must be honored when ``WS_PORT`` is unset.
+
+    ``gateway.py`` resolves ``WS_PORT`` → ``PORT`` → ``8765``, so the
+    preflight must check the same port that ``Gateway.start()`` will
+    actually bind to.
+    """
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("PORT", "9999")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    _run_preflight()
+    out = capsys.readouterr().out
+    assert "ws://0.0.0.0:9999" in out
+    # Capture port still falls through to its own default.
+    assert "http://0.0.0.0:8766" in out
+
+
+def test_run_preflight_ws_and_capture_same_port_is_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``WS_PORT == CAPTURE_PORT`` must be flagged even when the port is free.
+
+    ``_check_port`` binds-and-releases each port independently, so two
+    successive probes for the same free port both report AVAILABLE.
+    The gateway, however, holds the WebSocket port for the entire
+    process lifetime, so a subsequent capture bind would fail. The
+    conflict has to be caught at the configuration layer.
+    """
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("WS_PORT", "8765")
+    monkeypatch.setenv("CAPTURE_PORT", "8765")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "8765" in out
+    assert "distinct ports" in out
