@@ -87,38 +87,67 @@ _BIND_ERROR_PREFIX = "bind error: "
 
 
 def _check_port(host: str, port: int) -> tuple[bool, str | None]:
-    """Probe ``(host, port)`` by trying to ``bind()`` to it.
+    """Probe ``(host, port)`` by trying to ``bind()`` it across every family.
+
+    Resolves ``host`` via ``getaddrinfo`` with ``AF_UNSPEC`` and walks
+    each (family, sockaddr) candidate so the preflight matches the
+    same dual-stack behaviour as ``websockets.serve`` / ``aiohttp``.
+    A literal ``::1`` or an IPv6-resolving ``localhost`` is therefore
+    probed against the right address family rather than being
+    misreported by an ``AF_INET``-only socket.
 
     Returns ``(available, info)``:
 
-    - ``(True, None)``: bind succeeded, port is free.
-    - ``(False, "pid <N>, <cmd>")``: bind failed with ``EADDRINUSE`` and
-      ``lsof`` identified the holder.
-    - ``(False, None)``: bind failed with ``EADDRINUSE`` but ``lsof`` is
-      unavailable / the lookup failed.
-    - ``(False, "bind error: <reason>")``: bind failed for a non-
-      ``EADDRINUSE`` reason (for example, ``EADDRNOTAVAIL`` when ``HOST``
-      is not actually assigned to this machine, or ``EACCES`` on a
-      privileged port without permission). Distinguishing this from
-      "in use" prevents users from looking for a phantom process when
-      the real problem is the bind address.
+    - ``(True, None)``: at least one address family bound successfully.
+      (Some IPv6 stacks fail with ``EADDRNOTAVAIL`` on hosts without a
+      configured v6 interface; the gateway also tolerates that, so we
+      report "ready" if any candidate succeeded.)
+    - ``(False, "pid <N>, <cmd>")``: at least one candidate reported
+      ``EADDRINUSE``. We short-circuit on the first one because the
+      gateway will collide with the holder regardless of any other
+      family that may have been free.
+    - ``(False, None)``: same as above, but ``lsof`` could not identify
+      the holder (or is unavailable on this platform).
+    - ``(False, "bind error: <reason>")``: every candidate failed for
+      a non-``EADDRINUSE`` reason (typically ``EADDRNOTAVAIL`` for an
+      IP that is not assigned to any local interface, or ``EACCES`` on
+      a privileged port without permission). Distinguishing this from
+      "in use" prevents users from chasing a phantom process when the
+      real issue is the bind address.
     """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Deliberately skip SO_REUSEADDR: we want bind to fail when the
-    # port is genuinely held by another process, not silently succeed.
     try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        return (False, f"{_BIND_ERROR_PREFIX}getaddrinfo failed: {exc}")
+
+    last_error: str | None = None
+    bound_at_least_once = False
+    for family, socktype, proto, _canonname, sockaddr in infos:
+        sock = socket.socket(family, socktype, proto)
+        # Deliberately skip SO_REUSEADDR: we want bind to fail when the
+        # port is genuinely held by another process, not silently succeed.
         try:
-            sock.bind((host, port))
-        except OSError as exc:
-            if exc.errno == errno.EADDRINUSE:
-                return (False, _try_get_port_holder(port))
-            reason = exc.strerror or (
-                os.strerror(exc.errno) if exc.errno is not None else str(exc)
-            )
-            return (False, f"{_BIND_ERROR_PREFIX}{reason}")
-    finally:
-        sock.close()
-    return (True, None)
+            try:
+                sock.bind(sockaddr)
+            except OSError as exc:
+                if exc.errno == errno.EADDRINUSE:
+                    # Mirror gateway behaviour: an EADDRINUSE on any
+                    # candidate family means the gateway will collide.
+                    return (False, _try_get_port_holder(port))
+                reason = exc.strerror or (
+                    os.strerror(exc.errno)
+                    if exc.errno is not None
+                    else str(exc)
+                )
+                last_error = f"{_BIND_ERROR_PREFIX}{reason}"
+            else:
+                bound_at_least_once = True
+        finally:
+            sock.close()
+
+    if bound_at_least_once:
+        return (True, None)
+    return (False, last_error)
 
 
 def _try_get_port_holder(port: int) -> str | None:
