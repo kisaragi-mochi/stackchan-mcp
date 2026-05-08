@@ -369,6 +369,32 @@ def test_redact_url_secrets_leaves_safe_url_unchanged() -> None:
     assert _redact_url_secrets(safe) == safe
 
 
+def test_redact_url_secrets_masks_provider_specific_signed_params() -> None:
+    """AWS / GCP / Azure signed-URL params must be redacted via heuristic.
+
+    The exact-match set covers generic names like ``token`` and
+    ``signature``, but provider-specific parameters such as
+    ``X-Amz-Signature``, ``X-Amz-Security-Token``,
+    ``X-Goog-Signature``, ``X-Amz-Credential`` are not in the explicit
+    list; the suffix heuristic ensures they are still masked so a
+    pre-signed S3 / GCS URL pasted into ``VISION_URL`` does not leak
+    its credential payload through ``--check``.
+    """
+    out = _redact_url_secrets(
+        "https://bucket.s3.amazonaws.com/capture"
+        "?X-Amz-Signature=AAAA&X-Amz-Security-Token=BBBB"
+        "&X-Amz-Credential=CCCC&X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        "&page=1"
+    )
+    assert "AAAA" not in out
+    assert "BBBB" not in out
+    assert "CCCC" not in out
+    # Algorithm name is not a secret; it should remain visible so the
+    # user can still tell what scheme the URL is signed with.
+    assert "AWS4-HMAC-SHA256" in out
+    assert "page=1" in out
+
+
 def test_redact_url_secrets_handles_unparseable_input_gracefully() -> None:
     """Malformed input must not crash the preflight."""
     # urlparse is very permissive, so this is more about the contract

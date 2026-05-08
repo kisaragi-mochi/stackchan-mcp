@@ -125,8 +125,22 @@ def _check_port(host: str, port: int) -> tuple[bool, str | None]:
     bound_at_least_once = False
     for family, socktype, proto, _canonname, sockaddr in infos:
         sock = socket.socket(family, socktype, proto)
-        # Deliberately skip SO_REUSEADDR: we want bind to fail when the
-        # port is genuinely held by another process, not silently succeed.
+        # Mirror ``asyncio.create_server``'s default behaviour on POSIX:
+        # the gateway sets SO_REUSEADDR=1, so a port in TIME_WAIT after
+        # a recent gateway restart would NOT actually block a fresh
+        # bind. Without this option the preflight would misreport such
+        # a port as IN USE and exit non-zero, even though the gateway
+        # itself would start cleanly. SO_REUSEADDR does not let the
+        # bind succeed when another process is currently LISTENing on
+        # the port (POSIX semantics), so the EADDRINUSE branch below
+        # still fires for genuine collisions.
+        if hasattr(socket, "SO_REUSEADDR"):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            except OSError:
+                # Some platforms reject SO_REUSEADDR for certain socket
+                # types; fall through and try the bind anyway.
+                pass
         try:
             try:
                 sock.bind(sockaddr)
@@ -256,11 +270,8 @@ def _resolve_capture_port() -> tuple[int | None, str]:
     return _validate_port_value(raw, "CAPTURE_PORT")
 
 
-# Query parameter names that, when present, are treated as secrets and
-# replaced with ``***redacted***`` in the preflight output. These cover
-# the common patterns for Basic-auth-in-URL, OAuth-style bearer tokens,
-# and signed URLs (Tailscale Funnel, S3 presigned URLs, etc.). The set
-# is intentionally case-insensitive — comparisons use ``.lower()``.
+# Exact query parameter names that are always redacted in preflight
+# output. Compared lowercased.
 _SECRET_QUERY_KEYS = frozenset(
     {
         "access_token",
@@ -276,6 +287,27 @@ _SECRET_QUERY_KEYS = frozenset(
         "token",
     }
 )
+
+# Suffix-based heuristic for redacting provider-specific signed-URL
+# parameters without enumerating every variant. Matches things like
+# ``X-Amz-Signature``, ``X-Amz-Security-Token``, ``X-Goog-Signature``,
+# Azure SAS ``sig`` (already covered by the exact set), generic
+# ``*_token`` / ``*-secret`` patterns, etc. Compared lowercased.
+_SECRET_QUERY_KEY_SUFFIXES = (
+    "signature",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "credentials",
+)
+
+
+def _is_secret_query_key(key: str) -> bool:
+    lower = key.lower()
+    if lower in _SECRET_QUERY_KEYS:
+        return True
+    return any(lower.endswith(suffix) for suffix in _SECRET_QUERY_KEY_SUFFIXES)
 
 
 def _redact_url_secrets(url: str) -> str:
@@ -318,9 +350,7 @@ def _redact_url_secrets(url: str) -> str:
             params = None
         if params is not None:
             redacted = [
-                (k, "***redacted***")
-                if k.lower() in _SECRET_QUERY_KEYS
-                else (k, v)
+                (k, "***redacted***") if _is_secret_query_key(k) else (k, v)
                 for k, v in params
             ]
             query = urlencode(redacted)
