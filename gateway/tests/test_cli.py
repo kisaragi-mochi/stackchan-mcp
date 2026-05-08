@@ -561,3 +561,29 @@ def test_run_preflight_ws_and_capture_same_port_is_conflict(
     out = capsys.readouterr().out
     assert "8765" in out
     assert "distinct ports" in out
+
+
+def test_run_preflight_both_ports_zero_is_not_a_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``WS_PORT=0`` AND ``CAPTURE_PORT=0`` is a valid ephemeral setup.
+
+    Each ``bind((host, 0))`` asks the OS for a fresh ephemeral port, so
+    two listeners both configured with 0 do not actually collide —
+    this is the exact configuration the existing gateway tests use.
+    The conflict check must therefore exclude port 0; otherwise
+    ``--check`` would falsely fail a supported gateway start-up
+    scenario.
+    """
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("WS_PORT", "0")
+    monkeypatch.setenv("CAPTURE_PORT", "0")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "distinct ports" not in out
+    assert "Result: ready. Exit 0." in out
