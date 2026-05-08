@@ -1,16 +1,55 @@
 """Tests for the stackchan-mcp CLI entry point.
 
 These tests focus on the no-side-effect command-line flags
-(``--help``, ``--version``); full gateway start-up is covered by
-``test_stdio_server.py`` and ``test_gateway.py``.
+(``--help``, ``--version``, ``--check``); full gateway start-up is
+covered by ``test_stdio_server.py`` and ``test_gateway.py``.
 """
 
 from __future__ import annotations
 
+import socket
+from pathlib import Path
+
 import pytest
 
-from stackchan_mcp import __version__
-from stackchan_mcp.cli import _build_arg_parser, main
+from stackchan_mcp import __version__, cli
+from stackchan_mcp.cli import (
+    _build_arg_parser,
+    _check_port,
+    _format_port_status,
+    _run_preflight,
+    main,
+)
+
+
+_PREFLIGHT_ENV_VARS = (
+    "STACKCHAN_TOKEN",
+    "BEARER_TOKEN",
+    "VISION_HOST",
+    "VISION_URL",
+    "VISION_TOKEN",
+    "HOST",
+    "WS_PORT",
+    "CAPTURE_PORT",
+)
+
+
+def _isolate_preflight_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Make preflight tests independent of any host ``.env`` / inherited env.
+
+    ``python-dotenv`` resolves ``.env`` via ``find_dotenv()``, which
+    walks up the **calling stack frame's** file path — not the cwd —
+    so simply ``chdir(tmp_path)`` is not enough to escape a developer's
+    real ``gateway/.env``. We instead replace ``cli._load_dotenv`` with
+    a no-op for the duration of the test, then strip the relevant env
+    vars to give the preflight a deterministic baseline.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
+    for var in _PREFLIGHT_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
 
 
 def test_arg_parser_help_long_flag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -88,3 +127,189 @@ def test_version_resolves_from_installed_metadata() -> None:
     # Expect a SemVer-ish leading digit; the editable install resolves
     # to whatever ``pyproject.toml`` declares.
     assert __version__[:1].isdigit()
+
+
+# --- --check flag tests -----------------------------------------------------
+
+
+def test_arg_parser_check_flag_is_registered() -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args(["--check"])
+    assert args.check is True
+
+
+def test_arg_parser_check_defaults_to_false() -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args([])
+    assert args.check is False
+
+
+def test_format_port_status_available() -> None:
+    assert _format_port_status(True, None) == "AVAILABLE"
+
+
+def test_format_port_status_in_use_no_holder() -> None:
+    assert _format_port_status(False, None) == "IN USE"
+
+
+def test_format_port_status_in_use_with_holder() -> None:
+    assert (
+        _format_port_status(False, "pid 12345, python")
+        == "IN USE (pid 12345, python)"
+    )
+
+
+def test_check_port_against_unbound_port_reports_available() -> None:
+    """Ask the OS for an ephemeral port, release it, then probe.
+
+    Not perfectly race-free (something else could grab the port between
+    ``close()`` and ``_check_port``'s bind), but the window is tiny and
+    this gives confidence that ``_check_port`` plays nicely with the
+    real socket layer rather than only the mocked variant.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    available, holder = _check_port("127.0.0.1", port)
+    assert available is True
+    assert holder is None
+
+
+def test_check_port_against_held_port_reports_in_use() -> None:
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    held.bind(("127.0.0.1", 0))
+    held.listen(1)
+    try:
+        port = held.getsockname()[1]
+        available, _holder = _check_port("127.0.0.1", port)
+        assert available is False
+    finally:
+        held.close()
+
+
+def test_run_preflight_with_no_config_reports_defaults_and_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    # Don't actually open sockets in the test process.
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "STACKCHAN_TOKEN     not set" in out
+    assert "VISION_HOST         not set" in out
+    assert "VISION_URL          not set" in out
+    assert "VISION_TOKEN        not set" in out
+    assert "ws://0.0.0.0:8765" in out
+    assert "http://0.0.0.0:8766" in out
+    assert "AVAILABLE" in out
+    assert "Result: ready. Exit 0." in out
+
+
+def test_run_preflight_masks_secrets_and_derives_vision_url(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Tokens must never be echoed; VISION_URL is derived from VISION_HOST."""
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("STACKCHAN_TOKEN", "super-secret-token-value")
+    monkeypatch.setenv("VISION_HOST", "192.168.1.42")
+    monkeypatch.setenv("VISION_TOKEN", "another-secret-value")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "super-secret-token-value" not in out
+    assert "another-secret-value" not in out
+    # Both tokens should be reported as redacted, not as their raw value.
+    assert out.count("***redacted***") == 2
+    # VISION_HOST is configuration, not a secret, so it is shown as-is.
+    assert "VISION_HOST         192.168.1.42" in out
+    assert "(derived) http://192.168.1.42:8766/capture" in out
+
+
+def test_run_preflight_explicit_vision_url_overrides_derivation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("VISION_HOST", "192.168.1.42")
+    monkeypatch.setenv("VISION_URL", "https://stackchan.example.ts.net/capture")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    _run_preflight()
+    out = capsys.readouterr().out
+    assert "VISION_URL          https://stackchan.example.ts.net/capture" in out
+    # The derived line must not appear when an explicit URL is set.
+    assert "(derived)" not in out
+
+
+def test_run_preflight_in_use_ports_return_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "_check_port",
+        lambda host, port: (False, f"pid 12345, mock-{port}"),
+    )
+
+    exit_code = _run_preflight()
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "IN USE (pid 12345, mock-8765)" in out
+    assert "IN USE (pid 12345, mock-8766)" in out
+    assert "Result: 2 issues. Exit 1." in out
+
+
+def test_run_preflight_one_in_use_port_singular_phrasing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_preflight_env(monkeypatch, tmp_path)
+
+    def fake_check(host: str, port: int) -> tuple[bool, str | None]:
+        if port == 8765:
+            return (False, "pid 999, fake")
+        return (True, None)
+
+    monkeypatch.setattr(cli, "_check_port", fake_check)
+
+    exit_code = _run_preflight()
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    # Singular ``issue`` (not ``issues``) when exactly one port is held.
+    assert "Result: 1 issue. Exit 1." in out
+
+
+def test_main_check_flag_runs_preflight_and_exits(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``main(['--check'])`` exits with the preflight return code.
+
+    Guards the contract that ``--check`` never reaches the asyncio
+    gateway start-up below the early exit, by relying on ``main`` to
+    propagate ``_run_preflight``'s return as ``SystemExit``.
+    """
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--check"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "preflight" in out
+    assert "Result: ready" in out

@@ -14,6 +14,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+import shutil
+import socket
+import subprocess
+import sys
 
 from . import __version__
 
@@ -55,7 +60,195 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {__version__}",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "Run a non-destructive preflight (configuration, port "
+            "availability, derived URLs) and exit. Exit 0 if ready to run, "
+            "non-zero if at least one blocking issue is found."
+        ),
+    )
     return parser
+
+
+# --- Preflight diagnostics (--check) ----------------------------------------
+#
+# The preflight is intentionally side-effect-free: it loads ``.env``, reads
+# environment variables, attempts non-blocking ``bind()`` calls to the two
+# server ports, and prints a concise human-readable report. It does NOT
+# reach out to any ESP32, does not start either server, and does not modify
+# any files. Live device connectivity belongs in a future ``status``
+# subcommand (Issue #54 "Out of scope" note).
+
+
+def _check_port(host: str, port: int) -> tuple[bool, str | None]:
+    """Probe ``(host, port)`` by trying to ``bind()`` to it.
+
+    Returns ``(available, holder_info)``:
+
+    - ``available=True``: the bind succeeded, port is free.
+    - ``available=False``: the bind failed (port is in use). ``holder_info``
+      is a best-effort ``"pid <N>, <cmd>"`` string from ``lsof``, or
+      ``None`` if ``lsof`` is unavailable / the lookup fails.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Deliberately skip SO_REUSEADDR: we want bind to fail when the
+    # port is genuinely held by another process, not silently succeed.
+    try:
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return (False, _try_get_port_holder(port))
+    finally:
+        sock.close()
+    return (True, None)
+
+
+def _try_get_port_holder(port: int) -> str | None:
+    """Best-effort lookup of the process holding ``port`` via ``lsof``.
+
+    Returns ``"pid <N>, <cmd>"`` on success, or ``None`` if ``lsof`` is
+    not installed, the call fails, or the port is not in fact held (for
+    example, the bind failure was due to a permission error rather than
+    EADDRINUSE).
+    """
+    if shutil.which("lsof") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["lsof", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpcn"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    pid: str | None = None
+    cmd: str | None = None
+    for line in result.stdout.splitlines():
+        if line.startswith("p"):
+            pid = line[1:]
+        elif line.startswith("c"):
+            cmd = line[1:]
+    if pid and cmd:
+        return f"pid {pid}, {cmd}"
+    if pid:
+        return f"pid {pid}"
+    return None
+
+
+def _format_port_status(available: bool, holder: str | None) -> str:
+    if available:
+        return "AVAILABLE"
+    if holder:
+        return f"IN USE ({holder})"
+    return "IN USE"
+
+
+def _load_dotenv() -> None:
+    """Lazy ``.env`` loader exposed as a single attachable seam.
+
+    Wrapping ``python-dotenv`` here keeps two properties:
+
+    1. ``import stackchan_mcp.cli`` stays side-effect free (the
+       ``dotenv`` import only happens when the gateway / preflight is
+       actually invoked).
+    2. Tests can ``monkeypatch.setattr(cli, "_load_dotenv", ...)`` to
+       prevent the real ``find_dotenv()`` walking up to the developer's
+       ``gateway/.env`` and contaminating environment-isolation tests.
+    """
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+
+def _run_preflight() -> int:
+    """Run preflight diagnostics. Returns the desired process exit code.
+
+    Output is intentionally fixed-width and grep-friendly. Exit 0 means
+    "ready to run"; non-zero means at least one blocking issue (currently
+    only port unavailability). Missing optional configuration is reported
+    but does not fail the check, mirroring how the gateway itself only
+    warns about a missing ``STACKCHAN_TOKEN``.
+    """
+    _load_dotenv()
+
+    issues = 0
+    print(f"stackchan-mcp {__version__} preflight")
+    print()
+
+    # --- Configuration ------------------------------------------------------
+    print("Configuration:")
+    token = os.getenv("STACKCHAN_TOKEN") or os.getenv("BEARER_TOKEN")
+    if token:
+        print("  STACKCHAN_TOKEN     set (***redacted***)")
+    else:
+        print("  STACKCHAN_TOKEN     not set (gateway will accept any client)")
+
+    vision_host = os.getenv("VISION_HOST", "")
+    capture_port_raw = os.getenv("CAPTURE_PORT", "8766")
+    if vision_host:
+        print(f"  VISION_HOST         {vision_host}")
+    else:
+        print("  VISION_HOST         not set")
+
+    vision_url_explicit = os.getenv("VISION_URL", "")
+    if vision_url_explicit:
+        print(f"  VISION_URL          {vision_url_explicit}")
+    elif vision_host:
+        derived = f"http://{vision_host}:{capture_port_raw}/capture"
+        print(f"  VISION_URL          (derived) {derived}")
+    else:
+        print(
+            "  VISION_URL          not set "
+            "(set VISION_HOST or VISION_URL for take_photo)"
+        )
+
+    if os.getenv("VISION_TOKEN"):
+        print("  VISION_TOKEN        set (***redacted***)")
+    else:
+        print("  VISION_TOKEN        not set (will reuse STACKCHAN_TOKEN)")
+
+    # --- Ports --------------------------------------------------------------
+    print()
+    print("Ports:")
+    host = os.getenv("HOST", "0.0.0.0")
+    try:
+        ws_port = int(os.getenv("WS_PORT", "8765"))
+    except ValueError:
+        ws_port = 8765
+    try:
+        capture_port = int(capture_port_raw)
+    except ValueError:
+        capture_port = 8766
+
+    ws_available, ws_holder = _check_port(host, ws_port)
+    print(
+        f"  ws://{host}:{ws_port}   {_format_port_status(ws_available, ws_holder)}"
+    )
+    if not ws_available:
+        issues += 1
+
+    cap_available, cap_holder = _check_port(host, capture_port)
+    print(
+        f"  http://{host}:{capture_port} "
+        f"{_format_port_status(cap_available, cap_holder)}"
+    )
+    if not cap_available:
+        issues += 1
+
+    # --- Result -------------------------------------------------------------
+    print()
+    if issues == 0:
+        print("Result: ready. Exit 0.")
+        return 0
+    plural = "s" if issues > 1 else ""
+    print(f"Result: {issues} issue{plural}. Exit 1.")
+    return 1
 
 
 async def _run() -> None:
@@ -78,19 +271,22 @@ async def _run() -> None:
 def main(argv: list[str] | None = None) -> None:
     """Console-script entry point.
 
-    Parses ``--help`` / ``--version`` early (without side effects), then
-    loads ``.env``, configures logging, and starts the gateway. Side
-    effects are intentionally scoped to this function so that
-    ``import stackchan_mcp`` stays clean.
+    Parses ``--help`` / ``--version`` / ``--check`` early (without
+    starting the server), then loads ``.env``, configures logging, and
+    starts the gateway. Side effects are intentionally scoped to this
+    function so that ``import stackchan_mcp`` stays clean.
     """
     parser = _build_arg_parser()
     # argparse exits with status 0 on --help / --version before reaching
     # any of the gateway start-up below, which is the intended behaviour.
-    parser.parse_args(argv)
+    args = parser.parse_args(argv)
 
-    from dotenv import load_dotenv
+    if args.check:
+        # ``_run_preflight`` loads ``.env`` itself; do not double-load
+        # via the path below.
+        sys.exit(_run_preflight())
 
-    load_dotenv()
+    _load_dotenv()
 
     logging.basicConfig(
         level=logging.INFO,
