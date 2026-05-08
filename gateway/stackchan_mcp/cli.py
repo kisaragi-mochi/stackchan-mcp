@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import logging
 import os
 import shutil
@@ -82,15 +83,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 # subcommand (Issue #54 "Out of scope" note).
 
 
+_BIND_ERROR_PREFIX = "bind error: "
+
+
 def _check_port(host: str, port: int) -> tuple[bool, str | None]:
     """Probe ``(host, port)`` by trying to ``bind()`` to it.
 
-    Returns ``(available, holder_info)``:
+    Returns ``(available, info)``:
 
-    - ``available=True``: the bind succeeded, port is free.
-    - ``available=False``: the bind failed (port is in use). ``holder_info``
-      is a best-effort ``"pid <N>, <cmd>"`` string from ``lsof``, or
-      ``None`` if ``lsof`` is unavailable / the lookup fails.
+    - ``(True, None)``: bind succeeded, port is free.
+    - ``(False, "pid <N>, <cmd>")``: bind failed with ``EADDRINUSE`` and
+      ``lsof`` identified the holder.
+    - ``(False, None)``: bind failed with ``EADDRINUSE`` but ``lsof`` is
+      unavailable / the lookup failed.
+    - ``(False, "bind error: <reason>")``: bind failed for a non-
+      ``EADDRINUSE`` reason (for example, ``EADDRNOTAVAIL`` when ``HOST``
+      is not actually assigned to this machine, or ``EACCES`` on a
+      privileged port without permission). Distinguishing this from
+      "in use" prevents users from looking for a phantom process when
+      the real problem is the bind address.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # Deliberately skip SO_REUSEADDR: we want bind to fail when the
@@ -98,8 +109,13 @@ def _check_port(host: str, port: int) -> tuple[bool, str | None]:
     try:
         try:
             sock.bind((host, port))
-        except OSError:
-            return (False, _try_get_port_holder(port))
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                return (False, _try_get_port_holder(port))
+            reason = exc.strerror or (
+                os.strerror(exc.errno) if exc.errno is not None else str(exc)
+            )
+            return (False, f"{_BIND_ERROR_PREFIX}{reason}")
     finally:
         sock.close()
     return (True, None)
@@ -144,9 +160,15 @@ def _try_get_port_holder(port: int) -> str | None:
 def _format_port_status(available: bool, holder: str | None) -> str:
     if available:
         return "AVAILABLE"
-    if holder:
-        return f"IN USE ({holder})"
-    return "IN USE"
+    if holder is None:
+        return "IN USE"
+    if holder.startswith(_BIND_ERROR_PREFIX):
+        # Don't say "IN USE" for non-EADDRINUSE bind failures
+        # (EADDRNOTAVAIL, EACCES, etc.). Surface the actual reason
+        # instead so the user does not chase a phantom process.
+        reason = holder.removeprefix(_BIND_ERROR_PREFIX)
+        return f"BIND ERROR ({reason})"
+    return f"IN USE ({holder})"
 
 
 _TCP_PORT_RANGE = range(0, 65536)

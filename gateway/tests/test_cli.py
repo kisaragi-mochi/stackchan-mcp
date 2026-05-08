@@ -30,6 +30,11 @@ _PREFLIGHT_ENV_VARS = (
     "VISION_TOKEN",
     "HOST",
     "WS_PORT",
+    # ``_resolve_ws_port`` falls back to ``PORT`` when ``WS_PORT`` is
+    # unset, so ``PORT`` must also be cleared for the default-port
+    # tests to be deterministic across CI / dev environments that
+    # already export ``PORT``.
+    "PORT",
     "CAPTURE_PORT",
 )
 
@@ -157,6 +162,35 @@ def test_format_port_status_in_use_with_holder() -> None:
         _format_port_status(False, "pid 12345, python")
         == "IN USE (pid 12345, python)"
     )
+
+
+def test_format_port_status_bind_error_is_not_in_use() -> None:
+    """Non-EADDRINUSE bind failures must not be reported as ``IN USE``.
+
+    Showing ``IN USE`` for, say, ``EADDRNOTAVAIL`` (HOST not assigned
+    to this machine) sends the user looking for a competing process
+    that does not exist.
+    """
+    holder = "bind error: Cannot assign requested address"
+    assert (
+        _format_port_status(False, holder)
+        == "BIND ERROR (Cannot assign requested address)"
+    )
+
+
+def test_check_port_bind_error_when_host_not_local() -> None:
+    """A LAN-but-not-local IP triggers EADDRNOTAVAIL, not EADDRINUSE.
+
+    Binding to an IP that is not assigned to any local interface fails
+    with ``EADDRNOTAVAIL`` on macOS / Linux. The probe must report this
+    distinct from "port in use" so the diagnostic does not mislead.
+    192.0.2.0/24 (TEST-NET-1, RFC 5737) is reserved for documentation
+    and is virtually guaranteed not to be on a developer's machine.
+    """
+    available, info = _check_port("192.0.2.1", 0)
+    assert available is False
+    assert info is not None
+    assert info.startswith("bind error:")
 
 
 def test_check_port_against_unbound_port_reports_available() -> None:
