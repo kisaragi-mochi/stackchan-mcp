@@ -359,6 +359,37 @@ def test_resolve_ws_port_invalid_value_returns_none(
     assert "not an integer" in source
 
 
+@pytest.mark.parametrize("bad_value", ["-1", "65536", "100000"])
+def test_resolve_ws_port_out_of_range_returns_none(
+    monkeypatch: pytest.MonkeyPatch, bad_value: str
+) -> None:
+    """Values outside 0-65535 must be rejected before they reach bind().
+
+    ``socket.bind()`` raises ``OverflowError`` for integers outside the
+    TCP port range, which would crash ``--check`` with a stack trace
+    instead of producing the diagnostic report it is meant to produce.
+    """
+    monkeypatch.setenv("WS_PORT", bad_value)
+    port, source = cli._resolve_ws_port()
+    assert port is None
+    assert "out of TCP port range" in source
+
+
+def test_resolve_ws_port_zero_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``0`` lets the OS pick an ephemeral port — bind-able, so accept it.
+
+    The gateway may not actually want this in production, but it is a
+    valid TCP port value and ``bind((host, 0))`` succeeds. Preflight
+    only filters out values that would crash ``bind()``.
+    """
+    monkeypatch.setenv("WS_PORT", "0")
+    port, source = cli._resolve_ws_port()
+    assert port == 0
+    assert source == "WS_PORT"
+
+
 def test_resolve_capture_port_defaults_to_8766(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -376,6 +407,39 @@ def test_resolve_capture_port_invalid_value_returns_none(
     assert port is None
     assert "CAPTURE_PORT" in source
     assert "not an integer" in source
+
+
+@pytest.mark.parametrize("bad_value", ["-1", "65536", "99999"])
+def test_resolve_capture_port_out_of_range_returns_none(
+    monkeypatch: pytest.MonkeyPatch, bad_value: str
+) -> None:
+    monkeypatch.setenv("CAPTURE_PORT", bad_value)
+    port, source = cli._resolve_capture_port()
+    assert port is None
+    assert "out of TCP port range" in source
+
+
+def test_run_preflight_out_of_range_ws_port_is_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Out-of-range WS port must be reported, not crashed on.
+
+    Before this guard, ``WS_PORT=65536`` would parse as int and reach
+    ``socket.bind()``, which raises ``OverflowError`` and aborts the
+    preflight without printing the result line — exactly the failure
+    mode ``--check`` is meant to catch in advance.
+    """
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("WS_PORT", "65536")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "INVALID" in out
+    assert "out of TCP port range" in out
 
 
 def test_run_preflight_invalid_ws_port_is_blocking(

@@ -149,27 +149,46 @@ def _format_port_status(available: bool, holder: str | None) -> str:
     return "IN USE"
 
 
+_TCP_PORT_RANGE = range(0, 65536)
+
+
+def _validate_port_value(raw: str, var: str) -> tuple[int | None, str]:
+    """Parse ``raw`` as a TCP port, returning ``(port, source_or_error)``.
+
+    Returns ``(int_value, var)`` for a valid in-range integer (0..65535
+    inclusive — ``0`` lets the OS pick, which the gateway may not
+    actually want but is at least bind-able). Returns ``(None, "<var>=
+    <raw> (...)")`` otherwise; the caller treats that as a blocking
+    issue rather than silently falling through to a default.
+
+    Both branches matter for the preflight: ``socket.bind()`` raises
+    ``OverflowError`` for values outside the TCP port range, so without
+    this validation ``--check`` would crash with a stack trace instead
+    of producing the diagnostic report it exists to produce.
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        return (None, f"{var}={raw!r} (not an integer)")
+    if value not in _TCP_PORT_RANGE:
+        return (None, f"{var}={raw!r} (out of TCP port range 0-65535)")
+    return (value, var)
+
+
 def _resolve_ws_port() -> tuple[int | None, str]:
     """Resolve the WebSocket port using the same precedence as ``gateway.py``.
 
     Mirrors ``int(os.getenv("WS_PORT", os.getenv("PORT", "8765")))`` from
     ``gateway.py`` so the preflight checks the port the gateway will
-    actually bind, not a hard-coded default. Returns ``(port, source)``
-    where ``source`` describes the env var (or ``"default"``). On a
-    non-integer value, returns ``(None, "WS_PORT=<value> (not an
-    integer)")`` etc., which the caller turns into a blocking issue
-    rather than silently falling through to the default — silent
-    fallback would be a misleading "ready" report for an environment
-    the gateway itself would refuse to start with.
+    actually bind, not a hard-coded default. See ``_validate_port_value``
+    for the validation rules; on success returns ``(port, "WS_PORT")``
+    or ``(port, "PORT")``, otherwise ``(None, "<var>=<raw> (...)")``.
     """
     for var in ("WS_PORT", "PORT"):
         raw = os.getenv(var)
         if raw is None:
             continue
-        try:
-            return (int(raw), var)
-        except ValueError:
-            return (None, f"{var}={raw!r} (not an integer)")
+        return _validate_port_value(raw, var)
     return (8765, "default")
 
 
@@ -177,15 +196,12 @@ def _resolve_capture_port() -> tuple[int | None, str]:
     """Resolve the HTTP capture port using ``gateway.py``'s precedence.
 
     Mirrors ``int(os.getenv("CAPTURE_PORT", "8766"))``. See
-    ``_resolve_ws_port`` for the rationale around invalid values.
+    ``_validate_port_value`` for the validation rules.
     """
     raw = os.getenv("CAPTURE_PORT")
     if raw is None:
         return (8766, "default")
-    try:
-        return (int(raw), "CAPTURE_PORT")
-    except ValueError:
-        return (None, f"CAPTURE_PORT={raw!r} (not an integer)")
+    return _validate_port_value(raw, "CAPTURE_PORT")
 
 
 def _load_dotenv() -> None:
