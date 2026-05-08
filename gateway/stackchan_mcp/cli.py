@@ -149,6 +149,45 @@ def _format_port_status(available: bool, holder: str | None) -> str:
     return "IN USE"
 
 
+def _resolve_ws_port() -> tuple[int | None, str]:
+    """Resolve the WebSocket port using the same precedence as ``gateway.py``.
+
+    Mirrors ``int(os.getenv("WS_PORT", os.getenv("PORT", "8765")))`` from
+    ``gateway.py`` so the preflight checks the port the gateway will
+    actually bind, not a hard-coded default. Returns ``(port, source)``
+    where ``source`` describes the env var (or ``"default"``). On a
+    non-integer value, returns ``(None, "WS_PORT=<value> (not an
+    integer)")`` etc., which the caller turns into a blocking issue
+    rather than silently falling through to the default — silent
+    fallback would be a misleading "ready" report for an environment
+    the gateway itself would refuse to start with.
+    """
+    for var in ("WS_PORT", "PORT"):
+        raw = os.getenv(var)
+        if raw is None:
+            continue
+        try:
+            return (int(raw), var)
+        except ValueError:
+            return (None, f"{var}={raw!r} (not an integer)")
+    return (8765, "default")
+
+
+def _resolve_capture_port() -> tuple[int | None, str]:
+    """Resolve the HTTP capture port using ``gateway.py``'s precedence.
+
+    Mirrors ``int(os.getenv("CAPTURE_PORT", "8766"))``. See
+    ``_resolve_ws_port`` for the rationale around invalid values.
+    """
+    raw = os.getenv("CAPTURE_PORT")
+    if raw is None:
+        return (8766, "default")
+    try:
+        return (int(raw), "CAPTURE_PORT")
+    except ValueError:
+        return (None, f"CAPTURE_PORT={raw!r} (not an integer)")
+
+
 def _load_dotenv() -> None:
     """Lazy ``.env`` loader exposed as a single attachable seam.
 
@@ -217,29 +256,45 @@ def _run_preflight() -> int:
     print()
     print("Ports:")
     host = os.getenv("HOST", "0.0.0.0")
-    try:
-        ws_port = int(os.getenv("WS_PORT", "8765"))
-    except ValueError:
-        ws_port = 8765
-    try:
-        capture_port = int(capture_port_raw)
-    except ValueError:
-        capture_port = 8766
+    ws_port, ws_source = _resolve_ws_port()
+    cap_port, cap_source = _resolve_capture_port()
 
-    ws_available, ws_holder = _check_port(host, ws_port)
-    print(
-        f"  ws://{host}:{ws_port}   {_format_port_status(ws_available, ws_holder)}"
-    )
-    if not ws_available:
+    if ws_port is None:
+        print(f"  ws://{host}:???     INVALID ({ws_source})")
+        issues += 1
+    if cap_port is None:
+        print(f"  http://{host}:???   INVALID ({cap_source})")
         issues += 1
 
-    cap_available, cap_holder = _check_port(host, capture_port)
-    print(
-        f"  http://{host}:{capture_port} "
-        f"{_format_port_status(cap_available, cap_holder)}"
-    )
-    if not cap_available:
+    if ws_port is not None and cap_port is not None and ws_port == cap_port:
+        # The gateway runs WebSocket and HTTP capture as separate
+        # listeners; binding the WebSocket server first will then make
+        # the HTTP bind fail. Independent _check_port probes can't see
+        # this on their own (each one binds-and-releases), so we surface
+        # the conflict explicitly.
+        print(
+            f"  WS_PORT ({ws_source}) and CAPTURE_PORT ({cap_source}) "
+            f"both resolve to {ws_port}; the gateway needs distinct ports."
+        )
         issues += 1
+
+    if ws_port is not None:
+        ws_available, ws_holder = _check_port(host, ws_port)
+        print(
+            f"  ws://{host}:{ws_port}   "
+            f"{_format_port_status(ws_available, ws_holder)}"
+        )
+        if not ws_available:
+            issues += 1
+
+    if cap_port is not None:
+        cap_available, cap_holder = _check_port(host, cap_port)
+        print(
+            f"  http://{host}:{cap_port} "
+            f"{_format_port_status(cap_available, cap_holder)}"
+        )
+        if not cap_available:
+            issues += 1
 
     # --- Result -------------------------------------------------------------
     print()
