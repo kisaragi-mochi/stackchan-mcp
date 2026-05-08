@@ -304,12 +304,22 @@ def _run_preflight() -> int:
         print(f"  http://{host}:???   INVALID ({cap_source})")
         issues += 1
 
-    if ws_port is not None and cap_port is not None and ws_port == cap_port:
+    if (
+        ws_port is not None
+        and cap_port is not None
+        and ws_port == cap_port
+        and ws_port != 0
+    ):
         # The gateway runs WebSocket and HTTP capture as separate
         # listeners; binding the WebSocket server first will then make
         # the HTTP bind fail. Independent _check_port probes can't see
         # this on their own (each one binds-and-releases), so we surface
         # the conflict explicitly.
+        #
+        # Port 0 is excluded: each ``bind((host, 0))`` asks the OS for a
+        # fresh ephemeral port, so two listeners both configured with 0
+        # do NOT collide (this is exactly the configuration the existing
+        # gateway tests use).
         print(
             f"  WS_PORT ({ws_source}) and CAPTURE_PORT ({cap_source}) "
             f"both resolve to {ws_port}; the gateway needs distinct ports."
