@@ -11,10 +11,51 @@ working.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 
+from . import __version__
+
 logger = logging.getLogger(__name__)
+
+
+_DESCRIPTION = (
+    "stdio MCP gateway for the StackChan / xiaozhi-esp32 firmware. "
+    "Bridges stdio MCP clients (for example Claude Code) to a StackChan "
+    "ESP32 device over WebSocket, and exposes an HTTP capture endpoint "
+    "for photo uploads from the device."
+)
+
+_EPILOG = """\
+Environment variables:
+  STACKCHAN_TOKEN   Bearer token shared with the ESP32 firmware.
+  VISION_URL        Full public capture URL (e.g. Tailscale Funnel).
+  VISION_HOST       LAN IP of this machine, as seen from the ESP32.
+  VISION_TOKEN      Optional separate token for VISION_URL uploads.
+  HOST              Bind address for the ESP32 WebSocket server (default 0.0.0.0).
+  WS_PORT           Port for the ESP32 WebSocket server (default 8765).
+  CAPTURE_PORT      Port for the HTTP capture server (default 8766).
+
+See gateway/README.md and the top-level README.md for full setup,
+including pairing the ESP32 firmware and configuring the WiFi gateway URL.
+"""
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="stackchan-mcp",
+        description=_DESCRIPTION,
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    return parser
 
 
 async def _run() -> None:
@@ -34,13 +75,19 @@ async def _run() -> None:
         await gateway.stop()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Console-script entry point.
 
-    Loads ``.env``, configures logging, and starts the gateway. Side
+    Parses ``--help`` / ``--version`` early (without side effects), then
+    loads ``.env``, configures logging, and starts the gateway. Side
     effects are intentionally scoped to this function so that
     ``import stackchan_mcp`` stays clean.
     """
+    parser = _build_arg_parser()
+    # argparse exits with status 0 on --help / --version before reaching
+    # any of the gateway start-up below, which is the intended behaviour.
+    parser.parse_args(argv)
+
     from dotenv import load_dotenv
 
     load_dotenv()

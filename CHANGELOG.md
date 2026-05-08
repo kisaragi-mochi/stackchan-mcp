@@ -15,6 +15,27 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Added
+
+- `stackchan-mcp` CLI now supports `--help` / `-h` and `--version` /
+  `-V` flags. `--help` prints usage and the supported environment
+  variables (`STACKCHAN_TOKEN`, `VISION_URL`, `VISION_HOST`,
+  `VISION_TOKEN`, `HOST`, `WS_PORT`, `CAPTURE_PORT`) plus pointers to
+  the in-tree READMEs, and exits without binding any ports.
+  `--version` prints the installed package version. End users running
+  `pipx install stackchan-mcp` can now confirm the install and check
+  basic usage without starting a server. ([#52], [#53])
+
+### Changed
+
+- `stackchan_mcp.__version__` is now resolved from installed package
+  metadata (`importlib.metadata.version("stackchan-mcp")`) instead of
+  a hard-coded literal, so the value tracks `gateway/pyproject.toml`
+  automatically across releases.
+
+[#52]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/52
+[#53]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/53
+
 ## [0.2.0] - 2026-05-08
 
 ### Added
