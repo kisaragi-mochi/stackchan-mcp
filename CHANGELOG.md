@@ -25,6 +25,16 @@ change is called out under a `Firmware` subsection of the release entry.
   `--version` prints the installed package version. End users running
   `pipx install stackchan-mcp` can now confirm the install and check
   basic usage without starting a server. ([#52], [#53])
+- `stackchan-mcp --check` runs a non-destructive preflight and exits
+  without entering the stdio MCP loop. It loads `.env`, reports
+  configuration with secrets redacted (`STACKCHAN_TOKEN`, `VISION_URL`
+  derived from `VISION_HOST` when not set explicitly, `VISION_TOKEN`),
+  probes the WebSocket and capture ports (`HOST:WS_PORT`,
+  `HOST:CAPTURE_PORT`) via a non-blocking `bind()`, and best-effort
+  reports the holding process via `lsof` when a port is in use. Exit
+  status is `0` if ready, non-zero with an issue count when at least
+  one blocking problem is detected. Live device connectivity probing
+  is intentionally out of scope. ([#54])
 
 ### Changed
 
@@ -35,6 +45,7 @@ change is called out under a `Firmware` subsection of the release entry.
 
 [#52]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/52
 [#53]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/53
+[#54]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/54
 
 ## [0.2.0] - 2026-05-08
 
