@@ -83,6 +83,29 @@ will notice the dropped WebSocket and retry while idle. The retry delay starts
 at 5 seconds and backs off up to 60 seconds. After the gateway is listening
 again, check `get_status` from the stdio MCP side to confirm the device is back.
 
+## Configuration changes
+
+The gateway reads `.env` once at process start. Because the gateway runs as a
+**stdio MCP server** (it has no standalone CLI mode beyond `--help` /
+`--version` / `--check`), editing `.env` while it is connected to an MCP
+client does not take effect on the running process — and killing the gateway
+process directly will not auto-restart it; the MCP client owns the lifecycle.
+
+After editing `.env` (for example to update `STACKCHAN_TOKEN`, `VISION_URL`,
+or `VISION_TOKEN`):
+
+1. Reconnect the MCP client. In Claude Code this is `/mcp` to reconnect, or a
+   full Claude Code restart.
+2. Confirm `mcp__stackchan-mcp__get_status` returns `connected: true` with the
+   expected `tools_count`.
+3. If the ESP32 was already connected with a stale auth credential, hard-reset
+   the device (`esptool.py --before default_reset --after hard_reset chip_id`,
+   or DTR/RTS toggle via pyserial) so it reconnects with the fresh
+   configuration.
+
+`STACKCHAN_TOKEN` takes precedence over the legacy `BEARER_TOKEN`; setting
+either is enough, but if you have both, keep them aligned.
+
 ## Tests
 
 ```bash
