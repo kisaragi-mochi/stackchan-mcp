@@ -20,6 +20,7 @@ import shutil
 import socket
 import subprocess
 import sys
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from . import __version__
 
@@ -255,6 +256,80 @@ def _resolve_capture_port() -> tuple[int | None, str]:
     return _validate_port_value(raw, "CAPTURE_PORT")
 
 
+# Query parameter names that, when present, are treated as secrets and
+# replaced with ``***redacted***`` in the preflight output. These cover
+# the common patterns for Basic-auth-in-URL, OAuth-style bearer tokens,
+# and signed URLs (Tailscale Funnel, S3 presigned URLs, etc.). The set
+# is intentionally case-insensitive — comparisons use ``.lower()``.
+_SECRET_QUERY_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth",
+        "auth_token",
+        "key",
+        "password",
+        "secret",
+        "sig",
+        "signature",
+        "token",
+    }
+)
+
+
+def _redact_url_secrets(url: str) -> str:
+    """Mask userinfo and secret-looking query params in ``url``.
+
+    The preflight output is meant to be safe to paste into a public
+    issue or log, so any in-URL credential is replaced before
+    printing:
+
+    - ``https://user:pass@host/path`` → ``https://***:***@host/path``
+    - ``?token=abc&page=1`` → ``?token=%2A%2A%2Aredacted%2A%2A%2A&page=1``
+      (only keys in ``_SECRET_QUERY_KEYS`` are touched; non-secret
+      params keep their value)
+
+    Non-credential structure (scheme, host, port, path, fragment,
+    non-secret query keys) is preserved so users can still see what
+    the gateway is actually configured to call. Inputs that fail to
+    parse are returned unchanged so the preflight never crashes on a
+    malformed value.
+    """
+    try:
+        parsed = urlparse(url)
+    except (ValueError, TypeError):
+        return url
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        # Strip userinfo and replace with a fixed placeholder. Don't
+        # try to preserve the username — the username alone can leak
+        # information and the structural info we care about (host,
+        # port) lives after the @.
+        _userinfo, _, host_part = netloc.rpartition("@")
+        netloc = f"***:***@{host_part}"
+
+    query = parsed.query
+    if query:
+        try:
+            params = parse_qsl(query, keep_blank_values=True)
+        except ValueError:
+            params = None
+        if params is not None:
+            redacted = [
+                (k, "***redacted***")
+                if k.lower() in _SECRET_QUERY_KEYS
+                else (k, v)
+                for k, v in params
+            ]
+            query = urlencode(redacted)
+
+    return urlunparse(
+        (parsed.scheme, netloc, parsed.path, parsed.params, query, parsed.fragment)
+    )
+
+
 def _load_dotenv() -> None:
     """Lazy ``.env`` loader exposed as a single attachable seam.
 
@@ -304,8 +379,11 @@ def _run_preflight() -> int:
 
     vision_url_explicit = os.getenv("VISION_URL", "")
     if vision_url_explicit:
-        print(f"  VISION_URL          {vision_url_explicit}")
+        print(f"  VISION_URL          {_redact_url_secrets(vision_url_explicit)}")
     elif vision_host:
+        # Derived URL has no userinfo or query params, so no redaction
+        # needed; the host part is shown as-is by design (it is the IP
+        # the user has configured for capture).
         derived = f"http://{vision_host}:{capture_port_raw}/capture"
         print(f"  VISION_URL          (derived) {derived}")
     else:

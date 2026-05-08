@@ -17,6 +17,7 @@ from stackchan_mcp.cli import (
     _build_arg_parser,
     _check_port,
     _format_port_status,
+    _redact_url_secrets,
     _run_preflight,
     main,
 )
@@ -340,6 +341,69 @@ def test_run_preflight_explicit_vision_url_overrides_derivation(
     assert "VISION_URL          https://stackchan.example.ts.net/capture" in out
     # The derived line must not appear when an explicit URL is set.
     assert "(derived)" not in out
+
+
+def test_redact_url_secrets_strips_basic_auth_userinfo() -> None:
+    """``user:pass@`` must be replaced before the URL is printed."""
+    out = _redact_url_secrets("https://user:pass@example.com:8443/capture")
+    assert "user" not in out
+    assert "pass" not in out
+    assert "***:***@example.com:8443/capture" in out
+    assert out.startswith("https://")
+
+
+def test_redact_url_secrets_masks_secret_query_params() -> None:
+    """Common token / signature keys must be redacted; other keys stay."""
+    out = _redact_url_secrets(
+        "https://example.com/capture?token=abc123&page=1&signature=xyz"
+    )
+    assert "abc123" not in out
+    assert "xyz" not in out
+    assert "page=1" in out  # non-secret params are preserved
+    assert "redacted" in out
+
+
+def test_redact_url_secrets_leaves_safe_url_unchanged() -> None:
+    """A URL with no userinfo or secret params must not be altered."""
+    safe = "https://stackchan.example.ts.net:8443/capture?page=2"
+    assert _redact_url_secrets(safe) == safe
+
+
+def test_redact_url_secrets_handles_unparseable_input_gracefully() -> None:
+    """Malformed input must not crash the preflight."""
+    # urlparse is very permissive, so this is more about the contract
+    # than triggering the except: anything weird simply round-trips.
+    assert _redact_url_secrets("") == ""
+    weird = "not a url at all"
+    # Either the input is returned as-is or urlparse rebuilds it
+    # losslessly; we only care that no exception escapes.
+    assert isinstance(_redact_url_secrets(weird), str)
+
+
+def test_run_preflight_redacts_explicit_vision_url(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Tokens in ``VISION_URL`` must not appear in preflight output.
+
+    The preflight is meant to be safe to paste into an issue or log,
+    so signed-URL secrets and Basic-auth userinfo have to be masked at
+    print time.
+    """
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "VISION_URL",
+        "https://signer:topsecret@example.com/capture?token=tk_abc123",
+    )
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    _run_preflight()
+    out = capsys.readouterr().out
+    assert "topsecret" not in out
+    assert "tk_abc123" not in out
+    assert "signer" not in out
+    assert "example.com/capture" in out
 
 
 def test_run_preflight_in_use_ports_return_nonzero(
