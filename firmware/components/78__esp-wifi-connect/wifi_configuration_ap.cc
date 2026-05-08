@@ -27,6 +27,38 @@
 extern const char index_html_start[] asm("_binary_wifi_configuration_html_start");
 extern const char done_html_start[] asm("_binary_wifi_configuration_done_html_start");
 
+namespace {
+
+// Reads an NVS string into a std::string without a fixed stack buffer.
+// `nvs_get_str` returns the required length when called with a null
+// destination, so we size the std::string once and read into its
+// storage. Mirrors Settings::GetString in firmware/main/settings.cc so
+// that bearer tokens longer than the previous 256-byte stack limit
+// (e.g. JWTs) are read in full instead of silently coming back empty
+// with ESP_ERR_NVS_INVALID_LENGTH and being treated as "not set" by
+// the WiFi config UI. Returns an empty string on any failure or when
+// the key is absent; callers cannot distinguish "missing key" from
+// "empty stored value", which matches Settings::GetString.
+std::string ReadNvsStringDynamic(nvs_handle_t handle, const char* key) {
+    size_t length = 0;
+    esp_err_t err = nvs_get_str(handle, key, nullptr, &length);
+    if (err != ESP_OK || length == 0) {
+        return std::string();
+    }
+    std::string value;
+    value.resize(length);
+    err = nvs_get_str(handle, key, value.data(), &length);
+    if (err != ESP_OK) {
+        return std::string();
+    }
+    while (!value.empty() && value.back() == '\0') {
+        value.pop_back();
+    }
+    return value;
+}
+
+} // namespace
+
 WifiConfigurationAp::WifiConfigurationAp()
 {
     event_group_ = xEventGroupCreate();
@@ -215,21 +247,40 @@ void WifiConfigurationAp::StartAccessPoint()
         nvs_close(nvs);
     }
 
-    // Load WebSocket gateway URL from the "websocket" NVS namespace.
-    // Kept in a separate namespace because main/protocols/websocket_protocol.cc
-    // reads from Settings("websocket").GetString("url"), and the firmware build
-    // also exposes CONFIG_DEFAULT_WEBSOCKET_URL / FORCE override flags that
-    // operate against the same namespace.
+    // Load WebSocket gateway URL, fallback URL, and bearer token from the
+    // "websocket" NVS namespace. Kept in a separate namespace because
+    // main/protocols/websocket_protocol.cc reads from
+    // Settings("websocket").GetString("url" | "fallback_url" | "token"), and
+    // the firmware build also exposes CONFIG_DEFAULT_WEBSOCKET_URL /
+    // CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL / CONFIG_DEFAULT_WEBSOCKET_TOKEN
+    // and the FORCE override flag that operate against the same namespace.
     nvs_handle_t ws_nvs;
     err = nvs_open("websocket", NVS_READONLY, &ws_nvs);
     if (err == ESP_OK) {
-        char websocket_url[512] = {0};
-        size_t websocket_url_size = sizeof(websocket_url);
-        err = nvs_get_str(ws_nvs, "url", websocket_url, &websocket_url_size);
-        if (err == ESP_OK) {
-            websocket_url_ = websocket_url;
+        // Use ReadNvsStringDynamic instead of fixed-size stack buffers so
+        // long values (long URLs, JWT-style bearer tokens) are read in
+        // full. Returning an empty string for "missing key" / "empty
+        // stored value" / "read failed" is fine here — the UI never
+        // distinguishes those cases anyway.
+        std::string url = ReadNvsStringDynamic(ws_nvs, "url");
+        if (!url.empty()) {
+            websocket_url_ = std::move(url);
             ESP_LOGI(TAG, "WebSocket URL loaded from NVS (websocket.url)");
         }
+
+        std::string fallback_url = ReadNvsStringDynamic(ws_nvs, "fallback_url");
+        if (!fallback_url.empty()) {
+            websocket_fallback_url_ = std::move(fallback_url);
+            ESP_LOGI(TAG, "WebSocket fallback URL loaded from NVS (websocket.fallback_url)");
+        }
+
+        std::string token = ReadNvsStringDynamic(ws_nvs, "token");
+        if (!token.empty()) {
+            websocket_token_ = std::move(token);
+            // Do not log the token value itself.
+            ESP_LOGI(TAG, "WebSocket token loaded from NVS (websocket.token)");
+        }
+
         nvs_close(ws_nvs);
     }
 }
@@ -373,6 +424,9 @@ void WifiConfigurationAp::StartWebServer()
         .handler = [](httpd_req_t *req) -> esp_err_t {
             char *buf;
             size_t buf_len = req->content_len;
+            // /submit only carries WiFi SSID + password (max 32 + 64
+            // bytes plus JSON overhead), so the legacy 1 KiB cap is
+            // sufficient for this endpoint.
             if (buf_len > 1024) { // 限制最大请求体大小
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
                 return ESP_FAIL;
@@ -544,6 +598,18 @@ void WifiConfigurationAp::StartWebServer()
             if (!this_->websocket_url_.empty()) {
                 cJSON_AddStringToObject(json, "websocket_url", this_->websocket_url_.c_str());
             }
+            if (!this_->websocket_fallback_url_.empty()) {
+                cJSON_AddStringToObject(json, "websocket_fallback_url",
+                                        this_->websocket_fallback_url_.c_str());
+            }
+            // Do not return the token value itself: the WiFi config AP
+            // runs unauthenticated (WIFI_AUTH_OPEN), so any nearby device
+            // that can reach /advanced/config could otherwise harvest the
+            // bearer token. Report only whether one is currently
+            // configured so the UI can show a non-leaking placeholder; the
+            // user must re-enter a new value to overwrite it.
+            cJSON_AddBoolToObject(json, "websocket_token_set",
+                                  !this_->websocket_token_.empty());
             cJSON_AddNumberToObject(json, "max_tx_power", this_->max_tx_power_);
             cJSON_AddBoolToObject(json, "remember_bssid", this_->remember_bssid_);
             cJSON_AddBoolToObject(json, "sleep_mode", this_->sleep_mode_);
@@ -573,7 +639,13 @@ void WifiConfigurationAp::StartWebServer()
         .handler = [](httpd_req_t *req) -> esp_err_t {
             char *buf;
             size_t buf_len = req->content_len;
-            if (buf_len > 1024) {
+            // /advanced/submit can carry an OTA URL, two WebSocket
+            // gateway URLs, and a WebSocket bearer token. JWT-style
+            // tokens routinely run 1-2 KiB, so the legacy 1 KiB cap
+            // would reject otherwise valid submissions. 4 KiB still
+            // bounds the per-request allocation conservatively while
+            // accommodating long bearer tokens.
+            if (buf_len > 4096) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
                 return ESP_FAIL;
             }
@@ -584,17 +656,28 @@ void WifiConfigurationAp::StartWebServer()
                 return ESP_FAIL;
             }
 
-            int ret = httpd_req_recv(req, buf, buf_len);
-            if (ret <= 0) {
-                free(buf);
-                if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
-                    httpd_resp_send_408(req);
-                } else {
-                    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to receive request");
+            // Loop until the full Content-Length has been received.
+            // httpd_req_recv may legally return fewer bytes than asked
+            // for in a single call once the body grows past a single
+            // socket read (now likely with 1-2 KiB JWT tokens), so the
+            // earlier "single recv -> done" pattern would intermittently
+            // leave the buffer truncated and break cJSON_Parse for valid
+            // long-token submissions.
+            size_t received = 0;
+            while (received < buf_len) {
+                int chunk = httpd_req_recv(req, buf + received, buf_len - received);
+                if (chunk <= 0) {
+                    free(buf);
+                    if (chunk == HTTPD_SOCK_ERR_TIMEOUT) {
+                        httpd_resp_send_408(req);
+                    } else {
+                        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to receive request");
+                    }
+                    return ESP_FAIL;
                 }
-                return ESP_FAIL;
+                received += static_cast<size_t>(chunk);
             }
-            buf[ret] = '\0';
+            buf[received] = '\0';
 
             // 解析JSON数据
             cJSON *json = cJSON_Parse(buf);
@@ -626,39 +709,74 @@ void WifiConfigurationAp::StartWebServer()
                 }
             }
 
-            // 保存WebSocket gateway URL (separate "websocket" NVS namespace).
-            // Empty string is also persisted so that a user clearing the
-            // field can fall back to CONFIG_DEFAULT_WEBSOCKET_URL or to a
-            // value supplied by another channel.
+            // 保存WebSocket gateway URL / fallback URL / token (separate
+            // "websocket" NVS namespace). Empty strings are also persisted so
+            // that a user clearing a field can fall back to the matching
+            // CONFIG_DEFAULT_WEBSOCKET_* Kconfig value (or to a value supplied
+            // by another channel) on the next boot.
             //
             // We track failures in `ws_save_failed` instead of returning
             // immediately so the function still has a single cleanup +
             // response path at the bottom; the final `success` flag below
             // ANDs this in so that a websocket save failure is reported
-            // to the client instead of being silently masked.
+            // to the client instead of being silently masked. The handle is
+            // opened once per request and the three keys share a single
+            // commit, mirroring how `nvs_open("wifi", ...)` batches the
+            // `wifi`-namespace fields below.
             bool ws_save_failed = false;
-            cJSON *websocket_url = cJSON_GetObjectItem(json, "websocket_url");
-            if (cJSON_IsString(websocket_url) && websocket_url->valuestring) {
-                this_->websocket_url_ = websocket_url->valuestring;
-                nvs_handle_t ws_nvs;
-                esp_err_t ws_err = nvs_open("websocket", NVS_READWRITE, &ws_nvs);
-                if (ws_err == ESP_OK) {
-                    ws_err = nvs_set_str(ws_nvs, "url", this_->websocket_url_.c_str());
-                    if (ws_err != ESP_OK) {
-                        ESP_LOGE(TAG, "Failed to save WebSocket URL: %d", ws_err);
-                        ws_save_failed = true;
-                    } else {
-                        ws_err = nvs_commit(ws_nvs);
-                        if (ws_err != ESP_OK) {
-                            ESP_LOGE(TAG, "Failed to commit WebSocket NVS: %d", ws_err);
-                            ws_save_failed = true;
-                        }
-                    }
-                    nvs_close(ws_nvs);
-                } else {
-                    ESP_LOGE(TAG, "Failed to open websocket NVS namespace: %d", ws_err);
+            bool ws_nvs_opened = false;
+            bool ws_dirty = false;
+            nvs_handle_t ws_nvs = 0;
+            auto ensure_ws_nvs_open = [&]() -> bool {
+                if (ws_save_failed) {
+                    return false;
+                }
+                if (ws_nvs_opened) {
+                    return true;
+                }
+                esp_err_t open_err = nvs_open("websocket", NVS_READWRITE, &ws_nvs);
+                if (open_err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to open websocket NVS namespace: %d", open_err);
+                    ws_save_failed = true;
+                    return false;
+                }
+                ws_nvs_opened = true;
+                return true;
+            };
+
+            auto save_ws_string = [&](const char* key, const char* json_field,
+                                      std::string& dest) {
+                cJSON *item = cJSON_GetObjectItem(json, json_field);
+                if (!cJSON_IsString(item) || !item->valuestring) {
+                    return;
+                }
+                if (!ensure_ws_nvs_open()) {
+                    return;
+                }
+                dest = item->valuestring;
+                esp_err_t set_err = nvs_set_str(ws_nvs, key, dest.c_str());
+                if (set_err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to save websocket.%s: %d", key, set_err);
+                    ws_save_failed = true;
+                    return;
+                }
+                ws_dirty = true;
+            };
+
+            save_ws_string("url", "websocket_url", this_->websocket_url_);
+            save_ws_string("fallback_url", "websocket_fallback_url",
+                           this_->websocket_fallback_url_);
+            save_ws_string("token", "websocket_token", this_->websocket_token_);
+
+            if (ws_nvs_opened && ws_dirty && !ws_save_failed) {
+                esp_err_t commit_err = nvs_commit(ws_nvs);
+                if (commit_err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to commit WebSocket NVS: %d", commit_err);
                     ws_save_failed = true;
                 }
+            }
+            if (ws_nvs_opened) {
+                nvs_close(ws_nvs);
             }
 
             // 保存WiFi功率
@@ -717,8 +835,15 @@ void WifiConfigurationAp::StartWebServer()
             httpd_resp_set_hdr(req, "Connection", "close");
             httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
 
-            ESP_LOGI(TAG, "Saved settings: ota_url=%s, websocket_url=%s, max_tx_power=%d, remember_bssid=%d, sleep_mode=%d",
-                this_->ota_url_.c_str(), this_->websocket_url_.c_str(), this_->max_tx_power_, this_->remember_bssid_, this_->sleep_mode_);
+            // The token value is intentionally redacted from this log line
+            // (only its presence is reported) so a serial monitor capture
+            // does not leak the bearer secret.
+            ESP_LOGI(TAG,
+                "Saved settings: ota_url=%s, websocket_url=%s, websocket_fallback_url=%s, websocket_token=%s, max_tx_power=%d, remember_bssid=%d, sleep_mode=%d",
+                this_->ota_url_.c_str(), this_->websocket_url_.c_str(),
+                this_->websocket_fallback_url_.c_str(),
+                this_->websocket_token_.empty() ? "(empty)" : "(set)",
+                this_->max_tx_power_, this_->remember_bssid_, this_->sleep_mode_);
             return ESP_OK;
         },
         .user_ctx = this

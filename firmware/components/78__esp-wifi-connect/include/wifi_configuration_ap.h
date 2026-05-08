@@ -74,6 +74,19 @@ private:
     // running a pre-built firmware point the device at their stackchan-mcp
     // gateway from the on-device WiFi config UI without rebuilding.
     std::string websocket_url_;
+    // Optional fallback WebSocket gateway URL persisted to the same
+    // "websocket" NVS namespace (key "fallback_url"). The firmware
+    // connection logic in websocket_protocol.cc tries the primary URL
+    // first and the fallback after the primary candidate fails the
+    // server-hello flow, so users can configure a "local primary +
+    // remote fallback" gateway profile from the WiFi config UI.
+    std::string websocket_fallback_url_;
+    // Optional bearer token persisted to the same "websocket" NVS
+    // namespace (key "token"). websocket_protocol.cc sends it in the
+    // HTTP Authorization header when non-empty. Stored as a separate
+    // field so it can be input via a password-style UI control without
+    // exposing the value in the URL fields.
+    std::string websocket_token_;
     int8_t max_tx_power_;
     bool remember_bssid_;
     bool sleep_mode_;

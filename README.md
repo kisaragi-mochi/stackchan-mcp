@@ -107,18 +107,38 @@ There are three practical ways to provide them:
 
 2. **Use the on-device WiFi config UI (recommended for fresh users)**: while
    the device is in WiFi configuration mode, open the captive portal at
-   `http://192.168.4.1`, switch to the **Advanced** tab, fill in the
-   **WebSocket Gateway URL** field (e.g. `ws://<gateway-host>:8765/`), and
-   submit. The value is persisted to the `websocket` NVS namespace
-   (`websocket.url`) and used on the next boot. This is the intended path
-   for end users running a pre-built firmware. To clear the URL and fall
-   back to `CONFIG_DEFAULT_WEBSOCKET_URL`, hit the ❌ button next to the
-   field and submit again.
+   `http://192.168.4.1`, switch to the **Advanced** tab, and fill in:
+   - **WebSocket Gateway URL** (e.g. `ws://<gateway-host>:8765/`) — the
+     primary gateway candidate.
+   - **Fallback Gateway URL** (e.g. `wss://<node>.<tailnet>.ts.net/`) —
+     optional second candidate, tried only after the primary candidate
+     fails the server-hello flow.
+   - **Gateway Token** — optional bearer token, sent as
+     `Authorization: Bearer <token>` to both candidates when set. The
+     current value is never displayed (the WiFi config AP is
+     unauthenticated, so the GET endpoint reports only whether a token
+     is configured). Leave the field blank to keep the existing token,
+     type a new value to update it, or hit ❌ to fall back to the
+     build-time `CONFIG_DEFAULT_WEBSOCKET_TOKEN`. On stock builds where
+     no Kconfig default is set this disables auth; on builds that ship
+     a default token, ❌ reverts to that default rather than truly
+     clearing authentication. To switch the device to an unauthenticated
+     gateway on a build that ships a default token, rebuild the
+     firmware with the Kconfig default empty (or set a non-empty token
+     on the gateway side that matches the build default).
 
-3. **Write `websocket.url` / `websocket.token` directly to NVS** (advanced):
-   for example with a custom NVS-write tool over serial. Same persistence
-   semantics as the WiFi config UI; primarily useful for batch
-   provisioning.
+   Submit to persist the values to the `websocket` NVS namespace
+   (`websocket.url` / `websocket.fallback_url` / `websocket.token`); they
+   are read on the next boot. This is the intended path for end users
+   running a pre-built firmware. Clearing a URL field with the ❌ button
+   and submitting again falls back to the matching
+   `CONFIG_DEFAULT_WEBSOCKET_*` Kconfig value (or to "no fallback" when
+   no Kconfig default is set).
+
+3. **Write `websocket.url` / `websocket.fallback_url` / `websocket.token`
+   directly to NVS** (advanced): for example with a custom NVS-write tool
+   over serial. Same persistence semantics as the WiFi config UI;
+   primarily useful for batch provisioning.
 
 4. **Temporary source hardcode (not recommended)**: editing
    `websocket_protocol.cc` can unblock local experiments, but keep it out of

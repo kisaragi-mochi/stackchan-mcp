@@ -96,9 +96,14 @@ WiFi 設定は ESP32 が起動後にスマホで設定 UI に接続して行う 
 
    デフォルトでは、対応する NVS キーが空のときだけこの値が使われます。新規デバイスへの初回フラッシュではちょうど期待通りに動作します。primary と fallback の両方を設定した場合、ファームウェアは決まった順番で候補を試し、WebSocket の server hello まで完了した最初の候補を使います。
 
-2. **デバイス上の WiFi 設定 UI を使う（新規ユーザー向け推奨）**: デバイスが WiFi 設定モードになっているとき、`http://192.168.4.1` のキャプティブポータルを開き、**Advanced** タブに切り替えて **WebSocket Gateway URL** フィールド（例: `ws://<gateway-host>:8765/`）を入力して送信します。値は `websocket` NVS namespace（`websocket.url`）に永続化され、次回起動時に使われます。pre-built ファームウェアを使うエンドユーザー向けの想定経路です。URL をクリアして `CONFIG_DEFAULT_WEBSOCKET_URL` に戻したい場合は、フィールド横の ❌ ボタンを押してから再度送信してください。
+2. **デバイス上の WiFi 設定 UI を使う（新規ユーザー向け推奨）**: デバイスが WiFi 設定モードになっているとき、`http://192.168.4.1` のキャプティブポータルを開き、**Advanced** タブに切り替えて以下を入力します:
+   - **WebSocket Gateway URL**（例: `ws://<gateway-host>:8765/`） — primary な gateway 候補。
+   - **Fallback Gateway URL**（例: `wss://<node>.<tailnet>.ts.net/`） — 任意の 2 番目の候補。primary が server hello 完了に失敗したときだけ試行されます。
+   - **Gateway Token** — 任意の bearer トークン。設定時は両候補に対して `Authorization: Bearer <token>` ヘッダで送信されます。WiFi 設定 UI の AP は未認証で開かれるため、GET エンドポイントはトークンの有無だけを返し、現在の値は表示されません。空のまま送信すると既存トークンが保持され、新しい値を入力すると更新、❌ ボタンで build-time の `CONFIG_DEFAULT_WEBSOCKET_TOKEN` に戻ります。Kconfig 既定値が未設定のビルドでは ❌ が認証なしを意味しますが、既定値が組み込まれているビルドでは ❌ で実際に認証が解除されるわけではなく、その既定値に戻る点に注意してください。組み込み既定値があるビルドで認証なしの gateway に向けたい場合は、Kconfig 既定値を空にして再ビルドするか、gateway 側の token を build-time 既定値に揃えてください。
 
-3. **NVS に直接 `websocket.url` / `websocket.token` を書き込む（上級者向け）**: 例えば独自の NVS 書き込みツールをシリアル経由で使うケース。WiFi 設定 UI と同じ永続化セマンティクス。バッチ provisioning などで主に使います。
+   送信すると値が `websocket` NVS namespace（`websocket.url` / `websocket.fallback_url` / `websocket.token`）に永続化され、次回起動時に読み込まれます。pre-built ファームウェアを使うエンドユーザー向けの想定経路です。URL フィールド横の ❌ ボタンでクリアしてから再度送信すると、対応する `CONFIG_DEFAULT_WEBSOCKET_*` Kconfig 値（Kconfig 既定値が未設定なら「fallback なし」）に戻ります。
+
+3. **NVS に直接 `websocket.url` / `websocket.fallback_url` / `websocket.token` を書き込む（上級者向け）**: 例えば独自の NVS 書き込みツールをシリアル経由で使うケース。WiFi 設定 UI と同じ永続化セマンティクス。バッチ provisioning などで主に使います。
 
 4. **一時的なソース hardcode (非推奨)**: `websocket_protocol.cc` を編集すればローカル実験はアンブロックできますが、commit には残さないようにしてください。
 

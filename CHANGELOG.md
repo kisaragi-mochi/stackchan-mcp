@@ -15,6 +15,29 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Added
+
+- The on-device WiFi configuration UI now also exposes a **Fallback
+  Gateway URL** field and a **Gateway Token** field on the **Advanced**
+  tab, alongside the existing WebSocket Gateway URL field. The values
+  are persisted to the `websocket` NVS namespace as
+  `websocket.fallback_url` and `websocket.token` — the same keys the
+  firmware connection logic reads on the next boot. End users running a
+  pre-built firmware can now configure the full primary + fallback +
+  bearer-token gateway profile from `http://192.168.4.1` without
+  rebuilding from source. Token handling is hardened against the
+  unauthenticated WiFi config AP: the token value is never returned by
+  the configuration GET endpoint (only an "is set" boolean), is
+  rendered as a password input, and is redacted from the per-submit
+  save log. Submitting the form with the token field left blank keeps
+  the existing token; typing a new value updates it; ❌ writes an empty
+  string to NVS so the firmware falls back to the build-time
+  `CONFIG_DEFAULT_WEBSOCKET_TOKEN` on the next boot — which disables
+  auth on stock builds where no Kconfig default is set, but reverts to
+  the bundled default on builds that ship one. ([#43])
+
+[#43]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/43
+
 ## [0.3.0] - 2026-05-08
 
 ### Added

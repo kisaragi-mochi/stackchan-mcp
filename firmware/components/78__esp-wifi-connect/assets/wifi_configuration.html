@@ -287,6 +287,26 @@
                     </div>
                 </p>
 
+                <!-- WebSocket Fallback Gateway URL (stackchan-mcp specific) -->
+                <p>
+                    <label for="websocket_fallback_url" data-lang="websocket_fallback_url">Fallback Gateway URL:</label>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <input type="text" id="websocket_fallback_url" name="websocket_fallback_url" placeholder="wss://example.ts.net/stackchan/" style="flex: 1;">
+                        <button type="button" onclick="clearWebsocketFallbackUrl()" style="padding: 5px 10px; border: 1px solid #ccc; border-radius: 3px; background-color: #f0f0f0; cursor: pointer;">❌</button>
+                    </div>
+                    <small data-lang="websocket_fallback_hint" style="color: #666;">Optional. Tried after the primary URL fails.</small>
+                </p>
+
+                <!-- WebSocket Gateway Bearer Token (stackchan-mcp specific) -->
+                <p>
+                    <label for="websocket_token" data-lang="websocket_token">Gateway Token:</label>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <input type="password" id="websocket_token" name="websocket_token" autocomplete="off" placeholder="your-secret-token" style="flex: 1;">
+                        <button type="button" onclick="clearWebsocketToken()" style="padding: 5px 10px; border: 1px solid #ccc; border-radius: 3px; background-color: #f0f0f0; cursor: pointer;">❌</button>
+                    </div>
+                    <small data-lang="websocket_token_hint" style="color: #666;">Optional. Sent as Authorization: Bearer header when set. The current value is never displayed. Leave blank to keep the existing token, type a new value to update it, or hit ❌ to fall back to the build-time CONFIG_DEFAULT_WEBSOCKET_TOKEN (this disables auth on stock builds where no Kconfig default is set, but reverts to that default on builds that ship one).</small>
+                </p>
+
                 <!-- Max TX Power -->
                 <p style="display: flex; align-items: center; gap: 10px;">
                     <label for="max_tx_power" data-lang="max_tx_power" style="white-space: nowrap;">Wi-Fi Max TX Power:</label>
@@ -477,6 +497,11 @@
                 advanced_tab: 'Advanced',
                 ota_url: 'Custom OTA URL:',
                 websocket_url: 'WebSocket Gateway URL:',
+                websocket_fallback_url: 'Fallback Gateway URL:',
+                websocket_fallback_hint: 'Optional. Tried after the primary URL fails.',
+                websocket_token: 'Gateway Token:',
+                websocket_token_hint: 'Optional. Sent as Authorization: Bearer header when set. The current value is never displayed. Leave blank to keep the existing token, type a new value to update it, or hit ❌ to fall back to the build-time CONFIG_DEFAULT_WEBSOCKET_TOKEN (this disables auth on stock builds where no Kconfig default is set, but reverts to that default on builds that ship one).',
+                websocket_token_placeholder_set: '••••• (token set; leave blank to keep, ❌ to fall back to build default)',
                 max_tx_power: 'Wi-Fi Max TX Power:',
                 remember_bssid: 'Remember BSSID when connecting to Wi-Fi',
                 sleep_mode: 'Enable Sleep Mode',
@@ -694,6 +719,11 @@
                 advanced_tab: '詳細設定',
                 ota_url: 'カスタムOTA URL:',
                 websocket_url: 'WebSocketゲートウェイURL:',
+                websocket_fallback_url: 'フォールバックゲートウェイURL:',
+                websocket_fallback_hint: '任意。主URLへの接続が失敗した後に試行されます。',
+                websocket_token: 'ゲートウェイトークン:',
+                websocket_token_hint: '任意。設定時はAuthorization: Bearerヘッダで送信されます。現在の値は表示されません。空のまま送信すると既存トークンが保持され、新しい値を入力すると更新、❌ ボタンで build-time の CONFIG_DEFAULT_WEBSOCKET_TOKEN に戻ります（Kconfig 既定値が未設定のビルドでは認証なしになり、既定値が設定されているビルドではその既定値に戻ります）。',
+                websocket_token_placeholder_set: '••••• (トークン設定済み: 空のまま送信で保持、❌ で組み込み既定値に戻す)',
                 max_tx_power: 'Wi-Fi最大送信電力:',
                 remember_bssid: 'Wi-Fi接続時にBSSIDを記憶する',
                 sleep_mode: 'スリープモードを有効にする',
@@ -1358,10 +1388,35 @@
             const config = {
                 ota_url: document.getElementById('ota_url').value,
                 websocket_url: document.getElementById('websocket_url').value,
+                websocket_fallback_url: document.getElementById('websocket_fallback_url').value,
                 max_tx_power: parseInt(document.getElementById('max_tx_power').value),
                 remember_bssid: document.getElementById('remember_bssid').checked,
                 sleep_mode: document.getElementById('sleep_mode').checked
             };
+
+            // The websocket_token field is treated specially because the
+            // server intentionally never returns the current token value
+            // (the WiFi config AP is unauthenticated). To avoid wiping a
+            // previously stored token whenever the user submits the form
+            // without retyping it, the payload semantics are:
+            //   * Field has a typed value (any length) -> send that
+            //     value, regardless of whether ❌ was pressed first.
+            //     Treats "❌ to wipe + retype to update" as an update.
+            //   * Field is empty AND ❌ was pressed -> send "" to
+            //     explicitly clear the stored token.
+            //   * Otherwise (field empty, ❌ not pressed) -> omit the
+            //     key from the payload; the server-side handler keeps
+            //     the existing NVS value untouched.
+            const tokenInput = document.getElementById('websocket_token');
+            const tokenWasCleared = tokenInput.dataset.cleared === 'true';
+            let tokenSubmittedNonEmpty = false;
+            if (tokenInput.value !== '') {
+                config.websocket_token = tokenInput.value;
+                tokenSubmittedNonEmpty = true;
+            } else if (tokenWasCleared) {
+                config.websocket_token = '';
+            }
+            // else: field empty, ❌ not pressed -> omit the key.
 
             try {
                 const response = await fetch('/advanced/submit', {
@@ -1375,6 +1430,45 @@
                 const data = await response.json();
                 if (!data.success) {
                     throw new Error(data.error || 'Save failed');
+                }
+
+                // Reset the token UI state so a subsequent save does not
+                // resurrect a stale "cleared" / "wasSet" flag from this
+                // session. After a successful submit:
+                //   * the typed value (if any) is now stored on the device;
+                //   * the password field is cleared so the next view does
+                //     not display the just-typed plaintext;
+                //   * `dataset.cleared` goes back to "false" so a later
+                //     manual-blank submit defaults to "keep existing"
+                //     instead of an unintended delete;
+                //   * `dataset.wasSet` reflects whether a token is
+                //     currently stored, so the placeholder re-renders
+                //     correctly on the next loadAdvancedConfig().
+                tokenInput.value = '';
+                tokenInput.dataset.cleared = 'false';
+                if (tokenSubmittedNonEmpty) {
+                    tokenInput.dataset.wasSet = 'true';
+                } else if (config.websocket_token === '') {
+                    // Explicit clear was sent.
+                    tokenInput.dataset.wasSet = 'false';
+                }
+                // Refresh the placeholder text so it matches the new state.
+                const lang = document.getElementById('language').value;
+                if (tokenInput.dataset.wasSet === 'true') {
+                    const placeholder = (translations[lang]
+                        && translations[lang].websocket_token_placeholder_set)
+                        ?? translations['en-US'].websocket_token_placeholder_set;
+                    tokenInput.placeholder = placeholder;
+                } else {
+                    // Mirror loadAdvancedConfig() so the placeholder
+                    // reflects the "no token currently stored" state the
+                    // server-side just persisted.
+                    const tokenLang = document.getElementById('language').value;
+                    const fallback = (translations[tokenLang]
+                        && translations[tokenLang].websocket_token_placeholder_unset)
+                        ?? translations['en-US'].websocket_token_placeholder_unset
+                        ?? 'your-secret-token';
+                    tokenInput.placeholder = fallback;
                 }
 
                 advancedButton.disabled = false;
@@ -1434,6 +1528,27 @@
                 if (data.websocket_url) {
                     document.getElementById('websocket_url').value = data.websocket_url;
                 }
+                if (data.websocket_fallback_url) {
+                    document.getElementById('websocket_fallback_url').value = data.websocket_fallback_url;
+                }
+                // Token state: the server reports only whether a token is
+                // currently stored (websocket_token_set), never the value
+                // itself, so we cannot prefill the input. Mark it as "set"
+                // and swap the placeholder so the user can tell that
+                // leaving the field blank will keep the existing token.
+                const tokenInput = document.getElementById('websocket_token');
+                tokenInput.value = '';
+                tokenInput.dataset.cleared = 'false';
+                if (data.websocket_token_set) {
+                    tokenInput.dataset.wasSet = 'true';
+                    const lang = document.getElementById('language').value;
+                    const placeholder = (translations[lang]
+                        && translations[lang].websocket_token_placeholder_set)
+                        ?? translations['en-US'].websocket_token_placeholder_set;
+                    tokenInput.placeholder = placeholder;
+                } else {
+                    tokenInput.dataset.wasSet = 'false';
+                }
                 if (data.max_tx_power) {
                     document.getElementById('max_tx_power').value = data.max_tx_power;
                 }
@@ -1462,6 +1577,38 @@
          */
         function clearWebsocketUrl() {
             document.getElementById('websocket_url').value = '';
+        }
+
+        /**
+         * Clear WebSocket fallback gateway URL input field. Saving an
+         * empty value persists "" to NVS so the firmware falls back to
+         * CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL (or stops after the
+         * primary candidate when no fallback is configured).
+         */
+        function clearWebsocketFallbackUrl() {
+            document.getElementById('websocket_fallback_url').value = '';
+        }
+
+        /**
+         * Clear WebSocket gateway token input field. Marks the input as
+         * explicitly cleared so submitAdvancedForm() includes
+         * `websocket_token: ""` in the payload (overwriting any token
+         * currently stored in NVS). Without this flag, blank submissions
+         * are treated as "keep existing" by design — see
+         * submitAdvancedForm() for the full logic.
+         *
+         * Note: writing "" to NVS does not necessarily disable auth on
+         * the next boot; firmware/main/protocols/websocket_protocol.cc
+         * treats an empty NVS token the same as a missing one and falls
+         * back to the build-time CONFIG_DEFAULT_WEBSOCKET_TOKEN. So ❌
+         * effectively disables auth only on stock builds where the
+         * Kconfig default is empty; on builds that ship a default token
+         * the device reverts to that default.
+         */
+        function clearWebsocketToken() {
+            const tokenInput = document.getElementById('websocket_token');
+            tokenInput.value = '';
+            tokenInput.dataset.cleared = 'true';
         }
 
         // ========== Initialization ==========
