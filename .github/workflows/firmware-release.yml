@@ -100,10 +100,14 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
+          # `actions/upload-artifact@v4` preserves the common-ancestor
+          # directory layout (here: `firmware/`), so the downloaded
+          # artifact under `dist/` keeps the `build/` and `releases/`
+          # subdirectories from the build job.
           files: |
-            dist/merged-binary.bin
-            dist/xiaozhi.bin
-            dist/v*_stackchan.zip
+            dist/build/merged-binary.bin
+            dist/build/xiaozhi.bin
+            dist/releases/v*_stackchan.zip
           body: |
             Pre-built firmware binaries for the M5Stack StackChan kit.
             Flash with `esptool.py` — no ESP-IDF / Docker setup needed.
