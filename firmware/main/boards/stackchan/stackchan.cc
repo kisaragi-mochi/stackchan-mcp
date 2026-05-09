@@ -186,20 +186,21 @@ public:
         return true;
     }
 
-    // direction: false=input, true=output
+    // direction: false=input, true=output. Accepts pin 0..15 (PY32 has 14
+    // GPIOs; the WS2812 data line is on pin 13, in the high byte).
     bool SetDirection(uint8_t pin, bool output) {
-        return WriteBitSafe(REG_GPIO_M_L, pin, output);
+        return WriteBitWideSafe(REG_GPIO_M_L, REG_GPIO_M_H, pin, output);
     }
 
-    // mode: false=pull down, true=pull up
+    // mode: false=pull down, true=pull up. Accepts pin 0..15.
     bool SetPullMode(uint8_t pin, bool up) {
         if (up) {
-            bool a = WriteBitSafe(REG_GPIO_PD_L, pin, false);
-            bool b = WriteBitSafe(REG_GPIO_PU_L, pin, true);
+            bool a = WriteBitWideSafe(REG_GPIO_PD_L, REG_GPIO_PD_H, pin, false);
+            bool b = WriteBitWideSafe(REG_GPIO_PU_L, REG_GPIO_PU_H, pin, true);
             return a && b;
         } else {
-            bool a = WriteBitSafe(REG_GPIO_PU_L, pin, false);
-            bool b = WriteBitSafe(REG_GPIO_PD_L, pin, true);
+            bool a = WriteBitWideSafe(REG_GPIO_PU_L, REG_GPIO_PU_H, pin, false);
+            bool b = WriteBitWideSafe(REG_GPIO_PD_L, REG_GPIO_PD_H, pin, true);
             return a && b;
         }
     }
@@ -214,6 +215,55 @@ public:
         return SafeReadReg(REG_GPIO_O_L, out);
     }
 
+    // Drive mode for any pin (0..15). false=push-pull, true=open-drain.
+    // The WS2812 data line on pin 13 must be push-pull.
+    bool SetDriveMode(uint8_t pin, bool open_drain) {
+        return WriteBitWideSafe(REG_GPIO_DRV_L, REG_GPIO_DRV_H, pin, open_drain);
+    }
+
+    // ---- LED (WS2812 driven by the PY32 itself, data line on pin 13) ----
+    // REG_LED_CFG packs both the LED count (bits 0-5, max 32) and the latch
+    // trigger (bit 6). Writing the count clears bit 6, which is fine because
+    // it's a self-clearing strobe. RefreshLeds() does read-modify-write so
+    // the count is preserved when we latch.
+    bool SetLedCount(uint8_t count) {
+        if (count > 32) count = 32;
+        return SafeWriteReg(REG_LED_CFG, count & 0x3F);
+    }
+
+    // Set one LED to RGB888. RGB888 → RGB565 packing matches the M5 BSP:
+    // ((r&0xF8)<<8) | ((g&0xFC)<<3) | (b>>3), little-endian on the wire.
+    // Does NOT latch — call RefreshLeds() once after a batch of updates.
+    bool SetLedColor(uint8_t index, uint8_t r, uint8_t g, uint8_t b) {
+        if (index >= 32) return false;
+        uint16_t v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        uint8_t buf[3] = { (uint8_t)(REG_LED_RAM_START + index * 2),
+                           (uint8_t)(v & 0xFF),
+                           (uint8_t)((v >> 8) & 0xFF) };
+        return SafeWriteRaw(buf, sizeof(buf));
+    }
+
+    // Burst-write up to N LED RGB565 pairs starting at index 0. data is
+    // packed { lo0, hi0, lo1, hi1, ... } and len is the byte count
+    // (=2*num_leds, max 64). Single I2C transaction — much faster than
+    // calling SetLedColor in a loop. Does NOT latch.
+    bool SetLedData(const uint8_t* data, size_t len) {
+        if (data == nullptr || len == 0) return false;
+        if (len > 64) len = 64;
+        uint8_t buf[1 + 64];
+        buf[0] = REG_LED_RAM_START;
+        for (size_t i = 0; i < len; i++) buf[1 + i] = data[i];
+        return SafeWriteRaw(buf, 1 + len);
+    }
+
+    // Latch the LED RAM out to the WS2812 strip. Read-modify-write so the
+    // current count (bits 0-5) is preserved alongside the latch bit (bit 6).
+    bool RefreshLeds() {
+        uint8_t cfg = 0;
+        if (!SafeReadReg(REG_LED_CFG, &cfg)) return false;
+        return SafeWriteReg(REG_LED_CFG, (uint8_t)(cfg | (1u << 6)));
+    }
+
 private:
     // Owned device handle (NOT inherited from I2cDevice — see class comment).
     // Registered at 100 kHz in the constructor so this transport runs slower
@@ -222,9 +272,17 @@ private:
 
     static constexpr uint8_t REG_VERSION  = 0x02;
     static constexpr uint8_t REG_GPIO_M_L = 0x03;  // Direction (mode) low byte
+    static constexpr uint8_t REG_GPIO_M_H = 0x04;  // Direction (mode) high byte
     static constexpr uint8_t REG_GPIO_O_L = 0x05;  // Output low byte
+    static constexpr uint8_t REG_GPIO_O_H = 0x06;  // Output high byte
     static constexpr uint8_t REG_GPIO_PU_L = 0x09; // Pull-up low byte
+    static constexpr uint8_t REG_GPIO_PU_H = 0x0A; // Pull-up high byte
     static constexpr uint8_t REG_GPIO_PD_L = 0x0B; // Pull-down low byte
+    static constexpr uint8_t REG_GPIO_PD_H = 0x0C; // Pull-down high byte
+    static constexpr uint8_t REG_GPIO_DRV_L = 0x13; // Drive mode low byte
+    static constexpr uint8_t REG_GPIO_DRV_H = 0x14; // Drive mode high byte
+    static constexpr uint8_t REG_LED_CFG       = 0x24;  // count[5:0] + latch[6]
+    static constexpr uint8_t REG_LED_RAM_START = 0x30;  // 2 bytes per LED, RGB565 LE
 
     // I2C op transient-retry parameters. Total budget per failed op is
     // (I2C_INNER_RETRIES - 1) * I2C_RETRY_DELAY_MS, i.e. ~30 ms here.
@@ -283,6 +341,40 @@ private:
             v &= (uint8_t)~(1u << pin);
         }
         return SafeWriteReg(reg, v);
+    }
+
+    // 16-bit RMW: pin 0..7 -> reg_l, pin 8..15 -> reg_h. Used for any pin
+    // beyond pin 7 (LED data line is on pin 13, so all the LED setup goes
+    // through this path).
+    bool WriteBitWideSafe(uint8_t reg_l, uint8_t reg_h, uint8_t pin, bool value) {
+        if (pin >= 16) return false;
+        uint8_t reg = (pin < 8) ? reg_l : reg_h;
+        uint8_t bit = (uint8_t)(pin & 0x07);
+        uint8_t v = 0;
+        if (!SafeReadReg(reg, &v)) return false;
+        if (value) v |= (uint8_t)(1u << bit);
+        else       v &= (uint8_t)~(1u << bit);
+        return SafeWriteReg(reg, v);
+    }
+
+    // Burst write: ship a pre-built {reg, ...payload} buffer in a single
+    // i2c_master_transmit. Used by the LED RAM writes which would otherwise
+    // require dozens of individual register writes. Same retry semantics
+    // as SafeWriteReg.
+    bool SafeWriteRaw(const uint8_t* buf, size_t len) {
+        esp_err_t err = ESP_FAIL;
+        for (int i = 0; i < I2C_INNER_RETRIES; i++) {
+            err = i2c_master_transmit(i2c_device_, buf, len, 100);
+            if (err == ESP_OK) {
+                return true;
+            }
+            if (i + 1 < I2C_INNER_RETRIES) {
+                vTaskDelay(pdMS_TO_TICKS(I2C_RETRY_DELAY_MS));
+            }
+        }
+        ESP_LOGW("Py32IoExpander", "I2C raw write (len=%u) failed after %d tries: 0x%X",
+                 (unsigned)len, I2C_INNER_RETRIES, err);
+        return false;
     }
 };
 
@@ -731,6 +823,9 @@ private:
     }
 
     bool servo_ok_ = false;
+    bool rgb_ok_ = false;
+    static constexpr uint8_t RGB_LED_COUNT = 12;  // StackChan base has 12 WS2812C
+    static constexpr uint8_t RGB_DATA_PIN  = 13;  // PY32 expander pin (not ESP32 GPIO)
 
     void InitializeIOExpander() {
         ESP_LOGI(TAG, "Init PY32 IO expander (I2C addr 0x%02X)", Py32IoExpander::DEFAULT_ADDR);
@@ -801,6 +896,58 @@ private:
             ESP_LOGW(TAG, "Servo power writes OK, but readback verify failed "
                           "(can't confirm VM EN level)");
         }
+
+        // ---- RGB strip init (12x WS2812C on the StackChan base) ----
+        // The data line is on PY32 pin 13 (not an ESP32 GPIO); the PY32
+        // bit-bangs the WS2812 protocol itself. We just write RGB565 into
+        // its LED RAM and toggle the latch bit. Sequence is the same as the
+        // M5 BSP: configure pin 13 as push-pull output with pull-up,
+        // SetLedCount(12), small settle delay, then clear all LEDs.
+        bool ok_d   = io_expander_->SetDirection(RGB_DATA_PIN, true);
+        bool ok_p   = io_expander_->SetPullMode(RGB_DATA_PIN, true);
+        bool ok_dr  = io_expander_->SetDriveMode(RGB_DATA_PIN, false);
+        bool ok_cnt = io_expander_->SetLedCount(RGB_LED_COUNT);
+        if (!ok_d || !ok_p || !ok_dr || !ok_cnt) {
+            const char* failed = "?";
+            if      (!ok_d)   failed = "SetDirection(13)";
+            else if (!ok_p)   failed = "SetPullMode(13)";
+            else if (!ok_dr) failed = "SetDriveMode(13)";
+            else if (!ok_cnt) failed = "SetLedCount";
+            ESP_LOGE(TAG, "RGB strip init FAILED at step=%s; LEDs disabled", failed);
+            return;
+        }
+        // M5 reference firmware waits 200 ms after SetLedCount before the
+        // first refresh — the PY32 internal LED engine needs the settle.
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+        // Clear strip: zero RAM in one burst, then latch.
+        uint8_t clear_buf[RGB_LED_COUNT * 2] = {0};
+        bool ok_clear = io_expander_->SetLedData(clear_buf, sizeof(clear_buf));
+        bool ok_ref   = io_expander_->RefreshLeds();
+        if (!ok_clear || !ok_ref) {
+            ESP_LOGE(TAG, "RGB strip clear FAILED (data=%d refresh=%d); LEDs disabled",
+                     ok_clear, ok_ref);
+            return;
+        }
+        rgb_ok_ = true;
+        ESP_LOGI(TAG, "RGB strip READY (%d WS2812C via PY32 pin %d, all cleared)",
+                 RGB_LED_COUNT, RGB_DATA_PIN);
+    }
+
+    // Helpers for the LED MCP tools below. Centralised so the parsing/
+    // clamping logic isn't duplicated in three handlers.
+    static uint8_t ClampByte(int v) {
+        if (v < 0) return 0;
+        if (v > 255) return 255;
+        return (uint8_t)v;
+    }
+
+    // Pack one RGB888 sample into the {lo, hi} RGB565 pair the PY32
+    // expects in its LED RAM.
+    static void PackRgb565(uint8_t r, uint8_t g, uint8_t b, uint8_t out[2]) {
+        uint16_t v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        out[0] = (uint8_t)(v & 0xFF);
+        out[1] = (uint8_t)((v >> 8) & 0xFF);
     }
 
     void InitializeServo() {
@@ -2235,6 +2382,173 @@ private:
                     if (age_ms < 0) age_ms = 0;
                 }
                 cJSON_AddNumberToObject(root, "last_event_age_ms", (double)age_ms);
+                return root;
+            });
+
+        // ---- LED tools (12x WS2812C on the StackChan base) ----
+        // The strip is driven by the PY32 IO expander on its pin 13, not by
+        // an ESP32 GPIO. Updates are non-latching writes into the PY32 LED
+        // RAM followed by a single RefreshLeds() to strobe the strip. All
+        // four tools refresh implicitly so the LLM gets WYSIWYG behaviour.
+        mcp_server.AddTool(
+            "self.led.set_color",
+            "Set a single RGB LED on the StackChan base. There are 12 LEDs "
+            "(index 0..11). r/g/b are 0..255. Updates immediately.",
+            PropertyList({
+                Property("index", kPropertyTypeInteger, 0, RGB_LED_COUNT - 1),
+                Property("r", kPropertyTypeInteger, 0, 255),
+                Property("g", kPropertyTypeInteger, 0, 255),
+                Property("b", kPropertyTypeInteger, 0, 255),
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", rgb_ok_);
+                if (!rgb_ok_) {
+                    cJSON_AddStringToObject(root, "error", "RGB strip not available (PY32 init failed?)");
+                    return root;
+                }
+                int index = properties["index"].value<int>();
+                uint8_t r = ClampByte(properties["r"].value<int>());
+                uint8_t g = ClampByte(properties["g"].value<int>());
+                uint8_t b = ClampByte(properties["b"].value<int>());
+                bool ok_w = io_expander_->SetLedColor((uint8_t)index, r, g, b);
+                bool ok_r = ok_w ? io_expander_->RefreshLeds() : false;
+                cJSON_AddBoolToObject(root, "ok", ok_w && ok_r);
+                cJSON_AddNumberToObject(root, "index", index);
+                ESP_LOGI(TAG, "set_led: index=%d rgb=(%u,%u,%u) ok=%d", index, r, g, b, ok_w && ok_r);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.led.set_all",
+            "Set all 12 RGB LEDs on the StackChan base to the same color. "
+            "r/g/b are 0..255. Updates immediately.",
+            PropertyList({
+                Property("r", kPropertyTypeInteger, 0, 255),
+                Property("g", kPropertyTypeInteger, 0, 255),
+                Property("b", kPropertyTypeInteger, 0, 255),
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", rgb_ok_);
+                if (!rgb_ok_) {
+                    cJSON_AddStringToObject(root, "error", "RGB strip not available (PY32 init failed?)");
+                    return root;
+                }
+                uint8_t r = ClampByte(properties["r"].value<int>());
+                uint8_t g = ClampByte(properties["g"].value<int>());
+                uint8_t b = ClampByte(properties["b"].value<int>());
+                uint8_t buf[RGB_LED_COUNT * 2];
+                uint8_t pair[2];
+                PackRgb565(r, g, b, pair);
+                for (int i = 0; i < RGB_LED_COUNT; i++) {
+                    buf[i * 2 + 0] = pair[0];
+                    buf[i * 2 + 1] = pair[1];
+                }
+                bool ok_w = io_expander_->SetLedData(buf, sizeof(buf));
+                bool ok_r = ok_w ? io_expander_->RefreshLeds() : false;
+                cJSON_AddBoolToObject(root, "ok", ok_w && ok_r);
+                ESP_LOGI(TAG, "set_all_leds: rgb=(%u,%u,%u) ok=%d", r, g, b, ok_w && ok_r);
+                return root;
+            });
+
+        // Batch set: accepts a JSON-encoded array of 12 [r,g,b] triples.
+        // Single I2C burst + one refresh — use this for animations or any
+        // multi-color pattern to avoid 12x round-trips. Missing trailing
+        // entries are left at their previous color (PY32 RAM is sticky).
+        mcp_server.AddTool(
+            "self.led.set_many",
+            "Set multiple RGB LEDs in one shot. 'colors' is a JSON-encoded "
+            "array of [r,g,b] triples starting at index 0, e.g. "
+            "\"[[255,0,0],[0,255,0],[0,0,255]]\". Up to 12 entries; extras "
+            "are ignored, missing entries keep their previous color. "
+            "r/g/b are 0..255. Updates immediately.",
+            PropertyList({Property("colors", kPropertyTypeString)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", rgb_ok_);
+                if (!rgb_ok_) {
+                    cJSON_AddStringToObject(root, "error", "RGB strip not available (PY32 init failed?)");
+                    return root;
+                }
+                std::string json = properties["colors"].value<std::string>();
+                cJSON* arr = cJSON_Parse(json.c_str());
+                if (arr == nullptr || !cJSON_IsArray(arr)) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error",
+                        "colors must be a JSON array of [r,g,b] triples");
+                    if (arr != nullptr) cJSON_Delete(arr);
+                    return root;
+                }
+                int n = cJSON_GetArraySize(arr);
+                if (n > RGB_LED_COUNT) n = RGB_LED_COUNT;
+
+                // Validate every entry FIRST and pack into a local buffer.
+                // Only after the whole array is known good do we touch the
+                // PY32 — that way a malformed entry at i=5 cannot leave
+                // LEDs 0..4 mutated (atomic semantics, same as
+                // set_mouth_sequence). cJSON_IsNumber is required because
+                // valueint silently returns 0 for non-number nodes (string,
+                // null, bool), so without the guard a payload like
+                // [["255",0,0]] would write black and report ok=true.
+                uint8_t buf[RGB_LED_COUNT * 2];   // 24 bytes, fits the cap
+                bool parse_ok = true;
+                for (int i = 0; i < n; i++) {
+                    cJSON* triple = cJSON_GetArrayItem(arr, i);
+                    if (!cJSON_IsArray(triple) || cJSON_GetArraySize(triple) < 3) {
+                        parse_ok = false;
+                        break;
+                    }
+                    cJSON* jr = cJSON_GetArrayItem(triple, 0);
+                    cJSON* jg = cJSON_GetArrayItem(triple, 1);
+                    cJSON* jb = cJSON_GetArrayItem(triple, 2);
+                    if (!cJSON_IsNumber(jr) || !cJSON_IsNumber(jg) || !cJSON_IsNumber(jb)) {
+                        parse_ok = false;
+                        break;
+                    }
+                    PackRgb565(ClampByte(jr->valueint),
+                               ClampByte(jg->valueint),
+                               ClampByte(jb->valueint),
+                               &buf[i * 2]);
+                }
+                cJSON_Delete(arr);
+
+                // Single I2C burst for the validated prefix, then one latch.
+                // n=0 is treated as success (gateway schema enforces
+                // minItems=1, but a direct device caller could hit this).
+                bool ok_w = false, ok_r = false;
+                if (parse_ok && n > 0) {
+                    ok_w = io_expander_->SetLedData(buf, (size_t)(n * 2));
+                    ok_r = ok_w ? io_expander_->RefreshLeds() : false;
+                }
+                bool ok = parse_ok && (n == 0 || (ok_w && ok_r));
+                cJSON_AddBoolToObject(root, "ok", ok);
+                cJSON_AddNumberToObject(root, "written", ok ? n : 0);
+                if (!parse_ok) {
+                    cJSON_AddStringToObject(root, "error",
+                        "Each entry must be a [r,g,b] triple of integers");
+                }
+                ESP_LOGI(TAG, "set_many_leds: written=%d/%d ok=%d",
+                         ok ? n : 0, n, ok);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.led.clear",
+            "Turn off all 12 RGB LEDs on the StackChan base. Updates immediately.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", rgb_ok_);
+                if (!rgb_ok_) {
+                    cJSON_AddStringToObject(root, "error", "RGB strip not available (PY32 init failed?)");
+                    return root;
+                }
+                uint8_t buf[RGB_LED_COUNT * 2] = {0};
+                bool ok_w = io_expander_->SetLedData(buf, sizeof(buf));
+                bool ok_r = ok_w ? io_expander_->RefreshLeds() : false;
+                cJSON_AddBoolToObject(root, "ok", ok_w && ok_r);
+                ESP_LOGI(TAG, "clear_leds: ok=%d", ok_w && ok_r);
                 return root;
             });
 

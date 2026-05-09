@@ -291,6 +291,74 @@ def create_server() -> Server:
                     "properties": {},
                 },
             ),
+            Tool(
+                name="set_led",
+                description=(
+                    "Set a single RGB LED on the StackChan base. There are 12 LEDs "
+                    "arranged in two rows of 6 (index 0..11). Updates immediately."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "index": {
+                            "type": "integer",
+                            "description": "LED index (0..11)",
+                            "minimum": 0,
+                            "maximum": 11,
+                        },
+                        "r": {"type": "integer", "description": "Red 0..255", "minimum": 0, "maximum": 255},
+                        "g": {"type": "integer", "description": "Green 0..255", "minimum": 0, "maximum": 255},
+                        "b": {"type": "integer", "description": "Blue 0..255", "minimum": 0, "maximum": 255},
+                    },
+                    "required": ["index", "r", "g", "b"],
+                },
+            ),
+            Tool(
+                name="set_all_leds",
+                description="Set all 12 RGB LEDs on the StackChan base to the same color. Updates immediately.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "r": {"type": "integer", "description": "Red 0..255", "minimum": 0, "maximum": 255},
+                        "g": {"type": "integer", "description": "Green 0..255", "minimum": 0, "maximum": 255},
+                        "b": {"type": "integer", "description": "Blue 0..255", "minimum": 0, "maximum": 255},
+                    },
+                    "required": ["r", "g", "b"],
+                },
+            ),
+            Tool(
+                name="set_leds",
+                description=(
+                    "Set multiple RGB LEDs in one shot. 'colors' is an array of "
+                    "[r,g,b] triples starting at index 0 (e.g. [[255,0,0],[0,255,0]]). "
+                    "Up to 12 entries; extras are ignored, missing entries keep their "
+                    "previous color. Use this for animations / patterns to avoid 12x "
+                    "I2C round-trips."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "colors": {
+                            "type": "array",
+                            "description": "Array of [r,g,b] triples, each 0..255",
+                            "items": {
+                                "type": "array",
+                                "items": {"type": "integer", "minimum": 0, "maximum": 255},
+                                "minItems": 3,
+                                "maxItems": 3,
+                            },
+                            "minItems": 1,
+                            "maxItems": 12,
+                        },
+                    },
+                    "required": ["colors"],
+                },
+            ),
+            Tool(
+                name="clear_leds",
+                description="Turn off all 12 RGB LEDs on the StackChan base.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
         ]
 
     @server.call_tool()
@@ -371,6 +439,26 @@ def create_server() -> Server:
             ),
             "get_touch_state": (
                 "self.touch.get_touch_state",
+                {},
+            ),
+            "set_led": (
+                "self.led.set_color",
+                arguments,
+            ),
+            "set_all_leds": (
+                "self.led.set_all",
+                arguments,
+            ),
+            # Firmware accepts colors as a JSON-encoded string (the on-device
+            # MCP layer has no array property type), so re-pack the Python
+            # list here. The schema we exposed above still lets the LLM
+            # think in real arrays.
+            "set_leds": (
+                "self.led.set_many",
+                {"colors": json.dumps(arguments.get("colors", []))},
+            ),
+            "clear_leds": (
+                "self.led.clear",
                 {},
             ),
         }

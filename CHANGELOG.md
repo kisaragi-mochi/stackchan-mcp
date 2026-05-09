@@ -15,6 +15,32 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Added
+
+- New MCP tools to drive the 12× WS2812C RGB LEDs on the StackChan
+  base: `set_led(index, r, g, b)`, `set_all_leds(r, g, b)`,
+  `set_leds(colors)` (batch, single I2C burst for animations), and
+  `clear_leds()`. The strip is wired to the PY32L020 IO expander on
+  expander pin 13 — not an ESP32 GPIO — so the firmware extends the
+  existing `Py32IoExpander` helper with `SetDriveMode`, `SetLedCount`,
+  `SetLedColor` (RGB888 → RGB565 packing), `SetLedData` (burst write),
+  and `RefreshLeds` (RMW preserves the count nibble alongside the
+  bit-6 latch trigger), matching the M5 BSP's
+  `PY32IOExpander_Class.cpp`. `InitializeIOExpander` configures pin 13
+  as push-pull output with pull-up, sets the LED count to 12, waits
+  the M5-prescribed 200 ms before the first refresh, then clears the
+  strip. The on-device tools (`self.led.set_color`, `self.led.set_all`,
+  `self.led.set_many`, `self.led.clear`) all latch implicitly so each
+  call is WYSIWYG; the gateway re-packs the Python `colors` list as a
+  JSON string for `set_many` since the device-side MCP property layer
+  has only scalar types. `set_many` validates every entry (including
+  a `cJSON_IsNumber` guard so non-number elements like `"255"` or
+  `null` no longer silently coerce to 0) before any I2C write, so
+  malformed input cannot leave the strip in a partially-mutated
+  state. All four tools no-op cleanly with an `available=false`
+  reply when the PY32 init failed, so a flaky expander does not
+  cascade into errors.
+
 ## [0.4.0] - 2026-05-09
 
 ### Firmware
