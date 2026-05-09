@@ -38,32 +38,52 @@ WebsocketProtocol::WebsocketProtocol() {
             auto protocol = static_cast<WebsocketProtocol*>(arg);
             auto alive = protocol->alive_;
             Application::GetInstance().Schedule([protocol, alive]() {
-                if (!*alive || !protocol->auto_reconnect_enabled_.load()) {
+                if (!alive->load()) {
+                    return;
+                }
+                // Re-check intent on the main task. esp_timer_stop() does
+                // not cancel work that the timer has already re-posted via
+                // Application::Schedule, so a CloseAudioChannel() or
+                // destructor that ran *between* timer fire and this lambda
+                // executing would otherwise be undone here.
+                if (protocol->intentional_close_.load()) {
+                    ESP_LOGI(TAG, "Reconnect cancelled (close was intentional)");
                     return;
                 }
 
                 auto& app = Application::GetInstance();
-                if (app.GetDeviceState() != kDeviceStateIdle) {
+                auto state = app.GetDeviceState();
+                if (state != kDeviceStateIdle) {
+                    ESP_LOGI(TAG, "Reconnect deferred (device state %d != idle); rescheduling", state);
                     protocol->ScheduleReconnect();
                     return;
                 }
 
                 ESP_LOGI(TAG, "Reconnecting to websocket server");
                 if (!protocol->OpenAudioChannelInternal(false)) {
+                    ESP_LOGW(TAG, "Reconnect attempt failed; rescheduling");
                     protocol->ScheduleReconnect();
                 }
             });
         },
         .arg = this,
     };
-    esp_timer_create(&reconnect_timer_args, &reconnect_timer_);
+    if (esp_timer_create(&reconnect_timer_args, &reconnect_timer_) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create reconnect timer; auto reconnect will not be available");
+        reconnect_timer_ = nullptr;
+    }
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
-    *alive_ = false;
+    alive_->store(false);
+    intentional_close_.store(true);
+    if (current_notify_disconnect_) {
+        current_notify_disconnect_->store(false);
+    }
     StopReconnectTimer();
     if (reconnect_timer_ != nullptr) {
         esp_timer_delete(reconnect_timer_);
+        reconnect_timer_ = nullptr;
     }
     websocket_.reset();
     if (event_group_handle_ != nullptr) {
@@ -128,7 +148,15 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
-    auto_reconnect_enabled_.store(false);
+    // Mark the close as intentional so any reconnect job already
+    // re-posted from the timer callback aborts when it runs on the main
+    // task, then disarm the current socket's per-socket flag so the
+    // OnDisconnected lambda hits the early-return guard the moment the
+    // underlying close fires (the lambda runs on the WS task).
+    intentional_close_.store(true);
+    if (current_notify_disconnect_) {
+        current_notify_disconnect_->store(false);
+    }
     StopReconnectTimer();
     websocket_.reset();
 }
@@ -138,11 +166,18 @@ bool WebsocketProtocol::OpenAudioChannel() {
 }
 
 bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
-    bool reconnect_was_enabled = auto_reconnect_enabled_.load();
-    auto_reconnect_enabled_.store(false);
+    // Resetting the previous websocket may invoke its OnDisconnected
+    // callback synchronously. Disarm the previous socket's flag and
+    // mark the teardown as intentional so neither the per-socket lambda
+    // nor any deferred reconnect job triggers a spurious reconnect; the
+    // new socket below installs a fresh token of its own and clears
+    // intentional_close_ once the server hello has been acked.
+    intentional_close_.store(true);
+    if (current_notify_disconnect_) {
+        current_notify_disconnect_->store(false);
+    }
     StopReconnectTimer();
     websocket_.reset();
-    auto_reconnect_enabled_.store(reconnect_was_enabled);
     session_id_ = "";
     xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 
@@ -258,7 +293,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
             ESP_LOGE(TAG, "Failed to create websocket");
             continue;
         }
-        auto notify_disconnect = std::make_shared<bool>(false);
+        auto notify_disconnect = std::make_shared<std::atomic<bool>>(false);
 
         if (!token.empty()) {
             websocket_->SetHeader("Authorization", token.c_str());
@@ -267,7 +302,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
         websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
         websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
 
-        websocket_->OnData([this](const char* data, size_t len, bool binary) {
+        websocket_->OnData([this, notify_disconnect](const char* data, size_t len, bool binary) {
             if (binary) {
                 if (on_incoming_audio_ != nullptr) {
                     if (version_ == 2) {
@@ -309,7 +344,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
                 auto type = cJSON_GetObjectItem(root, "type");
                 if (cJSON_IsString(type)) {
                     if (strcmp(type->valuestring, "hello") == 0) {
-                        ParseServerHello(root);
+                        ParseServerHello(root, notify_disconnect);
                     } else {
                         if (on_incoming_json_ != nullptr) {
                             on_incoming_json_(root);
@@ -324,8 +359,17 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
         });
 
         websocket_->OnDisconnected([this, notify_disconnect]() {
-            if (!*notify_disconnect) {
-                ESP_LOGI(TAG, "Websocket candidate disconnected before server hello");
+            // notify_disconnect carries this socket's reconnect intent.
+            // ParseServerHello() flips it to true the moment the server
+            // hello arrives; an intentional teardown (CloseAudioChannel,
+            // OpenAudioChannelInternal prologue, or destructor) flips it
+            // back to false synchronously before invoking
+            // websocket_.reset(). A `false` reading here therefore means
+            // either the candidate failed before server hello or the
+            // firmware is tearing the socket down on purpose — neither
+            // case should schedule a reconnect.
+            if (!notify_disconnect->load()) {
+                ESP_LOGI(TAG, "Websocket disconnected (no reconnect: candidate failed or intentional close)");
                 return;
             }
             if (on_disconnected_ != nullptr) {
@@ -335,9 +379,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
             if (on_audio_channel_closed_ != nullptr) {
                 on_audio_channel_closed_();
             }
-            if (auto_reconnect_enabled_.load()) {
-                ScheduleReconnect();
-            }
+            ScheduleReconnect();
         });
 
         ESP_LOGI(TAG, "Connecting to websocket server candidate %d/%d: %s with version: %d",
@@ -368,8 +410,14 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
             continue;
         }
 
-        *notify_disconnect = true;
-        auto_reconnect_enabled_.store(true);
+        // ParseServerHello() already armed notify_disconnect on the WS
+        // task (before setting the wait bit) so a near-simultaneous close
+        // is handled by the lambda's reconnect path. Mirror it into the
+        // class member here on the main task so CloseAudioChannel /
+        // OpenAudioChannelInternal / the destructor can disarm it
+        // synchronously when intentionally tearing this socket down.
+        current_notify_disconnect_ = notify_disconnect;
+        intentional_close_.store(false);
         reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
         StopReconnectTimer();
 
@@ -397,19 +445,39 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
 }
 
 void WebsocketProtocol::ScheduleReconnect() {
-    if (reconnect_timer_ == nullptr || !auto_reconnect_enabled_.load()) {
+    if (!alive_->load()) {
+        return;
+    }
+    if (reconnect_timer_ == nullptr) {
+        ESP_LOGW(TAG, "Reconnect timer not initialised; cannot schedule reconnect");
+        return;
+    }
+    if (intentional_close_.load()) {
+        ESP_LOGI(TAG, "Reconnect not scheduled (intentional close in progress)");
         return;
     }
 
     StopReconnectTimer();
+    esp_err_t err = esp_timer_start_once(reconnect_timer_, reconnect_interval_ms_ * 1000);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to start reconnect timer (err=%d); reconnect not scheduled", err);
+        return;
+    }
     ESP_LOGI(TAG, "Schedule websocket reconnect in %d seconds", reconnect_interval_ms_ / 1000);
-    esp_timer_start_once(reconnect_timer_, reconnect_interval_ms_ * 1000);
     reconnect_interval_ms_ = std::min(reconnect_interval_ms_ * 2, WEBSOCKET_RECONNECT_MAX_INTERVAL_MS);
 }
 
 void WebsocketProtocol::StopReconnectTimer() {
-    if (reconnect_timer_ != nullptr) {
-        esp_timer_stop(reconnect_timer_);
+    if (reconnect_timer_ == nullptr) {
+        return;
+    }
+    esp_err_t err = esp_timer_stop(reconnect_timer_);
+    // ESP_ERR_INVALID_STATE just means the timer was not running, which
+    // is the common case when StopReconnectTimer() runs from a path
+    // where no reconnect is currently armed. Log anything else so a
+    // genuinely failed teardown is visible on serial.
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Failed to stop reconnect timer (err=%d)", err);
     }
 }
 
@@ -438,7 +506,8 @@ std::string WebsocketProtocol::GetHelloMessage() {
     return message;
 }
 
-void WebsocketProtocol::ParseServerHello(const cJSON* root) {
+void WebsocketProtocol::ParseServerHello(const cJSON* root,
+                                         const std::shared_ptr<std::atomic<bool>>& notify_disconnect) {
     auto transport = cJSON_GetObjectItem(root, "transport");
     if (transport == nullptr || strcmp(transport->valuestring, "websocket") != 0) {
         ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
@@ -463,5 +532,11 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root) {
         }
     }
 
+    // Arm the per-socket reconnect intent BEFORE setting the wait bit so
+    // a near-simultaneous server-side close (e.g. token mismatch closing
+    // immediately after server hello) observed by the OnDisconnected
+    // lambda still falls into the reconnect path. The release here
+    // synchronises with the load() in the OnDisconnected lambda.
+    notify_disconnect->store(true, std::memory_order_release);
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 }

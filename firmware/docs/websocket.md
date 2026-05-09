@@ -73,15 +73,20 @@ This document describes the WebSocket communication protocol between the device 
 
    - When the server or network drops, `OnDisconnected()` fires:
      - The device invokes `on_audio_channel_closed_()` and eventually returns to the idle state.
-     - If the socket was not closed intentionally, the firmware schedules a
-       background reconnect while the device is idle. Retries start after 5
-       seconds and back off up to 60 seconds.
+     - If the socket was not closed intentionally by the firmware itself,
+       the firmware schedules a background reconnect while the device is
+       idle. Retries start after 5 seconds and back off up to 60 seconds.
+       This applies to any post-handshake disconnect, including gateway
+       crashes, gateway restarts, TLS-layer resets, and gateway
+       configurations that tear the WebSocket session down after the
+       handshake.
 
 6. **Closing the WebSocket connection**
    - When the device wants to end the session, it calls `CloseAudioChannel()` to tear down the socket and returns to idle.
-   - Intentional closes do not schedule a reconnect. Server-initiated closes
-     and gateway restarts do schedule one, so MCP tools become available again
-     after the gateway comes back.
+   - Intentional device-side closes do not schedule a reconnect. Any
+     server- or network-initiated close after the handshake does schedule
+     one, so MCP tools become available again on the next successful
+     connection attempt without operator intervention on the device.
 
 ---
 

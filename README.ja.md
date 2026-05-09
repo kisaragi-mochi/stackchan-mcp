@@ -192,6 +192,10 @@ uv run python -m stackchan_mcp
 ESP32 接続中にゲートウェイを再起動した場合、ファームウェアは idle 中に
 WebSocket 接続を自動再試行します。再試行間隔は 5 秒から始まり、最大 60 秒
 まで伸びます。デバイスが戻ったかどうかは `get_status` で確認できます。
+ハンドシェイク後にゲートウェイ側からセッションが切られた場合 (gateway クラッシュ、
+TLS レイヤの切断、ハンドシェイク後にセッションを閉じる構成のゲートウェイなど) でも
+同じ再試行経路が動くので、次の接続試行をゲートウェイが受け入れた時点で
+自動復帰します。
 
 別ネットワークから使う場合は、Tailscale Funnel と `VISION_URL` による capture
 callback 設定を [`docs/remote-access.md`](docs/remote-access.md) にまとめています。

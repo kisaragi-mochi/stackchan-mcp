@@ -15,6 +15,47 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Firmware
+
+- Fixed: WebSocket auto-reconnect now triggers on any post-handshake
+  server- or network-initiated disconnect — gateway crashes, TLS-layer
+  resets, and gateway configurations that tear the WebSocket session
+  down after the handshake. Previously the firmware logged the
+  disconnect, returned to `idle`, and stayed there until a hard reset
+  or user interaction; the reconnect path introduced in PR #35 was
+  effectively suppressed for these cases. Real-device tracing (CoreS3,
+  TLS-terminated gateway) showed that the original global atomic
+  `auto_reconnect_enabled_` flag was being cleared by an *unrelated*
+  user-initiated path (`HandleToggleChatEvent → CloseAudioChannel`,
+  reachable via a brief tap on the FT6336 LCD touch panel while the
+  device was in `listening`) running on the main task between handshake
+  completion and the `OnDisconnected` lambda firing on the WS task —
+  silently disarming the reconnect even when the underlying close was
+  not user-initiated. The fix replaces the global atomic flag with a
+  per-socket `shared_ptr<std::atomic<bool>>` (`notify_disconnect`)
+  whose lifetime is tied to the websocket itself: each candidate in
+  `OpenAudioChannelInternal()` creates its own token, `ParseServerHello`
+  flips it to `true` the moment the server hello arrives (before
+  setting the wait bit, so a near-simultaneous close still observes an
+  armed flag), and any path that intentionally tears down *that
+  specific* socket (`CloseAudioChannel`, the destructive prologue of
+  `OpenAudioChannelInternal`, or the destructor) flips it back to
+  `false` synchronously before invoking `websocket_.reset()`. The
+  lambda's early-return guard short-circuits if and only if the
+  firmware itself wanted the close, while every server- or
+  network-initiated disconnect falls through to `ScheduleReconnect()`.
+  A separate `intentional_close_` atomic re-checks intent on the main
+  task right before the deferred reconnect job runs, so a reconnect
+  enqueued via `Application::Schedule()` before `CloseAudioChannel()`
+  ran cannot reopen the channel against the user's intent (the
+  `esp_timer_stop()` call alone cannot cancel work the timer has
+  already re-posted). The `esp_timer_create` and `esp_timer_start_once`
+  return values are now inspected and logged on failure, and
+  `esp_timer_stop()` warnings other than `ESP_ERR_INVALID_STATE` are
+  surfaced. ([#61])
+
+[#61]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/61
+
 ### Added
 
 - The on-device WiFi configuration UI now also exposes a **Fallback

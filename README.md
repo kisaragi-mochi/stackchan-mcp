@@ -241,7 +241,11 @@ uv run python -m stackchan_mcp
 If the gateway is restarted while the ESP32 is already connected, the firmware
 automatically retries the WebSocket connection while idle. The retry delay starts
 at 5 seconds and backs off up to 60 seconds; use `get_status` to confirm that
-the device has reappeared.
+the device has reappeared. The same retry path also fires for any
+post-handshake server-initiated close — gateway crashes, TLS-layer resets, and
+gateway configurations that tear the WebSocket session down after the handshake
+— so the device recovers automatically once the gateway accepts the next
+connection attempt.
 
 For non-LAN setups, see [`docs/remote-access.md`](docs/remote-access.md) for the
 Tailscale Funnel flow and the `VISION_URL` capture callback setting.
