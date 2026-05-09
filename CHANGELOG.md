@@ -58,6 +58,34 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Added
 
+- New `set_mouth_sequence` MCP tool: queue a list of
+  `{shape, duration_ms}` steps and play it on the device locally so a
+  TTS-driven caller can ship one MCP call per utterance instead of N
+  back-to-back `set_mouth` calls (which suffer per-step WebSocket RTT
+  jitter). The gateway exposes a proper array schema with `shape`
+  constrained to `closed | half | open | e | u` and `duration_ms` to
+  10..10000 ms; sequences are 1..256 steps. Because the ESP32 MCP
+  Property type system only supports string/integer/boolean, the
+  gateway serialises `steps` to a JSON string under `steps_json` and
+  the firmware decodes it via cJSON; this is an internal wire detail
+  hidden from MCP clients. Validation is atomic — if any step is
+  malformed the whole call is rejected and nothing is queued (no
+  half-played sequences). Calling `set_mouth`, `set_avatar`, or
+  `set_mouth_sequence` again interrupts the in-flight sequence and,
+  for `set_mouth_sequence`, replaces the pending queue. A separate
+  `cancel_mouth_sequence` tool is intentionally not added —
+  `set_mouth("closed")` doubles as the cancellation path, keeping the
+  MCP surface minimal. Autonomous blink is paused during playback
+  because the blink state machine ends by restoring the last
+  full-face image, which would otherwise overwrite the active mouth
+  overlay; blink is resumed when the sequence finishes (or is
+  interrupted). The final shape is held after the sequence finishes
+  so callers can compose with future expression-style use cases;
+  append a `{"shape": "closed", "duration_ms": ...}` step if you want
+  the mouth to close at the end. Designed to compose with a future
+  TTS pipeline (caller pre-computes shapes from phonemes / aeneas
+  alignment / mora timing and ships the whole sequence in one call).
+  Requires a firmware update. ([#5])
 - The on-device WiFi configuration UI now also exposes a **Fallback
   Gateway URL** field and a **Gateway Token** field on the **Advanced**
   tab, alongside the existing WebSocket Gateway URL field. The values
@@ -77,6 +105,7 @@ change is called out under a `Firmware` subsection of the release entry.
   auth on stock builds where no Kconfig default is set, but reverts to
   the bundled default on builds that ship one. ([#43])
 
+[#5]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/5
 [#43]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/43
 
 ## [0.3.0] - 2026-05-08

@@ -54,7 +54,8 @@ This repository is a monorepo.
 | `get_touch_state` | Touch sensor state (press / release / stroke / etc.) | ✅ |
 | `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`), or `off` to hide the avatar and disable blink so the underlying WiFi config / OTA / settings screens are visible. Any other face brings the avatar back and restores blink. | ✅ |
 | `set_blink(state)` | Blink on/off | ✅ |
-| `set_mouth(state)` | Mouth open/close | ✅ |
+| `set_mouth(state)` | Mouth open/close (one-shot, held until next call) | ✅ |
+| `set_mouth_sequence(steps)` | Queue and play a list of `{shape, duration_ms}` steps locally for TTS lip-sync — no per-step WebSocket RTT jitter | ✅ |
 | `check_vm_en` | Check servo power supply (VM EN HIGH) state | ✅ |
 
 See `gateway/README.md` for full schemas.
