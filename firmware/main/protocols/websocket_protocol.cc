@@ -551,6 +551,17 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
     // the main task has not yet returned from xEventGroupWaitBits) would
     // wrongly suppress the reconnect. Clearing here closes that race;
     // the main task path also clears it for explicitness.
+    //
+    // The symmetric race — a user-initiated CloseAudioChannel() running
+    // between this WS-task clear and the main task mirroring the new
+    // notify_disconnect into current_notify_disconnect_ — cannot occur
+    // in practice because every CloseAudioChannel() call site in
+    // application.cc dispatches on the main task (Application::Run()'s
+    // event loop or Schedule() lambdas), and the main task is blocked
+    // inside xEventGroupWaitBits for the duration of this window.
+    // Reusing this protocol from a context that drives CloseAudioChannel
+    // from a separate task would invalidate that assumption and would
+    // also need a different mirror strategy (e.g. atomic_shared_ptr).
     intentional_close_.store(false);
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 }
