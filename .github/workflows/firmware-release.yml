@@ -1,0 +1,129 @@
+name: Firmware Release
+
+# Triggers:
+# - push:    tag `firmware-v*` → build + publish a GitHub Release with the
+#            firmware binaries attached as assets.
+# - manual:  workflow_dispatch → build-only smoke test (no publish). Useful
+#            for verifying the workflow itself or any change to it before
+#            cutting a real tag.
+on:
+  push:
+    tags:
+      - "firmware-v*"
+  workflow_dispatch:
+
+# Default permissions: nothing. Each job opts in to what it needs. The
+# release job is the only one that requires `contents: write`.
+permissions: {}
+
+# Only one run at a time per ref. Tag pushes never collide with each
+# other, but workflow_dispatch on the same branch can.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build firmware
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build firmware with ESP-IDF Docker image
+        # Same build command the regular CI Build workflow uses, so a
+        # tag-driven release artifact is byte-identical to what the PR
+        # checks already validate.
+        working-directory: firmware
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD":/project \
+            -w /project \
+            espressif/idf:v5.5.2 \
+            python ./scripts/release.py stackchan
+
+      - name: Verify firmware artifacts
+        # `merged-binary.bin` is the clean-install image (write at 0x0,
+        # resets NVS). `xiaozhi.bin` is the app-only image produced by
+        # `idf.py build` (write at 0x20000, preserves NVS / Wi-Fi). Both
+        # ship as release assets so end users and existing-device users
+        # can pick the right path. The zip is a convenience archive of
+        # `merged-binary.bin` named after the project version.
+        run: |
+          set -euo pipefail
+          test -f firmware/build/merged-binary.bin
+          test -f firmware/build/xiaozhi.bin
+          ls firmware/releases/v*_stackchan.zip
+
+      - name: Upload firmware artifacts
+        # Uploaded for both tag-push and workflow_dispatch so a manual
+        # run can still be inspected end-to-end. The release job below
+        # is the only step gated on the tag-push event.
+        uses: actions/upload-artifact@v4
+        with:
+          name: stackchan-firmware-${{ github.sha }}
+          retention-days: 14
+          path: |
+            firmware/build/merged-binary.bin
+            firmware/build/xiaozhi.bin
+            firmware/releases/v*_stackchan.zip
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    # Tag-only publish. workflow_dispatch invocations stop at the build
+    # job above, so manual runs cannot accidentally release. The
+    # `startsWith(...)` guard makes the intent explicit and survives
+    # future trigger additions.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/firmware-v')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: stackchan-firmware-${{ github.sha }}
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          # `actions/upload-artifact@v4` preserves the common-ancestor
+          # directory layout (here: `firmware/`), so the downloaded
+          # artifact under `dist/` keeps the `build/` and `releases/`
+          # subdirectories from the build job.
+          files: |
+            dist/build/merged-binary.bin
+            dist/build/xiaozhi.bin
+            dist/releases/v*_stackchan.zip
+          body: |
+            Pre-built firmware binaries for the M5Stack StackChan kit.
+            Flash with `esptool.py` — no ESP-IDF / Docker setup needed.
+
+            ### Quick flash (clean install — resets NVS / Wi-Fi config)
+
+            ```bash
+            esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
+              write_flash 0x0 merged-binary.bin
+            ```
+
+            ### App-only update (preserves NVS — keeps your Wi-Fi setup)
+
+            ```bash
+            esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
+              write_flash 0x20000 xiaozhi.bin
+            ```
+
+            See [README.md](https://github.com/kisaragi-mochi/stackchan-mcp/blob/main/README.md) / [README.ja.md](https://github.com/kisaragi-mochi/stackchan-mcp/blob/main/README.ja.md) for the full setup guide.
