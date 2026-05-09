@@ -160,6 +160,16 @@ Same shape, under `mcpServers`.
 | `set_mouth(state)` | Mouth shape (`closed` / `half` / `open` / `e` / `u`), one-shot, held until next call |
 | `set_mouth_sequence(steps)` | Queue and play a list of `{shape, duration_ms}` steps locally for TTS lip-sync. The firmware walks the queue without per-step network RTT. Calling `set_mouth`, `set_avatar`, or this tool again interrupts the in-flight sequence; autonomous blink is paused while a sequence is playing. |
 | `check_vm_en` | Read PY32 VM EN GPIO state (servo power supply diagnostic) |
+| `set_led(index, r, g, b)` | Set one of the 12 base RGB LEDs by index (`0..11`); channels `0..255`. Updates immediately. |
+| `set_all_leds(r, g, b)` | Set all 12 base RGB LEDs to the same color. Updates immediately. |
+| `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array (1..12 entries). Single I2C burst + one latch — use this for animations / multi-color patterns instead of N individual `set_led` calls. Trailing LEDs (beyond `len(colors)`) keep their previous color. Validation is atomic: a malformed entry rejects the whole call without mutating any LED. |
+| `clear_leds` | Turn all 12 base RGB LEDs off. |
+
+The 12 base LEDs are 12× WS2812C wired to the PY32L020 IO expander
+(expander pin 13, not an ESP32 GPIO), so all four LED tools share the
+PY32 I2C bus with the servo-power and Si12T touch paths. If the PY32
+init fails at boot, the LED tools degrade with `available=false`
+instead of cascading errors.
 
 The mapping from these names to ESP32-side `self.*` MCP tools is in
 `stackchan_mcp/stdio_server.py`.

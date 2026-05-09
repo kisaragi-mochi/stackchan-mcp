@@ -57,6 +57,10 @@
 | `set_mouth(state)` | 口開閉（one-shot、次の呼び出しまで保持） | ✅ |
 | `set_mouth_sequence(steps)` | TTS リップシンク用に `{shape, duration_ms}` のリストをデバイス側でキュー再生（ステップごとの WebSocket RTT ゆらぎなし） | ✅ |
 | `check_vm_en` | サーボ電源 (VM EN HIGH) 状態確認 | ✅ |
+| `set_led(index, r, g, b)` | ベース部の RGB LED 12 個のうち 1 個を指定 (index `0..11`、各チャネル `0..255`) | ✅ |
+| `set_all_leds(r, g, b)` | ベース部の RGB LED 12 個すべてを同じ色に設定 | ✅ |
+| `set_leds(colors)` | `[[r,g,b], ...]` 配列で先頭 N 個を一括設定（I2C 1 回のバースト送信、アニメーション等向け）。指定外の LED は前の色を保持 | ✅ |
+| `clear_leds` | ベース部の RGB LED 12 個すべて消灯 | ✅ |
 
 詳細スキーマは `gateway/README.md` 参照。
 

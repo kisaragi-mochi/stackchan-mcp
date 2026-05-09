@@ -57,6 +57,10 @@ This repository is a monorepo.
 | `set_mouth(state)` | Mouth open/close (one-shot, held until next call) | ✅ |
 | `set_mouth_sequence(steps)` | Queue and play a list of `{shape, duration_ms}` steps locally for TTS lip-sync — no per-step WebSocket RTT jitter | ✅ |
 | `check_vm_en` | Check servo power supply (VM EN HIGH) state | ✅ |
+| `set_led(index, r, g, b)` | Set one of the 12 base RGB LEDs (index `0..11`, channels `0..255`) | ✅ |
+| `set_all_leds(r, g, b)` | Set all 12 base RGB LEDs to the same color | ✅ |
+| `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array in a single I2C burst (use this for animations / multi-color patterns); trailing LEDs keep their previous color | ✅ |
+| `clear_leds` | Turn all 12 base RGB LEDs off | ✅ |
 
 See `gateway/README.md` for full schemas.
 
