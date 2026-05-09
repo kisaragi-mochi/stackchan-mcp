@@ -214,8 +214,14 @@ def create_server() -> Server:
                     "sequence and replaces it. Autonomous blink is paused "
                     "while a sequence is playing and resumed when it ends. "
                     "The final shape is held until the next "
-                    "set_mouth/set_avatar call (append a closed step if you "
-                    "want the mouth to close at the end)."
+                    "set_mouth / set_avatar call, or until an autonomous "
+                    "blink restores the resting face — this is the same "
+                    "Phase 2 trade-off that applies to set_mouth, since the "
+                    "blink animation ends by repainting the full face. If "
+                    "the final shape must persist visually, disable blink "
+                    "with set_blink(false) before the sequence (or append a "
+                    "closed step if you just want the mouth to close at "
+                    "the end)."
                 ),
                 inputSchema={
                     "type": "object",

@@ -2141,9 +2141,14 @@ private:
             "10..10000). Returns immediately; calling set_mouth, set_avatar, "
             "or this tool again interrupts the in-flight sequence. "
             "Autonomous blink is paused while a sequence plays and resumed "
-            "when it ends. The final shape is held until the next "
-            "set_mouth/set_avatar call (append a closed step if you want "
-            "the mouth to close at the end).",
+            "when it ends (resume reads the user's most recent set_blink "
+            "intent, not a snapshot). The final shape is held until the "
+            "next set_mouth / set_avatar call, or until the next autonomous "
+            "blink restores the resting face — the same Phase 2 trade-off "
+            "that applies to set_mouth, since blink ends by repainting the "
+            "full face. If the final shape must persist visually, disable "
+            "blink with set_blink(false) before the sequence (or append a "
+            "closed step if you just want the mouth to close at the end).",
             PropertyList({Property("steps_json", kPropertyTypeString)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 std::string steps_json = properties["steps_json"].value<std::string>();

@@ -88,7 +88,14 @@ change is called out under a `Firmware` subsection of the release entry.
   interrupted) by reading the user's most recent `set_blink` intent
   rather than a snapshot taken at sequence start, so a `set_blink`
   call issued mid-sequence is honoured (such a call returns `ok`
-  with `deferred: true` and applies the moment the sequence ends). The final shape is held after the sequence finishes
+  with `deferred: true` and applies the moment the sequence ends).
+  Note: like `set_mouth`, the final mouth shape can also be replaced
+  by the resting face once an autonomous blink fires after the
+  sequence — this is the same Phase 2 trade-off (the blink state
+  machine ends by repainting the full face). Callers that need a
+  non-closed final shape to persist visually should disable blink
+  with `set_blink(false)` before the sequence; a follow-up to make
+  blink composable with mouth overlays is tracked separately. The final shape is held after the sequence finishes
   so callers can compose with future expression-style use cases;
   append a `{"shape": "closed", "duration_ms": ...}` step if you want
   the mouth to close at the end. Designed to compose with a future
