@@ -64,6 +64,26 @@
 
 ### 1. ファームウェア書き込み (CoreS3)
 
+書き込み方法は 2 通り。エンドユーザーには **オプション A**（事前ビルド済みバイナリ）が手早く、ツールチェーンのセットアップ不要。コントリビュータがソースからビルドしたい場合は **オプション B**。
+
+#### オプション A: 事前ビルド済みバイナリを焼く（エンドユーザー向け、推奨）
+
+[Releases ページ](https://github.com/kisaragi-mochi/stackchan-mcp/releases) から最新の `firmware-v*` リリースを開き、`merged-binary.bin`（必要なら `xiaozhi.bin` も）をダウンロード。あとは `esptool.py` で焼くだけ:
+
+```bash
+# 新規インストール（NVS が消えるので Wi-Fi 設定はやり直し）:
+esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
+  write_flash 0x0 merged-binary.bin
+
+# アプリだけ更新（NVS 保持 — Wi-Fi 設定そのまま）:
+esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
+  write_flash 0x20000 xiaozhi.bin
+```
+
+ESP-IDF や Docker のセットアップは不要。
+
+#### オプション B: ソースから Docker でビルド（コントリビュータ向け）
+
 ```bash
 cd firmware
 docker run --rm -v $PWD:/project -w /project espressif/idf:v5.5.2 \
@@ -75,7 +95,7 @@ esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 build/merged-binary.bin
 ```
 
-WiFi 設定は ESP32 が起動後にスマホで設定 UI に接続して行う (xiaozhi-esp32 標準フロー)。
+書き込み後、WiFi 設定は ESP32 が起動してから行う — スマホで設定 UI に接続（xiaozhi-esp32 標準フロー）。
 
 ### WebSocket gateway URL と認証トークンの設定
 

@@ -64,6 +64,26 @@ See `gateway/README.md` for full schemas.
 
 ### 1. Flash the firmware (CoreS3)
 
+There are two paths. **Option A** is recommended for first-time users — no toolchain setup needed. **Option B** is for contributors who want to build from source.
+
+#### Option A: Flash a pre-built binary (recommended for end users)
+
+Download the latest firmware bundle from the [Releases page](https://github.com/kisaragi-mochi/stackchan-mcp/releases) — pick the most recent `firmware-v*` release and grab `merged-binary.bin` (and optionally `xiaozhi.bin`). Then flash with `esptool.py`:
+
+```bash
+# Clean install (resets NVS — Wi-Fi settings will need to be re-entered):
+esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
+  write_flash 0x0 merged-binary.bin
+
+# Or, app-only update (preserves NVS — keeps your Wi-Fi setup):
+esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
+  write_flash 0x20000 xiaozhi.bin
+```
+
+No ESP-IDF or Docker setup needed.
+
+#### Option B: Build from source with Docker (for contributors)
+
 ```bash
 cd firmware
 docker run --rm -v $PWD:/project -w /project espressif/idf:v5.5.2 \
@@ -75,7 +95,7 @@ esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 build/merged-binary.bin
 ```
 
-WiFi configuration happens after the ESP32 boots — connect from a smartphone to its setup UI (the xiaozhi-esp32 standard flow).
+After flashing, WiFi configuration happens on first boot — connect from a smartphone to the setup UI (the xiaozhi-esp32 standard flow).
 
 ### Configuring the WebSocket gateway URL and auth token
 
