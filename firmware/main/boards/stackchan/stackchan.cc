@@ -2482,8 +2482,17 @@ private:
                 }
                 int n = cJSON_GetArraySize(arr);
                 if (n > RGB_LED_COUNT) n = RGB_LED_COUNT;
+
+                // Validate every entry FIRST and pack into a local buffer.
+                // Only after the whole array is known good do we touch the
+                // PY32 — that way a malformed entry at i=5 cannot leave
+                // LEDs 0..4 mutated (atomic semantics, same as
+                // set_mouth_sequence). cJSON_IsNumber is required because
+                // valueint silently returns 0 for non-number nodes (string,
+                // null, bool), so without the guard a payload like
+                // [["255",0,0]] would write black and report ok=true.
+                uint8_t buf[RGB_LED_COUNT * 2];   // 24 bytes, fits the cap
                 bool parse_ok = true;
-                int written = 0;
                 for (int i = 0; i < n; i++) {
                     cJSON* triple = cJSON_GetArrayItem(arr, i);
                     if (!cJSON_IsArray(triple) || cJSON_GetArraySize(triple) < 3) {
@@ -2493,29 +2502,34 @@ private:
                     cJSON* jr = cJSON_GetArrayItem(triple, 0);
                     cJSON* jg = cJSON_GetArrayItem(triple, 1);
                     cJSON* jb = cJSON_GetArrayItem(triple, 2);
-                    if (jr == nullptr || jg == nullptr || jb == nullptr) {
+                    if (!cJSON_IsNumber(jr) || !cJSON_IsNumber(jg) || !cJSON_IsNumber(jb)) {
                         parse_ok = false;
                         break;
                     }
-                    if (!io_expander_->SetLedColor((uint8_t)i,
-                                                   ClampByte(jr->valueint),
-                                                   ClampByte(jg->valueint),
-                                                   ClampByte(jb->valueint))) {
-                        parse_ok = false;
-                        break;
-                    }
-                    written++;
+                    PackRgb565(ClampByte(jr->valueint),
+                               ClampByte(jg->valueint),
+                               ClampByte(jb->valueint),
+                               &buf[i * 2]);
                 }
                 cJSON_Delete(arr);
-                bool ok_r = parse_ok ? io_expander_->RefreshLeds() : false;
-                cJSON_AddBoolToObject(root, "ok", parse_ok && ok_r);
-                cJSON_AddNumberToObject(root, "written", written);
+
+                // Single I2C burst for the validated prefix, then one latch.
+                // n=0 is treated as success (gateway schema enforces
+                // minItems=1, but a direct device caller could hit this).
+                bool ok_w = false, ok_r = false;
+                if (parse_ok && n > 0) {
+                    ok_w = io_expander_->SetLedData(buf, (size_t)(n * 2));
+                    ok_r = ok_w ? io_expander_->RefreshLeds() : false;
+                }
+                bool ok = parse_ok && (n == 0 || (ok_w && ok_r));
+                cJSON_AddBoolToObject(root, "ok", ok);
+                cJSON_AddNumberToObject(root, "written", ok ? n : 0);
                 if (!parse_ok) {
                     cJSON_AddStringToObject(root, "error",
                         "Each entry must be a [r,g,b] triple of integers");
                 }
                 ESP_LOGI(TAG, "set_many_leds: written=%d/%d ok=%d",
-                         written, n, parse_ok && ok_r);
+                         ok ? n : 0, n, ok);
                 return root;
             });
 
