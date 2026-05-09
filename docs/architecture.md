@@ -52,6 +52,10 @@ The gateway translates between two tool naming conventions:
 | `set_blink` | `self.avatar.set_blink` |
 | `set_mouth` | `self.avatar.set_mouth` |
 | `check_vm_en` | `self.robot.check_vm_en` |
+| `set_led` | `self.led.set_color` |
+| `set_all_leds` | `self.led.set_all` |
+| `set_leds` | `self.led.set_many` |
+| `clear_leds` | `self.led.clear` |
 
 The mapping lives in `gateway/stackchan_mcp/stdio_server.py`.
 
@@ -91,4 +95,5 @@ schedule this reconnect loop.
 - **Phase 1**: real servo, volume, brightness → done
 - **Phase 2**: HTTP camera capture → done
 - **Phase 3**: avatar, blink, mouth, touch (Si12T), gesture (TAP/STROKE) → done
-- **Phase 4** (planned): Opus audio stream (STT / TTS pipeline)
+- **Phase 4**: 12x WS2812C base RGB LEDs via PY32 IO expander → done
+- **Phase 5** (planned): Opus audio stream (STT / TTS pipeline)
