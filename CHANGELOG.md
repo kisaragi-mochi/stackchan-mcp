@@ -71,15 +71,24 @@ change is called out under a `Firmware` subsection of the release entry.
   hidden from MCP clients. Validation is atomic — if any step is
   malformed the whole call is rejected and nothing is queued (no
   half-played sequences). Calling `set_mouth`, `set_avatar`, or
-  `set_mouth_sequence` again interrupts the in-flight sequence and,
-  for `set_mouth_sequence`, replaces the pending queue. A separate
-  `cancel_mouth_sequence` tool is intentionally not added —
-  `set_mouth("closed")` doubles as the cancellation path, keeping the
-  MCP surface minimal. Autonomous blink is paused during playback
-  because the blink state machine ends by restoring the last
-  full-face image, which would otherwise overwrite the active mouth
-  overlay; blink is resumed when the sequence finishes (or is
-  interrupted). The final shape is held after the sequence finishes
+  `set_mouth_sequence` again interrupts the in-flight sequence and
+  also clears any pending-but-not-yet-started sequence, so a
+  `set_mouth("closed")` issued in the brief window between
+  `set_mouth_sequence` returning and the playback task waking up
+  still wins. Each preempt also bumps a generation token that the
+  playback task re-checks before every frame draw, eliminating the
+  small race where a stale mouth frame could otherwise be drawn
+  after a newer command had already returned to the caller. A
+  separate `cancel_mouth_sequence` tool is intentionally not added —
+  `set_mouth("closed")` doubles as the cancellation path, keeping
+  the MCP surface minimal. Autonomous blink is paused during
+  playback because the blink state machine ends by restoring the
+  last full-face image, which would otherwise overwrite the active
+  mouth overlay; blink is resumed when the sequence finishes (or is
+  interrupted) by reading the user's most recent `set_blink` intent
+  rather than a snapshot taken at sequence start, so a `set_blink`
+  call issued mid-sequence is honoured (such a call returns `ok`
+  with `deferred: true` and applies the moment the sequence ends). The final shape is held after the sequence finishes
   so callers can compose with future expression-style use cases;
   append a `{"shape": "closed", "duration_ms": ...}` step if you want
   the mouth to close at the end. Designed to compose with a future

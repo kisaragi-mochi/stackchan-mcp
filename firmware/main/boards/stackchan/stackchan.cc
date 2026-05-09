@@ -25,6 +25,7 @@
 #include "esp_video.h"
 #include <cJSON.h>
 #include <lvgl.h>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1589,18 +1590,49 @@ private:
     };
 
     TaskHandle_t mouth_seq_task_ = nullptr;
-    SemaphoreHandle_t mouth_seq_lock_ = nullptr;     // protects mouth_seq_pending_
+    SemaphoreHandle_t mouth_seq_lock_ = nullptr;     // protects mouth_seq_pending_ + generation
     SemaphoreHandle_t mouth_seq_signal_ = nullptr;   // binary semaphore: wake the task
     std::vector<MouthStep> mouth_seq_pending_;
-    volatile bool mouth_seq_active_ = false;
-    volatile bool mouth_seq_cancel_requested_ = false;
+    std::atomic<bool> mouth_seq_active_{false};
+    std::atomic<bool> mouth_seq_cancel_requested_{false};
+    // Generation counter bumped under mouth_seq_lock_ by every preemption
+    // path (set_mouth, set_avatar, fresh set_mouth_sequence). The playback
+    // task latches a snapshot at sequence start and re-checks before every
+    // SetMouthShape() call, so a preempt issued in the 0..kMouthCancelSliceMs
+    // window between the last cancel-flag check and the next SetMouthShape
+    // call still aborts the current frame draw. Without this, the task
+    // could draw one stale mouth frame after the user-issued set_mouth /
+    // set_avatar handler had already returned.
+    std::atomic<uint32_t> mouth_seq_generation_{0};
+    // User's explicitly-requested blink state, independent of whether
+    // a mouth sequence is currently suppressing the timer. set_blink
+    // updates this; the playback task restores StartBlinkTimer() at
+    // sequence end iff this is true. Without this split a set_blink
+    // call issued during a sequence is silently overwritten by the
+    // pre-sequence snapshot when the task finishes.
+    std::atomic<bool> blink_desired_{false};
 
-    // Mark the in-flight sequence (if any) for cancellation. Safe to call
-    // from any thread; the playback task observes the flag at the next
-    // slice boundary. Idempotent: setting it twice is a no-op.
+    // Mark any in-flight or pending sequence for cancellation. Safe to
+    // call from any thread. Takes mouth_seq_lock_ so that:
+    //   - mouth_seq_pending_ is cleared atomically (callers that issue
+    //     set_mouth / set_avatar in the brief window between
+    //     EnqueueMouthSequence() returning and the task waking up don't
+    //     get overwritten by the queued-but-not-yet-active sequence);
+    //   - mouth_seq_cancel_requested_ is set so the task aborts at the
+    //     next slice boundary if it is already active;
+    //   - mouth_seq_generation_ is bumped under release ordering so the
+    //     task observes a stale generation at its next per-step check
+    //     and skips the remaining SetMouthShape() calls.
+    // Idempotent under repeated calls.
     void RequestMouthSequenceCancel() {
-        if (mouth_seq_active_) {
-            mouth_seq_cancel_requested_ = true;
+        if (mouth_seq_lock_ == nullptr) {
+            return;
+        }
+        if (xSemaphoreTake(mouth_seq_lock_, portMAX_DELAY) == pdTRUE) {
+            mouth_seq_pending_.clear();
+            mouth_seq_cancel_requested_.store(true, std::memory_order_release);
+            mouth_seq_generation_.fetch_add(1, std::memory_order_release);
+            xSemaphoreGive(mouth_seq_lock_);
         }
     }
 
@@ -1680,12 +1712,17 @@ private:
         }
 
         // Atomically replace the pending queue and mark any in-flight
-        // sequence for cancellation so it stops at the next slice.
+        // sequence for cancellation so it stops at the next slice. The
+        // generation bump is what makes a fresh enqueue preempt the
+        // currently-playing sequence even between cancel-flag checks
+        // and SetMouthShape() calls (per-step generation re-check in
+        // MouthSequenceTaskLoop).
         if (xSemaphoreTake(mouth_seq_lock_, portMAX_DELAY) == pdTRUE) {
             mouth_seq_pending_ = std::move(parsed);
-            if (mouth_seq_active_) {
-                mouth_seq_cancel_requested_ = true;
+            if (mouth_seq_active_.load(std::memory_order_acquire)) {
+                mouth_seq_cancel_requested_.store(true, std::memory_order_release);
             }
+            mouth_seq_generation_.fetch_add(1, std::memory_order_release);
             xSemaphoreGive(mouth_seq_lock_);
         }
         // Wake the task. If the task is already running through a previous
@@ -1710,13 +1747,17 @@ private:
             xSemaphoreTake(mouth_seq_signal_, portMAX_DELAY);
 
             // Drain whatever is pending right now into a local copy so
-            // we can release the lock before walking the sequence.
+            // we can release the lock before walking the sequence. Latch
+            // the generation under the same lock so we can reject any
+            // newer preempt at the next per-step check.
             std::vector<MouthStep> seq;
+            uint32_t my_generation = 0;
             if (xSemaphoreTake(mouth_seq_lock_, portMAX_DELAY) == pdTRUE) {
                 seq = std::move(mouth_seq_pending_);
                 mouth_seq_pending_.clear();
-                mouth_seq_cancel_requested_ = false;
-                mouth_seq_active_ = !seq.empty();
+                mouth_seq_cancel_requested_.store(false, std::memory_order_release);
+                mouth_seq_active_.store(!seq.empty(), std::memory_order_release);
+                my_generation = mouth_seq_generation_.load(std::memory_order_acquire);
                 xSemaphoreGive(mouth_seq_lock_);
             }
             if (seq.empty()) {
@@ -1725,20 +1766,28 @@ private:
 
             // Pause autonomous blink for the duration of the sequence so
             // BlinkStepAdvance()'s RestoreCurrentFaceLocked() does not
-            // overwrite the active mouth overlay.
-            bool blink_was_enabled = blink_enabled_;
-            if (blink_was_enabled) {
-                StopBlinkTimer();
-            }
+            // overwrite the active mouth overlay. Note: we no longer
+            // snapshot blink_enabled_ here — the user's intent is read
+            // from blink_desired_ at sequence end so calls to set_blink
+            // made during playback are honoured.
+            StopBlinkTimer();
 
             for (const auto& step : seq) {
-                if (mouth_seq_cancel_requested_) {
+                // Re-check cancel + generation right before each frame
+                // draw. Any preempt issued between this check and the
+                // previous SetMouthShape() will be observed here, so we
+                // never draw a frame after a newer set_mouth / set_avatar
+                // / set_mouth_sequence handler has returned to the caller.
+                if (mouth_seq_cancel_requested_.load(std::memory_order_acquire) ||
+                    mouth_seq_generation_.load(std::memory_order_acquire) != my_generation) {
                     break;
                 }
                 SetMouthShape(step.shape.c_str());
                 // Sleep in small slices so cancel is observed quickly.
                 uint32_t remaining = step.duration_ms;
-                while (remaining > 0 && !mouth_seq_cancel_requested_) {
+                while (remaining > 0 &&
+                       !mouth_seq_cancel_requested_.load(std::memory_order_acquire) &&
+                       mouth_seq_generation_.load(std::memory_order_acquire) == my_generation) {
                     uint32_t slice = remaining > kMouthCancelSliceMs
                                          ? kMouthCancelSliceMs
                                          : remaining;
@@ -1747,7 +1796,11 @@ private:
                 }
             }
 
-            if (blink_was_enabled) {
+            // Restore blink according to the user's most recent intent,
+            // not a snapshot taken before the sequence started. This way
+            // a set_blink(true/false) issued during the sequence is the
+            // one that wins at the end.
+            if (blink_desired_.load(std::memory_order_acquire)) {
                 StartBlinkTimer();
             }
 
@@ -1757,7 +1810,7 @@ private:
             // immediately rather than parking on the semaphore.
             bool has_more = false;
             if (xSemaphoreTake(mouth_seq_lock_, portMAX_DELAY) == pdTRUE) {
-                mouth_seq_active_ = false;
+                mouth_seq_active_.store(false, std::memory_order_release);
                 has_more = !mouth_seq_pending_.empty();
                 xSemaphoreGive(mouth_seq_lock_);
             }
@@ -2112,23 +2165,38 @@ private:
 
         // Phase 2: enable/disable autonomous blinking. When enabled, a
         // background timer fires every 3-6 s (random) and runs the four-step
-        // blink sequence (half -> closed -> half -> face).
+        // blink sequence (half -> closed -> half -> face). Also captures
+        // the user's intent into blink_desired_ so that a call issued while
+        // a mouth sequence is suppressing blink is honoured when the
+        // sequence finishes.
         mcp_server.AddTool(
             "self.display.set_blink",
             "Enable or disable autonomous eye blinking on the avatar. "
-            "When enabled, a brief blink animation runs every 3-6 seconds.",
+            "When enabled, a brief blink animation runs every 3-6 seconds. "
+            "If a set_mouth_sequence is currently playing, blink is paused "
+            "until the sequence ends; this call still records the intent "
+            "and is applied at the sequence end (or immediately if no "
+            "sequence is running).",
             PropertyList({Property("enabled", kPropertyTypeBoolean)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 bool enabled = properties["enabled"].value<bool>();
-                if (enabled) {
-                    StartBlinkTimer();
-                } else {
-                    StopBlinkTimer();
+                blink_desired_.store(enabled, std::memory_order_release);
+                bool deferred = mouth_seq_active_.load(std::memory_order_acquire);
+                if (!deferred) {
+                    if (enabled) {
+                        StartBlinkTimer();
+                    } else {
+                        StopBlinkTimer();
+                    }
                 }
                 cJSON* root = cJSON_CreateObject();
                 cJSON_AddBoolToObject(root, "enabled", enabled);
                 cJSON_AddBoolToObject(root, "ok", true);
-                ESP_LOGI(TAG, "set_blink: enabled=%d", (int)enabled);
+                if (deferred) {
+                    cJSON_AddBoolToObject(root, "deferred", true);
+                }
+                ESP_LOGI(TAG, "set_blink: enabled=%d deferred=%d",
+                         (int)enabled, deferred ? 1 : 0);
                 return root;
             });
 
