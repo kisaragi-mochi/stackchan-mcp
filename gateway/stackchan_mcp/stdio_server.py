@@ -184,7 +184,9 @@ def create_server() -> Server:
                 description=(
                     "Set the avatar mouth shape for lip-sync. "
                     "The shape is held until the next set_avatar / set_mouth call, "
-                    "or until an autonomous blink restores the resting face."
+                    "or until an autonomous blink restores the resting face. "
+                    "Calling this while a set_mouth_sequence is in flight "
+                    "interrupts the sequence."
                 ),
                 inputSchema={
                     "type": "object",
@@ -196,6 +198,68 @@ def create_server() -> Server:
                         },
                     },
                     "required": ["mouth"],
+                },
+            ),
+            Tool(
+                name="set_mouth_sequence",
+                description=(
+                    "Queue a lip-sync sequence and play it on the device. "
+                    "Each step holds 'shape' for 'duration_ms' before "
+                    "advancing. The firmware walks the queue locally so "
+                    "there is no per-step network RTT (use this instead of "
+                    "issuing many set_mouth calls back-to-back from a TTS "
+                    "loop). Returns immediately with the queued step count "
+                    "and estimated total duration. Calling set_mouth, "
+                    "set_avatar, or this tool again interrupts the in-flight "
+                    "sequence and replaces it. Autonomous blink is paused "
+                    "while a sequence is playing and resumed when it ends. "
+                    "The final shape is held until the next "
+                    "set_mouth / set_avatar call, or until an autonomous "
+                    "blink restores the resting face — this is the same "
+                    "Phase 2 trade-off that applies to set_mouth, since the "
+                    "blink animation ends by repainting the full face. If "
+                    "the final shape must persist visually, disable blink "
+                    "with set_blink(false) before the sequence (or append a "
+                    "closed step if you just want the mouth to close at "
+                    "the end)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 256,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "shape": {
+                                        "type": "string",
+                                        "enum": ["closed", "half", "open", "e", "u"],
+                                        "description": (
+                                            "Mouth shape for this step. "
+                                            "One of: closed, half, open, e, u."
+                                        ),
+                                    },
+                                    "duration_ms": {
+                                        "type": "integer",
+                                        "minimum": 10,
+                                        "maximum": 10000,
+                                        "description": (
+                                            "How long to hold this shape "
+                                            "before advancing, in ms (10..10000)."
+                                        ),
+                                    },
+                                },
+                                "required": ["shape", "duration_ms"],
+                            },
+                            "description": (
+                                "Ordered list of mouth shapes with hold "
+                                "durations (1..256 steps)."
+                            ),
+                        },
+                    },
+                    "required": ["steps"],
                 },
             ),
             Tool(
@@ -361,6 +425,13 @@ def create_server() -> Server:
             "set_mouth": (
                 "self.display.set_mouth",
                 arguments,
+            ),
+            # The MCP Property type system on ESP32 only supports
+            # string/integer/boolean, so we serialise the steps array to
+            # a JSON string here. The firmware decodes it via cJSON.
+            "set_mouth_sequence": (
+                "self.display.set_mouth_sequence",
+                {"steps_json": json.dumps(arguments.get("steps", []))},
             ),
             "set_blink": (
                 "self.display.set_blink",

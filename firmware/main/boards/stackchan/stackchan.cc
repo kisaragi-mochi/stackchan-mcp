@@ -25,8 +25,10 @@
 #include "esp_video.h"
 #include <cJSON.h>
 #include <lvgl.h>
+#include <atomic>
 #include <memory>
 #include <string>
+#include <vector>
 
 #define TAG "StackChanBoard"
 
@@ -1679,6 +1681,326 @@ private:
         ESP_LOGI(TAG, "Blink DISABLED");
     }
 
+    // ---- Phase 2: lip-sync sequence playback (Issue #5) ----------------
+    //
+    // set_mouth_sequence accepts a list of {shape, duration_ms} pairs and
+    // walks through it on a dedicated FreeRTOS task. Each step swaps the
+    // mouth-only image and waits duration_ms before advancing. Walking the
+    // queue locally avoids the per-step WebSocket RTT jitter that callers
+    // see when issuing many set_mouth calls back-to-back from a TTS loop.
+    //
+    // Concurrency model:
+    //   - mouth_seq_lock_ protects mouth_seq_pending_.
+    //   - mouth_seq_signal_ is a binary semaphore that wakes the task when
+    //     a new sequence has been enqueued.
+    //   - mouth_seq_active_ / mouth_seq_cancel_requested_ are volatile flags
+    //     read by the task between steps. Setting cancel_requested while the
+    //     task is sleeping in vTaskDelay simply means the task picks up the
+    //     cancel at the next slice boundary (kMouthCancelSliceMs apart).
+    //   - Re-entry semantics: a fresh set_mouth_sequence call replaces the
+    //     pending queue and marks cancel_requested so the task drops the
+    //     remainder of the current sequence and starts the new one.
+    //   - Interrupt sources: set_mouth, set_avatar, and set_mouth_sequence
+    //     all call RequestMouthSequenceCancel() before mutating display
+    //     state, so a sequence in flight is cleanly preempted.
+    //
+    // Trade-offs:
+    //   - The MCP Property type system does not support array values, so
+    //     the gateway serialises `steps` to a JSON string and passes it as
+    //     `steps_json`. Validation happens here once, atomically: if any
+    //     step is malformed the whole call is rejected and nothing is
+    //     queued (no half-played sequences).
+    //   - Autonomous blink is paused while a sequence plays because the
+    //     blink state machine ends by calling RestoreCurrentFaceLocked(),
+    //     which would replace the active mouth overlay with the resting
+    //     face image (see Phase 2 comment near BlinkStepAdvance()).
+    //   - The final shape is held after the sequence finishes; callers
+    //     that want the mouth to close at the end should append a
+    //     {"closed", N} step explicitly. This keeps the primitive composable
+    //     with future expression-style use cases (e.g. ending on an open
+    //     smile).
+    static constexpr int kMaxMouthSequenceSteps = 256;
+    static constexpr int kMouthStepMinMs = 10;
+    static constexpr int kMouthStepMaxMs = 10000;
+    static constexpr uint32_t kMouthCancelSliceMs = 20;
+
+    struct MouthStep {
+        std::string shape;
+        uint32_t duration_ms;
+    };
+
+    struct MouthSequenceEnqueueResult {
+        bool ok;
+        std::string error;
+        int queued_steps;
+        uint32_t total_duration_ms;
+    };
+
+    TaskHandle_t mouth_seq_task_ = nullptr;
+    SemaphoreHandle_t mouth_seq_lock_ = nullptr;     // protects mouth_seq_pending_ + generation
+    SemaphoreHandle_t mouth_seq_signal_ = nullptr;   // binary semaphore: wake the task
+    std::vector<MouthStep> mouth_seq_pending_;
+    std::atomic<bool> mouth_seq_active_{false};
+    std::atomic<bool> mouth_seq_cancel_requested_{false};
+    // Generation counter bumped under mouth_seq_lock_ by every preemption
+    // path (set_mouth, set_avatar, fresh set_mouth_sequence). The playback
+    // task latches a snapshot at sequence start and re-checks before every
+    // SetMouthShape() call, so a preempt issued in the 0..kMouthCancelSliceMs
+    // window between the last cancel-flag check and the next SetMouthShape
+    // call still aborts the current frame draw. Without this, the task
+    // could draw one stale mouth frame after the user-issued set_mouth /
+    // set_avatar handler had already returned.
+    std::atomic<uint32_t> mouth_seq_generation_{0};
+    // User's explicitly-requested blink state, independent of whether
+    // a mouth sequence is currently suppressing the timer. set_blink
+    // updates this; the playback task restores StartBlinkTimer() at
+    // sequence end iff this is true. Without this split a set_blink
+    // call issued during a sequence is silently overwritten by the
+    // pre-sequence snapshot when the task finishes.
+    std::atomic<bool> blink_desired_{false};
+
+    // Mark any in-flight or pending sequence for cancellation. Safe to
+    // call from any thread. Takes mouth_seq_lock_ so that:
+    //   - mouth_seq_pending_ is cleared atomically (callers that issue
+    //     set_mouth / set_avatar in the brief window between
+    //     EnqueueMouthSequence() returning and the task waking up don't
+    //     get overwritten by the queued-but-not-yet-active sequence);
+    //   - mouth_seq_cancel_requested_ is set so the task aborts at the
+    //     next slice boundary if it is already active;
+    //   - mouth_seq_generation_ is bumped under release ordering so the
+    //     task observes a stale generation at its next per-step check
+    //     and skips the remaining SetMouthShape() calls.
+    // Idempotent under repeated calls.
+    void RequestMouthSequenceCancel() {
+        if (mouth_seq_lock_ == nullptr) {
+            return;
+        }
+        if (xSemaphoreTake(mouth_seq_lock_, portMAX_DELAY) == pdTRUE) {
+            mouth_seq_pending_.clear();
+            mouth_seq_cancel_requested_.store(true, std::memory_order_release);
+            mouth_seq_generation_.fetch_add(1, std::memory_order_release);
+            xSemaphoreGive(mouth_seq_lock_);
+        }
+    }
+
+    // Parse and validate a JSON-serialised sequence, then atomically
+    // replace mouth_seq_pending_ and signal the playback task. Returns
+    // a populated MouthSequenceEnqueueResult; on validation failure
+    // nothing is queued.
+    MouthSequenceEnqueueResult EnqueueMouthSequence(const std::string& steps_json) {
+        MouthSequenceEnqueueResult r{false, std::string(), 0, 0};
+
+        cJSON* root = cJSON_Parse(steps_json.c_str());
+        if (root == nullptr) {
+            r.error = "steps must be a JSON array (parse failed)";
+            return r;
+        }
+        if (!cJSON_IsArray(root)) {
+            r.error = "steps must be a JSON array";
+            cJSON_Delete(root);
+            return r;
+        }
+        int n = cJSON_GetArraySize(root);
+        if (n < 1 || n > kMaxMouthSequenceSteps) {
+            r.error = std::string("steps length out of range (1..") +
+                      std::to_string(kMaxMouthSequenceSteps) + ")";
+            cJSON_Delete(root);
+            return r;
+        }
+
+        std::vector<MouthStep> parsed;
+        parsed.reserve(static_cast<size_t>(n));
+        uint32_t total = 0;
+        for (int i = 0; i < n; ++i) {
+            cJSON* item = cJSON_GetArrayItem(root, i);
+            if (!cJSON_IsObject(item)) {
+                r.error = std::string("step[") + std::to_string(i) + "] must be an object";
+                cJSON_Delete(root);
+                return r;
+            }
+            cJSON* shape = cJSON_GetObjectItem(item, "shape");
+            cJSON* dur = cJSON_GetObjectItem(item, "duration_ms");
+            if (!cJSON_IsString(shape) || shape->valuestring == nullptr) {
+                r.error = std::string("step[") + std::to_string(i) + "].shape must be a string";
+                cJSON_Delete(root);
+                return r;
+            }
+            if (!cJSON_IsNumber(dur)) {
+                r.error = std::string("step[") + std::to_string(i) + "].duration_ms must be an integer";
+                cJSON_Delete(root);
+                return r;
+            }
+            if (MouthImageFor(shape->valuestring) == nullptr) {
+                r.error = std::string("step[") + std::to_string(i) +
+                          "].shape unknown: '" + shape->valuestring +
+                          "' (allowed: closed, half, open, e, u)";
+                cJSON_Delete(root);
+                return r;
+            }
+            int d = dur->valueint;
+            if (d < kMouthStepMinMs || d > kMouthStepMaxMs) {
+                r.error = std::string("step[") + std::to_string(i) +
+                          "].duration_ms out of range (" +
+                          std::to_string(kMouthStepMinMs) + ".." +
+                          std::to_string(kMouthStepMaxMs) + ")";
+                cJSON_Delete(root);
+                return r;
+            }
+            parsed.push_back({std::string(shape->valuestring),
+                              static_cast<uint32_t>(d)});
+            total += static_cast<uint32_t>(d);
+        }
+        cJSON_Delete(root);
+
+        if (mouth_seq_lock_ == nullptr || mouth_seq_signal_ == nullptr ||
+            mouth_seq_task_ == nullptr) {
+            r.error = "mouth sequence task not initialised";
+            return r;
+        }
+
+        // Atomically replace the pending queue and mark any in-flight
+        // sequence for cancellation so it stops at the next slice. The
+        // generation bump is what makes a fresh enqueue preempt the
+        // currently-playing sequence even between cancel-flag checks
+        // and SetMouthShape() calls (per-step generation re-check in
+        // MouthSequenceTaskLoop).
+        if (xSemaphoreTake(mouth_seq_lock_, portMAX_DELAY) == pdTRUE) {
+            mouth_seq_pending_ = std::move(parsed);
+            if (mouth_seq_active_.load(std::memory_order_acquire)) {
+                mouth_seq_cancel_requested_.store(true, std::memory_order_release);
+            }
+            mouth_seq_generation_.fetch_add(1, std::memory_order_release);
+            xSemaphoreGive(mouth_seq_lock_);
+        }
+        // Wake the task. If the task is already running through a previous
+        // sequence, it will pick up the new pending queue after observing
+        // cancel_requested at the next slice and looping back.
+        xSemaphoreGive(mouth_seq_signal_);
+
+        r.ok = true;
+        r.queued_steps = n;
+        r.total_duration_ms = total;
+        return r;
+    }
+
+    static void MouthSequenceTaskTrampoline(void* arg) {
+        static_cast<StackChanBoard*>(arg)->MouthSequenceTaskLoop();
+    }
+
+    void MouthSequenceTaskLoop() {
+        for (;;) {
+            // Wait until something is enqueued (or self-signaled at the
+            // tail of a previous run when more pending was discovered).
+            xSemaphoreTake(mouth_seq_signal_, portMAX_DELAY);
+
+            // Drain whatever is pending right now into a local copy so
+            // we can release the lock before walking the sequence. Latch
+            // the generation under the same lock so we can reject any
+            // newer preempt at the next per-step check.
+            std::vector<MouthStep> seq;
+            uint32_t my_generation = 0;
+            if (xSemaphoreTake(mouth_seq_lock_, portMAX_DELAY) == pdTRUE) {
+                seq = std::move(mouth_seq_pending_);
+                mouth_seq_pending_.clear();
+                mouth_seq_cancel_requested_.store(false, std::memory_order_release);
+                mouth_seq_active_.store(!seq.empty(), std::memory_order_release);
+                my_generation = mouth_seq_generation_.load(std::memory_order_acquire);
+                xSemaphoreGive(mouth_seq_lock_);
+            }
+            if (seq.empty()) {
+                continue;
+            }
+
+            // Pause autonomous blink for the duration of the sequence so
+            // BlinkStepAdvance()'s RestoreCurrentFaceLocked() does not
+            // overwrite the active mouth overlay. Note: we no longer
+            // snapshot blink_enabled_ here — the user's intent is read
+            // from blink_desired_ at sequence end so calls to set_blink
+            // made during playback are honoured.
+            StopBlinkTimer();
+
+            for (const auto& step : seq) {
+                // Re-check cancel + generation right before each frame
+                // draw. Any preempt issued between this check and the
+                // previous SetMouthShape() will be observed here, so we
+                // never draw a frame after a newer set_mouth / set_avatar
+                // / set_mouth_sequence handler has returned to the caller.
+                if (mouth_seq_cancel_requested_.load(std::memory_order_acquire) ||
+                    mouth_seq_generation_.load(std::memory_order_acquire) != my_generation) {
+                    break;
+                }
+                SetMouthShape(step.shape.c_str());
+                // Sleep in small slices so cancel is observed quickly.
+                uint32_t remaining = step.duration_ms;
+                while (remaining > 0 &&
+                       !mouth_seq_cancel_requested_.load(std::memory_order_acquire) &&
+                       mouth_seq_generation_.load(std::memory_order_acquire) == my_generation) {
+                    uint32_t slice = remaining > kMouthCancelSliceMs
+                                         ? kMouthCancelSliceMs
+                                         : remaining;
+                    vTaskDelay(pdMS_TO_TICKS(slice));
+                    remaining -= slice;
+                }
+            }
+
+            // Restore blink according to the user's most recent intent,
+            // not a snapshot taken before the sequence started. This way
+            // a set_blink(true/false) issued during the sequence is the
+            // one that wins at the end.
+            if (blink_desired_.load(std::memory_order_acquire)) {
+                StartBlinkTimer();
+            }
+
+            // If a fresh sequence was enqueued during playback, the
+            // cancel path above will have left it in mouth_seq_pending_.
+            // Self-signal so the next outer-loop iteration picks it up
+            // immediately rather than parking on the semaphore.
+            bool has_more = false;
+            if (xSemaphoreTake(mouth_seq_lock_, portMAX_DELAY) == pdTRUE) {
+                mouth_seq_active_.store(false, std::memory_order_release);
+                has_more = !mouth_seq_pending_.empty();
+                xSemaphoreGive(mouth_seq_lock_);
+            }
+            if (has_more) {
+                xSemaphoreGive(mouth_seq_signal_);
+            }
+        }
+    }
+
+    void InitializeMouthSequenceTask() {
+        if (mouth_seq_task_ != nullptr) {
+            return;
+        }
+        mouth_seq_lock_ = xSemaphoreCreateMutex();
+        mouth_seq_signal_ = xSemaphoreCreateBinary();
+        if (mouth_seq_lock_ == nullptr || mouth_seq_signal_ == nullptr) {
+            ESP_LOGE(TAG, "Failed to create mouth sequence sync primitives");
+            if (mouth_seq_lock_ != nullptr) {
+                vSemaphoreDelete(mouth_seq_lock_);
+                mouth_seq_lock_ = nullptr;
+            }
+            if (mouth_seq_signal_ != nullptr) {
+                vSemaphoreDelete(mouth_seq_signal_);
+                mouth_seq_signal_ = nullptr;
+            }
+            return;
+        }
+        BaseType_t ok = xTaskCreate(&StackChanBoard::MouthSequenceTaskTrampoline,
+                                    "mouth_seq", 4096, this,
+                                    tskIDLE_PRIORITY + 2,
+                                    &mouth_seq_task_);
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create mouth_seq task");
+            vSemaphoreDelete(mouth_seq_lock_);
+            mouth_seq_lock_ = nullptr;
+            vSemaphoreDelete(mouth_seq_signal_);
+            mouth_seq_signal_ = nullptr;
+            mouth_seq_task_ = nullptr;
+        } else {
+            ESP_LOGI(TAG, "Mouth sequence task ready");
+        }
+    }
+
     void RegisterMcpTools() {
         auto& mcp_server = McpServer::GetInstance();
         ESP_LOGI(TAG, "Registering StackChan MCP tools...");
@@ -1887,8 +2209,14 @@ private:
 
                 bool applied = false;
                 if (face == "off") {
+                    // Any avatar transition supersedes an in-flight mouth
+                    // sequence (per Issue #5 acceptance: "set_avatar() takes
+                    // effect after the queued sequence finishes (or
+                    // interrupts cleanly)").
+                    RequestMouthSequenceCancel();
                     applied = SetAvatarOff();
                 } else if (AvatarImageFor(face.c_str()) != nullptr) {
+                    RequestMouthSequenceCancel();
                     applied = SetAvatarExpression(face.c_str());
                 } else {
                     cJSON_AddBoolToObject(root, "ok", false);
@@ -1928,6 +2256,11 @@ private:
                     ESP_LOGW(TAG, "set_mouth rejected: unknown shape '%s'", mouth.c_str());
                     return root;
                 }
+                // Any explicit mouth set supersedes an in-flight sequence
+                // (Issue #5: set_mouth("closed") doubles as the cancellation
+                // path so we don't need a separate cancel_mouth_sequence
+                // tool).
+                RequestMouthSequenceCancel();
                 bool applied = SetMouthShape(mouth.c_str());
                 cJSON_AddBoolToObject(root, "ok", applied);
                 if (!applied) {
@@ -1938,25 +2271,84 @@ private:
                 return root;
             });
 
+        // Phase 2: lip-sync sequence. Queue and play a list of
+        // {shape, duration_ms} pairs locally so a TTS-driven caller can
+        // ship one MCP call per utterance instead of N back-to-back
+        // set_mouth calls (which suffer per-step WebSocket RTT jitter).
+        // The MCP Property type system has no array kind, so the gateway
+        // serialises `steps` to a JSON string and sends it as `steps_json`.
+        // See Phase 2 lip-sync sequence playback comment block above for
+        // the concurrency model and trade-offs (blink pause, atomic queue
+        // replacement, final shape held).
+        mcp_server.AddTool(
+            "self.display.set_mouth_sequence",
+            "Queue a lip-sync sequence and play it locally. steps_json must "
+            "decode to a JSON array of {shape, duration_ms} objects (1..256 "
+            "items, shape in {closed, half, open, e, u}, duration_ms in "
+            "10..10000). Returns immediately; calling set_mouth, set_avatar, "
+            "or this tool again interrupts the in-flight sequence. "
+            "Autonomous blink is paused while a sequence plays and resumed "
+            "when it ends (resume reads the user's most recent set_blink "
+            "intent, not a snapshot). The final shape is held until the "
+            "next set_mouth / set_avatar call, or until the next autonomous "
+            "blink restores the resting face — the same Phase 2 trade-off "
+            "that applies to set_mouth, since blink ends by repainting the "
+            "full face. If the final shape must persist visually, disable "
+            "blink with set_blink(false) before the sequence (or append a "
+            "closed step if you just want the mouth to close at the end).",
+            PropertyList({Property("steps_json", kPropertyTypeString)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string steps_json = properties["steps_json"].value<std::string>();
+                MouthSequenceEnqueueResult r = EnqueueMouthSequence(steps_json);
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", r.ok);
+                if (!r.ok) {
+                    cJSON_AddStringToObject(root, "error", r.error.c_str());
+                    ESP_LOGW(TAG, "set_mouth_sequence rejected: %s", r.error.c_str());
+                } else {
+                    cJSON_AddNumberToObject(root, "queued_steps", r.queued_steps);
+                    cJSON_AddNumberToObject(root, "estimated_duration_ms",
+                                            static_cast<double>(r.total_duration_ms));
+                    ESP_LOGI(TAG, "set_mouth_sequence queued %d steps (%u ms)",
+                             r.queued_steps, (unsigned)r.total_duration_ms);
+                }
+                return root;
+            });
+
         // Phase 2: enable/disable autonomous blinking. When enabled, a
         // background timer fires every 3-6 s (random) and runs the four-step
-        // blink sequence (half -> closed -> half -> face).
+        // blink sequence (half -> closed -> half -> face). Also captures
+        // the user's intent into blink_desired_ so that a call issued while
+        // a mouth sequence is suppressing blink is honoured when the
+        // sequence finishes.
         mcp_server.AddTool(
             "self.display.set_blink",
             "Enable or disable autonomous eye blinking on the avatar. "
-            "When enabled, a brief blink animation runs every 3-6 seconds.",
+            "When enabled, a brief blink animation runs every 3-6 seconds. "
+            "If a set_mouth_sequence is currently playing, blink is paused "
+            "until the sequence ends; this call still records the intent "
+            "and is applied at the sequence end (or immediately if no "
+            "sequence is running).",
             PropertyList({Property("enabled", kPropertyTypeBoolean)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 bool enabled = properties["enabled"].value<bool>();
-                if (enabled) {
-                    StartBlinkTimer();
-                } else {
-                    StopBlinkTimer();
+                blink_desired_.store(enabled, std::memory_order_release);
+                bool deferred = mouth_seq_active_.load(std::memory_order_acquire);
+                if (!deferred) {
+                    if (enabled) {
+                        StartBlinkTimer();
+                    } else {
+                        StopBlinkTimer();
+                    }
                 }
                 cJSON* root = cJSON_CreateObject();
                 cJSON_AddBoolToObject(root, "enabled", enabled);
                 cJSON_AddBoolToObject(root, "ok", true);
-                ESP_LOGI(TAG, "set_blink: enabled=%d", (int)enabled);
+                if (deferred) {
+                    cJSON_AddBoolToObject(root, "deferred", true);
+                }
+                ESP_LOGI(TAG, "set_blink: enabled=%d deferred=%d",
+                         (int)enabled, deferred ? 1 : 0);
                 return root;
             });
 
@@ -2175,6 +2567,7 @@ public:
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
         // Avatar is shown on-demand via MCP set_avatar command.
         // InitializeAvatar();
+        InitializeMouthSequenceTask();
         RegisterMcpTools();
     }
 

@@ -157,7 +157,8 @@ Same shape, under `mcpServers`.
 | `get_touch_state` | Touch sensor state (press/release/stroke) |
 | `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`), or `off` to hide the avatar and disable blink so the underlying xiaozhi-esp32 screens (WiFi config UI, OTA, settings) are visible. A subsequent `set_avatar(<other face>)` brings it back and restores blink. |
 | `set_blink(state)` | Blink animation on/off |
-| `set_mouth(state)` | Mouth shape (`closed` / `half` / `open` / `e` / `u`) |
+| `set_mouth(state)` | Mouth shape (`closed` / `half` / `open` / `e` / `u`), one-shot, held until next call |
+| `set_mouth_sequence(steps)` | Queue and play a list of `{shape, duration_ms}` steps locally for TTS lip-sync. The firmware walks the queue without per-step network RTT. Calling `set_mouth`, `set_avatar`, or this tool again interrupts the in-flight sequence; autonomous blink is paused while a sequence is playing. |
 | `check_vm_en` | Read PY32 VM EN GPIO state (servo power supply diagnostic) |
 
 The mapping from these names to ESP32-side `self.*` MCP tools is in

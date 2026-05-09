@@ -15,6 +15,8 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-09
+
 ### Firmware
 
 - Fixed: WebSocket auto-reconnect now triggers on any post-handshake
@@ -58,26 +60,50 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Added
 
-- New MCP tools to drive the 12× WS2812C RGB LEDs on the StackChan
-  base: `set_led(index, r, g, b)`, `set_all_leds(r, g, b)`,
-  `set_leds(colors)` (batch, one I2C burst for animations), and
-  `clear_leds()`. The strip is wired to the PY32L020 IO expander on
-  expander pin 13 — not an ESP32 GPIO — so the firmware extends the
-  existing `Py32IoExpander` helper with `SetDriveMode`, `SetLedCount`,
-  `SetLedColor` (RGB888 → RGB565 packing), `SetLedData` (burst write),
-  and `RefreshLeds` (RMW preserves the count nibble alongside the
-  bit-6 latch trigger), matching the M5 BSP's
-  `PY32IOExpander_Class.cpp`. `InitializeIOExpander` configures pin 13
-  as push-pull output with pull-up, sets the LED count to 12, waits
-  the M5-prescribed 200 ms before the first refresh, then clears the
-  strip. The on-device tools (`self.led.set_color`, `self.led.set_all`,
-  `self.led.set_many`, `self.led.clear`) all latch implicitly so each
-  call is WYSIWYG; the gateway re-packs the Python `colors` list as a
-  JSON string for `set_many` since the device-side MCP property layer
-  has only scalar types. All four tools no-op cleanly with an
-  `available=false` reply when the PY32 init failed, so a flaky
-  expander does not cascade into errors.
-
+- New `set_mouth_sequence` MCP tool: queue a list of
+  `{shape, duration_ms}` steps and play it on the device locally so a
+  TTS-driven caller can ship one MCP call per utterance instead of N
+  back-to-back `set_mouth` calls (which suffer per-step WebSocket RTT
+  jitter). The gateway exposes a proper array schema with `shape`
+  constrained to `closed | half | open | e | u` and `duration_ms` to
+  10..10000 ms; sequences are 1..256 steps. Because the ESP32 MCP
+  Property type system only supports string/integer/boolean, the
+  gateway serialises `steps` to a JSON string under `steps_json` and
+  the firmware decodes it via cJSON; this is an internal wire detail
+  hidden from MCP clients. Validation is atomic — if any step is
+  malformed the whole call is rejected and nothing is queued (no
+  half-played sequences). Calling `set_mouth`, `set_avatar`, or
+  `set_mouth_sequence` again interrupts the in-flight sequence and
+  also clears any pending-but-not-yet-started sequence, so a
+  `set_mouth("closed")` issued in the brief window between
+  `set_mouth_sequence` returning and the playback task waking up
+  still wins. Each preempt also bumps a generation token that the
+  playback task re-checks before every frame draw, eliminating the
+  small race where a stale mouth frame could otherwise be drawn
+  after a newer command had already returned to the caller. A
+  separate `cancel_mouth_sequence` tool is intentionally not added —
+  `set_mouth("closed")` doubles as the cancellation path, keeping
+  the MCP surface minimal. Autonomous blink is paused during
+  playback because the blink state machine ends by restoring the
+  last full-face image, which would otherwise overwrite the active
+  mouth overlay; blink is resumed when the sequence finishes (or is
+  interrupted) by reading the user's most recent `set_blink` intent
+  rather than a snapshot taken at sequence start, so a `set_blink`
+  call issued mid-sequence is honoured (such a call returns `ok`
+  with `deferred: true` and applies the moment the sequence ends).
+  Note: like `set_mouth`, the final mouth shape can also be replaced
+  by the resting face once an autonomous blink fires after the
+  sequence — this is the same Phase 2 trade-off (the blink state
+  machine ends by repainting the full face). Callers that need a
+  non-closed final shape to persist visually should disable blink
+  with `set_blink(false)` before the sequence; a follow-up to make
+  blink composable with mouth overlays is tracked separately. The final shape is held after the sequence finishes
+  so callers can compose with future expression-style use cases;
+  append a `{"shape": "closed", "duration_ms": ...}` step if you want
+  the mouth to close at the end. Designed to compose with a future
+  TTS pipeline (caller pre-computes shapes from phonemes / aeneas
+  alignment / mora timing and ships the whole sequence in one call).
+  Requires a firmware update. ([#5])
 - The on-device WiFi configuration UI now also exposes a **Fallback
   Gateway URL** field and a **Gateway Token** field on the **Advanced**
   tab, alongside the existing WebSocket Gateway URL field. The values
@@ -97,6 +123,7 @@ change is called out under a `Firmware` subsection of the release entry.
   auth on stock builds where no Kconfig default is set, but reverts to
   the bundled default on builds that ship one. ([#43])
 
+[#5]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/5
 [#43]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/43
 
 ## [0.3.0] - 2026-05-08
@@ -198,7 +225,8 @@ uv tool install stackchan-mcp
   releases only and does not maintain a moving `@v8` major-version
   alias, so the previous floating pin no longer resolved. ([#47])
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.1.0
