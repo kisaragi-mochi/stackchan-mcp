@@ -6,6 +6,7 @@ import pytest
 from mcp.types import CallToolRequest, ListToolsRequest
 
 from stackchan_mcp.stdio_server import create_server
+from stackchan_mcp.tts import get_registry
 
 
 def test_create_server():
@@ -94,6 +95,104 @@ async def test_list_tools_includes_set_mouth_sequence():
     assert item_schema["properties"]["duration_ms"]["minimum"] == 10
     assert item_schema["properties"]["duration_ms"]["maximum"] == 10000
     assert set(item_schema["required"]) == {"shape", "duration_ms"}
+
+
+@pytest.mark.asyncio
+async def test_list_tools_includes_say():
+    """say is exposed to MCP clients with text required."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tool = next((t for t in result.root.tools if t.name == "say"), None)
+    assert tool is not None, "say tool should be registered"
+
+    schema = tool.inputSchema
+    assert schema["properties"]["text"]["type"] == "string"
+    assert "voice" in schema["properties"]
+    assert "speaker_id" in schema["properties"]
+    assert "reference_audio" in schema["properties"]
+    assert schema["required"] == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_say_returns_clean_error_when_no_engine_registered():
+    """say without a registered engine surfaces NotImplementedError as JSON.
+
+    The default registry has no engines in PR1, so we don't even need a
+    fake gateway: the say handler short-circuits before touching ESP32.
+    """
+    # Sanity-check the assumption: default registry must be empty here so
+    # the test reflects PR1's published surface.
+    assert get_registry().names() == []
+
+    server = create_server()
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "say", "arguments": {"text": "hello"}},
+        )
+    )
+
+    payload = json.loads(result.root.content[0].text)
+    assert "error" in payload
+    assert "voicevox" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_say_rejects_empty_text_with_clean_error():
+    """say with empty text returns a clean ValueError-shaped error."""
+    server = create_server()
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "say", "arguments": {"text": ""}},
+        )
+    )
+
+    payload = json.loads(result.root.content[0].text)
+    assert "error" in payload
+    assert "text" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_say_runs_without_esp32_connection(monkeypatch):
+    """say does not require an ESP32 device to surface its 'no engine' error.
+
+    Phase 4 PR1 ships the framework only; the say handler needs to give a
+    useful error before any concrete engine is wired up, even when no
+    device is connected. This guards against accidentally moving the
+    handler below the device_connected gate during refactors.
+    """
+
+    class FakeESP32:
+        device_connected = False
+
+        def get_status(self):
+            return {"connected": False}
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "say", "arguments": {"text": "hello"}},
+        )
+    )
+
+    payload = json.loads(result.root.content[0].text)
+    # Should be the engine-not-registered error, not the
+    # device_connected guard's "No ESP32 device connected" error.
+    assert "error" in payload
+    assert "engine" in payload["error"].lower()
 
 
 @pytest.mark.asyncio

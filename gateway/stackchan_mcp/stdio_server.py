@@ -15,6 +15,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from .gateway import get_gateway
+from .tts import synthesize_and_send
 
 logger = logging.getLogger(__name__)
 
@@ -359,6 +360,54 @@ def create_server() -> Server:
                 description="Turn off all 12 RGB LEDs on the StackChan base.",
                 inputSchema={"type": "object", "properties": {}},
             ),
+            Tool(
+                name="say",
+                description=(
+                    "Speak the given text on the device speaker via gateway-side "
+                    "TTS (Phase 4, Issue #70). The gateway synthesises audio, "
+                    "encodes it to Opus, and pushes frames over the existing "
+                    "WebSocket — the device firmware does not change. Engine is "
+                    "selectable via 'voice' (default 'voicevox'). "
+                    "NOTE: this build ships the framework only; concrete engines "
+                    "(VOICEVOX, Irodori) land in follow-up PRs and require the "
+                    "matching optional extra (e.g. "
+                    "'pip install stackchan-mcp[tts-voicevox]'). Calling this tool "
+                    "before an engine is registered returns a clear error."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Text to speak. Must be non-empty.",
+                        },
+                        "voice": {
+                            "type": "string",
+                            "description": (
+                                "Engine identifier (e.g. 'voicevox', 'irodori'). "
+                                "Default 'voicevox'."
+                            ),
+                            "default": "voicevox",
+                        },
+                        "speaker_id": {
+                            "type": "integer",
+                            "description": (
+                                "Engine-specific speaker identifier "
+                                "(e.g. a VOICEVOX speaker ID)."
+                            ),
+                        },
+                        "reference_audio": {
+                            "type": "string",
+                            "description": (
+                                "Path to a reference audio file used by "
+                                "voice-cloning engines (e.g. Irodori). "
+                                "Ignored by engines that do not support it."
+                            ),
+                        },
+                    },
+                    "required": ["text"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -371,6 +420,29 @@ def create_server() -> Server:
             # get_status is handled locally — no ESP32 needed
             status = gw.esp32.get_status()
             return [TextContent(type="text", text=json.dumps(status, indent=2))]
+
+        if name == "say":
+            # TTS runs on the gateway side. Engine concrete implementations
+            # land in follow-up PRs of Issue #70; until then the orchestrator
+            # raises NotImplementedError, which we surface as a clean error
+            # rather than a stack trace.
+            try:
+                result = await synthesize_and_send(arguments)
+            except ValueError as exc:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": str(exc)}),
+                    )
+                ]
+            except NotImplementedError as exc:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": str(exc)}),
+                    )
+                ]
+            return [TextContent(type="text", text=json.dumps(result))]
 
         if not gw.esp32.device_connected:
             return [
