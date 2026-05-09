@@ -509,7 +509,11 @@ std::string WebsocketProtocol::GetHelloMessage() {
 void WebsocketProtocol::ParseServerHello(const cJSON* root,
                                          const std::shared_ptr<std::atomic<bool>>& notify_disconnect) {
     auto transport = cJSON_GetObjectItem(root, "transport");
-    if (transport == nullptr || strcmp(transport->valuestring, "websocket") != 0) {
+    if (transport == nullptr || !cJSON_IsString(transport)) {
+        ESP_LOGE(TAG, "Server hello missing or non-string transport field");
+        return;
+    }
+    if (strcmp(transport->valuestring, "websocket") != 0) {
         ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
         return;
     }
@@ -533,10 +537,20 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
     }
 
     // Arm the per-socket reconnect intent BEFORE setting the wait bit so
-    // a near-simultaneous server-side close (e.g. token mismatch closing
-    // immediately after server hello) observed by the OnDisconnected
-    // lambda still falls into the reconnect path. The release here
-    // synchronises with the load() in the OnDisconnected lambda.
+    // a near-simultaneous server-side close observed by the
+    // OnDisconnected lambda still falls into the reconnect path. The
+    // release here synchronises with the load() in the OnDisconnected
+    // lambda.
     notify_disconnect->store(true, std::memory_order_release);
+    // Clear intentional_close_ on the WS task here too, not only after
+    // the wait returns on the main task. Without this, if the server
+    // closed immediately after sending hello, the OnDisconnected lambda
+    // would observe an armed notify_disconnect and call
+    // ScheduleReconnect(), but ScheduleReconnect()'s intentional_close_
+    // gate (still set by OpenAudioChannelInternal()'s prologue, since
+    // the main task has not yet returned from xEventGroupWaitBits) would
+    // wrongly suppress the reconnect. Clearing here closes that race;
+    // the main task path also clears it for explicitness.
+    intentional_close_.store(false);
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 }
