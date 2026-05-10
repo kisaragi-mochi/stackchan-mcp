@@ -16,6 +16,7 @@ import asyncio
 import errno
 import logging
 import os
+import platform
 import shutil
 import socket
 import subprocess
@@ -377,6 +378,56 @@ def _load_dotenv() -> None:
     load_dotenv()
 
 
+# Default Homebrew prefixes that ship libopus.dylib on macOS. Apple
+# Silicon installs default to ``/opt/homebrew``; Intel Macs use
+# ``/usr/local``. Keeping both keeps the helper portable across
+# contributor machines.
+_HOMEBREW_LIB_DIRS = ("/opt/homebrew/lib", "/usr/local/lib")
+
+
+def _ensure_libopus_findable() -> None:
+    """Make libopus reachable to opuslib's ``ctypes.find_library`` on macOS.
+
+    ``opuslib.api`` calls ``ctypes.util.find_library("opus")`` at
+    import time. On macOS that walks ``DYLD_LIBRARY_PATH`` plus a
+    couple of system-default directories — but not Homebrew's
+    ``/opt/homebrew/lib`` (Apple Silicon) or ``/usr/local/lib`` (Intel),
+    so a vanilla ``brew install opus`` lands a working libopus that
+    opuslib still cannot find. Users then see ``Could not find Opus
+    library`` even though the dylib is on disk.
+
+    Prepend any Homebrew-style lib directories that exist so the next
+    ``find_library`` call (triggered by the lazy ``import opuslib``
+    inside :func:`audio_utils.encode_opus_frames`) succeeds. We
+    deliberately *prepend* and skip duplicates so an explicit
+    ``DYLD_LIBRARY_PATH`` set by the operator (e.g. for a custom build
+    of libopus) keeps priority. No-op on non-macOS hosts.
+    """
+    if platform.system() != "Darwin":
+        return
+
+    existing = os.environ.get("DYLD_LIBRARY_PATH", "")
+    paths: list[str] = [p for p in existing.split(":") if p]
+
+    prepended: list[str] = []
+    for candidate in _HOMEBREW_LIB_DIRS:
+        if candidate in paths:
+            continue
+        if not os.path.isdir(candidate):
+            continue
+        prepended.append(candidate)
+
+    if not prepended:
+        return
+
+    os.environ["DYLD_LIBRARY_PATH"] = ":".join(prepended + paths)
+    logger.debug(
+        "Prepended Homebrew lib dirs to DYLD_LIBRARY_PATH so opuslib "
+        "can find libopus: %s",
+        prepended,
+    )
+
+
 def _run_preflight() -> int:
     """Run preflight diagnostics. Returns the desired process exit code.
 
@@ -387,6 +438,7 @@ def _run_preflight() -> int:
     warns about a missing ``STACKCHAN_TOKEN``.
     """
     _load_dotenv()
+    _ensure_libopus_findable()
 
     issues = 0
     print(f"stackchan-mcp {__version__} preflight")
@@ -527,6 +579,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(_run_preflight())
 
     _load_dotenv()
+    _ensure_libopus_findable()
 
     logging.basicConfig(
         level=logging.INFO,

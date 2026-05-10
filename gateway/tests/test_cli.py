@@ -7,6 +7,7 @@ covered by ``test_stdio_server.py`` and ``test_gateway.py``.
 
 from __future__ import annotations
 
+import os
 import socket
 from pathlib import Path
 
@@ -733,3 +734,103 @@ def test_run_preflight_both_ports_zero_is_not_a_conflict(
     out = capsys.readouterr().out
     assert "distinct ports" not in out
     assert "Result: ready. Exit 0." in out
+
+
+# ---------------------------------------------------------------------------
+# _ensure_libopus_findable — Homebrew dlopen helper (macOS) (Issue #70 PR2)
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_libopus_findable_noop_on_non_macos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper is a strict no-op when the host platform is not macOS."""
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    monkeypatch.delenv("DYLD_LIBRARY_PATH", raising=False)
+
+    cli._ensure_libopus_findable()
+
+    assert "DYLD_LIBRARY_PATH" not in os.environ
+
+
+def test_ensure_libopus_findable_prepends_homebrew_lib(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A present Homebrew lib directory is prepended to DYLD_LIBRARY_PATH."""
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    # Pretend only /opt/homebrew/lib exists (Apple Silicon default).
+    monkeypatch.setattr(
+        cli.os.path,
+        "isdir",
+        lambda p: p == "/opt/homebrew/lib",
+    )
+    monkeypatch.delenv("DYLD_LIBRARY_PATH", raising=False)
+
+    cli._ensure_libopus_findable()
+
+    assert os.environ["DYLD_LIBRARY_PATH"] == "/opt/homebrew/lib"
+
+
+def test_ensure_libopus_findable_does_not_duplicate_existing_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry already on DYLD_LIBRARY_PATH is not re-prepended."""
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        cli.os.path,
+        "isdir",
+        lambda p: p == "/opt/homebrew/lib",
+    )
+    monkeypatch.setenv(
+        "DYLD_LIBRARY_PATH", "/opt/homebrew/lib:/some/other/lib"
+    )
+
+    cli._ensure_libopus_findable()
+
+    # Unchanged because the only candidate was already present.
+    assert (
+        os.environ["DYLD_LIBRARY_PATH"]
+        == "/opt/homebrew/lib:/some/other/lib"
+    )
+
+
+def test_ensure_libopus_findable_preserves_user_dyld_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User-set DYLD_LIBRARY_PATH stays at the front; Homebrew is appended.
+
+    Operators who built libopus from source and pointed
+    DYLD_LIBRARY_PATH at the custom build expect that prefix to win.
+    The helper prepends Homebrew dirs ahead of itself but keeps the
+    operator's existing entries intact and after the new entries —
+    the new entries only fire if find_library does not match earlier.
+    """
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        cli.os.path,
+        "isdir",
+        lambda p: p in {"/opt/homebrew/lib", "/usr/local/lib"},
+    )
+    monkeypatch.setenv("DYLD_LIBRARY_PATH", "/Users/dev/libopus-build/lib")
+
+    cli._ensure_libopus_findable()
+
+    # New Homebrew dirs sit ahead of the helper-prepended block, but
+    # the user's prior entry follows them — i.e. it is still present.
+    parts = os.environ["DYLD_LIBRARY_PATH"].split(":")
+    assert "/Users/dev/libopus-build/lib" in parts
+    assert "/opt/homebrew/lib" in parts
+    assert "/usr/local/lib" in parts
+
+
+def test_ensure_libopus_findable_handles_missing_homebrew(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If neither Homebrew prefix exists, DYLD_LIBRARY_PATH is left alone."""
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli.os.path, "isdir", lambda p: False)
+    monkeypatch.delenv("DYLD_LIBRARY_PATH", raising=False)
+
+    cli._ensure_libopus_findable()
+
+    assert "DYLD_LIBRARY_PATH" not in os.environ
