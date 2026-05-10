@@ -15,6 +15,8 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-10
+
 ### Added
 
 - Phase 4 TTS — gateway-side `say(text, voice?, speaker_id?,
