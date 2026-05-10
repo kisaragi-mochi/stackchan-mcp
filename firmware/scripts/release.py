@@ -379,8 +379,20 @@ def release(board_type: str, config_filename: str = "config.json", *, filter_nam
         final_name = f"{manufacturer}-{name}" if manufacturer else name
         output_path = Path("releases") / f"v{project_version}_{final_name}.zip"
         if output_path.exists():
-            print(f"Skipping {final_name} because {output_path} already exists")
-            continue
+            # Do NOT skip when an artifact already exists. Skipping silently
+            # reused stale binaries even when the source-side configuration
+            # had license-sensitive changes (e.g. the FEETECH/SCSCL servo
+            # driver swap tracked in #79). PROJECT_VER is pinned to the
+            # upstream xiaozhi-esp32 firmware version (currently 2.2.6) and
+            # is not bumped per stackchan-mcp change, so skipping by zip
+            # name would let an old GPL-linked artifact survive a rebuild
+            # invocation. zip_bin() unlinks the existing file before
+            # writing, so a plain rebuild is safe.
+            print(
+                f"[INFO] Existing {output_path} will be replaced by a "
+                f"fresh build. Configuration source: config.json "
+                f"sdkconfig_append + sdkconfig.defaults.local overrides."
+            )
 
         # Process sdkconfig_append
         build_sdkconfig_append = build.get("sdkconfig_append", [])

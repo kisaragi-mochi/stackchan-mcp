@@ -1039,28 +1039,38 @@ if BOARD_TYPE_STACKCHAN
 
 choice STACKCHAN_SERVO_DRIVER
     prompt "StackChan Servo Driver"
-    default STACKCHAN_SERVO_SCSCL
+    default STACKCHAN_SERVO_FEETECH
     help
-        Choose between the original GPL-3.0 SCServo_lib (current default)
-        and the MIT-licensed clean-room reimplementation
+        Choose between the MIT-licensed clean-room reimplementation
         (necobit/feetech_scs_esp_idf, vendored under
-        firmware/components/feetech_scs/).
+        firmware/components/feetech_scs/, current default) and the
+        original GPL-3.0 SCServo_lib (kept in-tree as a fallback).
 
-        See Issue #79 for the migration roadmap to MIT-only firmware.
-
-    config STACKCHAN_SERVO_SCSCL
-        bool "SCServo_lib (GPL-3.0, current default)"
-        help
-            Use the original SCServo_lib sources shipped under
-            firmware/main/boards/stackchan/. License: GPL-3.0.
+        Phase A of the migration roadmap toward MIT-only firmware
+        tracked in #79. The opt-in MIT driver added in #82 was promoted
+        to default after single-unit equivalence validation on
+        M5Stack CoreS3 + SCS0009 x2. The GPL-3.0 sources remain
+        selectable via CONFIG_STACKCHAN_SERVO_SCSCL=y while the
+        observation period in #79 stays open; once that period closes
+        without regressions, the SCServo_lib sources are scheduled for
+        removal in Phase B.
 
     config STACKCHAN_SERVO_FEETECH
-        bool "feetech_scs_esp_idf (MIT, experimental)"
+        bool "feetech_scs_esp_idf (MIT, default)"
         help
             Use the MIT-licensed clean-room driver vendored at
-            firmware/components/feetech_scs/. Currently under validation —
-            firmware behavior is expected to match SCSCL but real-device
-            verification is in progress (#79).
+            firmware/components/feetech_scs/. Equivalence with SCSCL
+            confirmed on M5Stack CoreS3 + SCS0009 x2 in #82; broader
+            real-device validation continues under #79.
+
+    config STACKCHAN_SERVO_SCSCL
+        bool "SCServo_lib (GPL-3.0, fallback)"
+        help
+            Use the original SCServo_lib sources shipped under
+            firmware/main/boards/stackchan/. License: GPL-3.0. Kept in
+            the tree as an opt-in fallback in case a regression is
+            discovered with the MIT driver during the #79 observation
+            period. Scheduled for removal in Phase B of the migration.
 endchoice
 
 endif # BOARD_TYPE_STACKCHAN

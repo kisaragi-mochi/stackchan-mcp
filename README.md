@@ -430,25 +430,36 @@ See [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80) for the eng
 
 ## License
 
-This repository is dual-licensed.
+The canonical firmware build path (`firmware/scripts/release.py stackchan`) produces an **MIT-licensed end-to-end** binary. The GPL-3.0 SCServo_lib sources remain in the tree as an opt-in fallback during the migration tracked in [#79](https://github.com/kisaragi-mochi/stackchan-mcp/issues/79).
 
 | Scope | License |
 |---|---|
-| All (`gateway/`, top-level, most of `firmware/`) | **MIT License** (see `LICENSE`) |
-| **SCServo_lib-derived files** under `firmware/main/boards/stackchan/` (SCS.{cc,h}, SCSCL.{cc,h}, SCSerial.{cc,h}, INST.h, SCServo.h) | **GNU GPL-3.0** (see `firmware/main/boards/stackchan/SCServo_lib_LICENSE.txt`) |
+| `gateway/`, top-level, all of `firmware/` in the **canonical build** (`release.py stackchan` appends `CONFIG_STACKCHAN_SERVO_FEETECH=y` and links the MIT [`feetech_scs_esp_idf`](https://github.com/necobit/feetech_scs_esp_idf) driver vendored under `firmware/components/feetech_scs/`) | **MIT License** (see `LICENSE`) |
+| **SCServo_lib-derived files** under `firmware/main/boards/stackchan/` (SCS.{cc,h}, SCSCL.{cc,h}, SCSerial.{cc,h}, INST.h, SCServo.h) — only linked when `CONFIG_STACKCHAN_SERVO_SCSCL=y` is selected (e.g. via `sdkconfig.defaults.local`) | **GNU GPL-3.0** (see `firmware/main/boards/stackchan/SCServo_lib_LICENSE.txt`) |
 
-This split exists because Feetech's SCServo SDK is distributed under GPL-3.0. The **firmware binary as a whole**, which statically links SCServo_lib, is therefore **effectively distributed under GPL-3.0**.
+The `gateway/` runs as an independent Python process and only talks to the ESP32 over the network (WebSocket), so it stays usable and derivable under the **MIT License** regardless of which servo driver the firmware-side build selects.
 
-The `gateway/` runs as an independent Python process and only talks to the ESP32 over the network (WebSocket), so it stays usable and derivable under the **MIT License**.
+> **Note for direct `idf.py` users with a pre-existing `firmware/sdkconfig`:**
+> ESP-IDF persists Kconfig choices into `firmware/sdkconfig`, and a
+> change to the Kconfig `default` does not retroactively rewrite that
+> file. The canonical build path enforces the MIT driver at the
+> `release.py` layer (via `sdkconfig_append`), so rebuilding via
+> `release.py stackchan` reliably produces the MIT default binary.
+> If you bypass `release.py` and call `idf.py` directly on a workspace
+> that previously selected SCSCL, you may need to run `idf.py menuconfig`
+> (or delete `firmware/sdkconfig`) to pick up the new default.
 
-> **Optional MIT-only firmware build (experimental, since [#79](https://github.com/kisaragi-mochi/stackchan-mcp/issues/79)):**
-> A clean-room MIT alternative to SCServo_lib
-> ([`necobit/feetech_scs_esp_idf`](https://github.com/necobit/feetech_scs_esp_idf),
-> vendored under `firmware/components/feetech_scs/`) is available as an
-> opt-in via Kconfig. Building with `CONFIG_STACKCHAN_SERVO_FEETECH=y`
-> excludes the GPL-3.0 SCServo_lib sources, producing a fully
-> MIT-licensed firmware binary. The default remains `SCServo_lib` until
-> real-device validation completes; track #79 for status.
+> **GPL-3.0 fallback build (opt-in):**
+> The original SCServo_lib sources are still shipped in the repository
+> as a safety net while the migration tracked in #79 is in its
+> observation period. To build against them, add
+> `CONFIG_STACKCHAN_SERVO_SCSCL=y` to `firmware/sdkconfig.defaults.local`;
+> `release.py` merges this in **after** `sdkconfig_append`, so it
+> overrides the FEETECH default. In that configuration the firmware
+> binary statically links the GPL-3.0 sources and is therefore
+> **effectively distributed under GPL-3.0**. Once the observation
+> period closes without regressions the GPL files are scheduled for
+> removal (Phase B of #79).
 
 ### upstream
 

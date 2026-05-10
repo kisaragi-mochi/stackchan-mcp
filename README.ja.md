@@ -382,26 +382,36 @@ X 軸（yaw、`-90..+90°`）には同等のハードウェア制限はなく、
 
 ## ライセンス
 
-このリポジトリはデュアルライセンス構成です。
+正規の firmware ビルドパス (`firmware/scripts/release.py stackchan`) は **end-to-end で MIT ライセンス** のバイナリを生成します。GPL-3.0 の SCServo_lib ソースは [#79](https://github.com/kisaragi-mochi/stackchan-mcp/issues/79) の移行期間中、opt-in fallback としてリポジトリに残しています。
 
 | 範囲 | ライセンス |
 |---|---|
-| 全体 (`gateway/`, トップレベル, `firmware/` の大部分) | **MIT License** (`LICENSE` 参照) |
-| `firmware/main/boards/stackchan/` 内の **SCServo_lib 由来ファイル** (SCS.{cc,h}, SCSCL.{cc,h}, SCSerial.{cc,h}, INST.h, SCServo.h) | **GNU GPL-3.0** (`firmware/main/boards/stackchan/SCServo_lib_LICENSE.txt` 参照) |
+| `gateway/`、トップレベル、**正規ビルド** の `firmware/` 全体 (`release.py stackchan` が `CONFIG_STACKCHAN_SERVO_FEETECH=y` を append し、MIT の [`feetech_scs_esp_idf`](https://github.com/necobit/feetech_scs_esp_idf) ドライバ (`firmware/components/feetech_scs/` 配下に vendor 取り込み) をリンク) | **MIT License** (`LICENSE` 参照) |
+| `firmware/main/boards/stackchan/` 内の **SCServo_lib 由来ファイル** (SCS.{cc,h}, SCSCL.{cc,h}, SCSerial.{cc,h}, INST.h, SCServo.h) — `CONFIG_STACKCHAN_SERVO_SCSCL=y` (例: `sdkconfig.defaults.local` 経由) を選択した場合のみリンクされます | **GNU GPL-3.0** (`firmware/main/boards/stackchan/SCServo_lib_LICENSE.txt` 参照) |
 
-これは Feetech の SCServo SDK が GPL-3.0 で配布されているための制約です。SCServo_lib を静的リンクする **firmware バイナリ全体は実質 GPL-3.0** として配布されることになります。
+`gateway/` は独立した Python プロセスで、ESP32 とはネットワーク経由 (WebSocket) でしか通信しないため、firmware 側のドライバ選択に関わらず **MIT License** のまま利用・派生できます。
 
-一方、`gateway/` は独立した Python プロセスで、ESP32 とはネットワーク経由 (WebSocket) でしか通信しないため、**MIT License** のまま利用・派生できます。
+> **既存の `firmware/sdkconfig` を持っている `idf.py` 直叩きユーザーへの注意:**
+> ESP-IDF は Kconfig の選択を `firmware/sdkconfig` に永続化します。
+> Kconfig の `default` 変更はそのファイルを遡及的に書き換えません。
+> 正規ビルドパスは `release.py` レイヤーで (`sdkconfig_append` 経由で)
+> MIT ドライバを強制するため、`release.py stackchan` 経由の再ビルドは
+> 確実に MIT デフォルトのバイナリを生成します。
+> `release.py` を経由せず `idf.py` を直接叩く場合で、過去に SCSCL を
+> 選択した workspace では、新しい default を反映するために
+> `idf.py menuconfig` の実行 (または `firmware/sdkconfig` の削除) が
+> 必要になることがあります。
 
-> **MIT 単一ライセンス firmware ビルドのオプション (experimental, [#79](https://github.com/kisaragi-mochi/stackchan-mcp/issues/79) 以降):**
-> SCServo_lib のクリーンルーム MIT 代替実装
-> ([`necobit/feetech_scs_esp_idf`](https://github.com/necobit/feetech_scs_esp_idf)、
-> `firmware/components/feetech_scs/` 配下に vendor 取り込み) を opt-in
-> として Kconfig で選べます。`CONFIG_STACKCHAN_SERVO_FEETECH=y` でビルド
-> すると GPL-3.0 の SCServo_lib ソースがビルドから除外され、MIT 単一
-> ライセンスの firmware バイナリが生成されます。デフォルトは
-> `SCServo_lib` のまま (実機検証完了まで)、状況は #79 でトラッキング
-> しています。
+> **GPL-3.0 fallback ビルド (opt-in):**
+> 元の SCServo_lib ソースは、#79 の移行が観察期間中である間の安全網
+> として、引き続きリポジトリに同梱されています。
+> ビルドに使うには `firmware/sdkconfig.defaults.local` に
+> `CONFIG_STACKCHAN_SERVO_SCSCL=y` を追加してください。
+> `release.py` は `sdkconfig_append` の **後に** これをマージするため、
+> FEETECH デフォルトを上書きできます。その構成では firmware バイナリが
+> GPL-3.0 ソースを静的リンクするため、**実質 GPL-3.0** として配布される
+> ことになります。観察期間が回帰なしで終了したら、GPL ファイルは
+> 削除予定です (#79 の Phase B)。
 
 ### upstream
 
