@@ -205,6 +205,120 @@ async def test_default_registry_includes_voicevox():
     assert "voicevox" in get_registry().names()
 
 
+# ---------------------------------------------------------------------------
+# say handler regression tests — degraded VOICEVOX / mid-stream disconnect
+# must produce error JSON, not stack traces. Codex adversarial review
+# flagged that this contract was previously only verified at the
+# orchestrator level; these tests close the loop through create_server().
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_say_returns_error_json_when_voicevox_returns_5xx(monkeypatch):
+    """A 503 from VOICEVOX surfaces as ``{"error": ...}``, not a traceback."""
+    httpx = pytest.importorskip("httpx")
+
+    from stackchan_mcp.tts import EngineRegistry, TTSEngine
+    import stackchan_mcp.tts.orchestrator as orchestrator
+    import stackchan_mcp.stdio_server as stdio_server
+
+    class _HttpFailEngine(TTSEngine):
+        name = "voicevox"
+
+        async def synthesize(self, text, **opts):
+            request = httpx.Request("POST", "http://test/audio_query")
+            response = httpx.Response(503, request=request, text="overloaded")
+            raise httpx.HTTPStatusError(
+                "503", request=request, response=response
+            )
+
+    reg = EngineRegistry()
+    reg.register(_HttpFailEngine())
+
+    class FakeESP32:
+        device_connected = True
+
+        def get_status(self):
+            return {"connected": True}
+
+        async def send_audio_frame(self, frame):
+            raise AssertionError("synthesise should have failed before push")
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(orchestrator, "get_registry", lambda: reg)
+
+    server = create_server()
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "say", "arguments": {"text": "hello"}},
+        )
+    )
+    payload = json.loads(result.root.content[0].text)
+    assert "error" in payload
+    assert "voicevox" in payload["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_say_returns_error_json_when_device_disconnects_mid_stream(
+    monkeypatch,
+):
+    """A mid-stream disconnect surfaces as ``{"error": ...}``."""
+    from stackchan_mcp.tts import EngineRegistry, TTSEngine
+    import stackchan_mcp.tts.orchestrator as orchestrator
+    import stackchan_mcp.stdio_server as stdio_server
+
+    pcm = b"\x01\x00" * 1440  # ~ 1.5 frames
+
+    class _PCMEngine(TTSEngine):
+        name = "voicevox"
+
+        async def synthesize(self, text, **opts):
+            return pcm
+
+    reg = EngineRegistry()
+    reg.register(_PCMEngine())
+
+    def fake_encode(_pcm, **kwargs):
+        return iter([b"opus_a", b"opus_b"])
+
+    class FailingESP32:
+        device_connected = True
+
+        def __init__(self):
+            self.frames: list[bytes] = []
+
+        def get_status(self):
+            return {"connected": True}
+
+        async def send_audio_frame(self, frame):
+            if self.frames:
+                raise ConnectionError("simulated disconnect")
+            self.frames.append(frame)
+
+    class FakeGateway:
+        esp32 = FailingESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(orchestrator, "get_registry", lambda: reg)
+    monkeypatch.setattr(orchestrator, "encode_opus_frames", fake_encode)
+
+    server = create_server()
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "say", "arguments": {"text": "hello"}},
+        )
+    )
+    payload = json.loads(result.root.content[0].text)
+    assert "error" in payload
+    msg = payload["error"].lower()
+    assert "disconnect" in msg or "frame" in msg
+
+
 @pytest.mark.asyncio
 async def test_set_mouth_sequence_relays_steps_as_json_string(monkeypatch):
     """set_mouth_sequence serialises steps to JSON for the firmware.

@@ -162,3 +162,145 @@ async def test_pipeline_raises_when_engine_returns_no_pcm(fake_encode):
 
     # Nothing pushed to the device when synthesis produced nothing.
     assert esp32.frames == []
+
+
+# ---------------------------------------------------------------------------
+# Exception translation — failures must become clean RuntimeError so the
+# MCP handler's filter produces error JSON instead of leaking tracebacks.
+# ---------------------------------------------------------------------------
+
+
+class _RaisingEngine(TTSEngine):
+    """Engine that fails synthesise with a configurable exception."""
+
+    def __init__(self, exc: Exception, name: str = "voicevox") -> None:
+        self.name = name
+        self._exc = exc
+
+    async def synthesize(self, text: str, **opts: Any) -> bytes:
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_engine_http_error_translated_to_runtime_error(fake_encode):
+    """An httpx.HTTPStatusError from the engine becomes a RuntimeError.
+
+    The MCP handler in stdio_server.py only catches RuntimeError /
+    ValueError / NotImplementedError; httpx errors must therefore be
+    translated here, not allowed to bubble up.
+    """
+    httpx = pytest.importorskip("httpx")
+
+    request = httpx.Request("POST", "http://test.local:50021/audio_query")
+    response = httpx.Response(503, request=request, text="overloaded")
+    http_err = httpx.HTTPStatusError("503", request=request, response=response)
+
+    reg = EngineRegistry()
+    reg.register(_RaisingEngine(http_err))
+    gateway = _FakeGateway(_FakeESP32(connected=True))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await synthesize_and_send(
+            {"text": "hello"},
+            gateway=gateway,
+            registry=reg,
+        )
+    assert "voicevox" in str(exc_info.value).lower()
+    assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+
+
+@pytest.mark.asyncio
+async def test_engine_wave_error_translated_to_runtime_error(fake_encode):
+    """A wave.Error (malformed WAV from the engine) becomes a RuntimeError."""
+    import wave
+
+    reg = EngineRegistry()
+    reg.register(_RaisingEngine(wave.Error("not a WAVE file")))
+    gateway = _FakeGateway(_FakeESP32(connected=True))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await synthesize_and_send(
+            {"text": "hello"},
+            gateway=gateway,
+            registry=reg,
+        )
+    assert isinstance(exc_info.value.__cause__, wave.Error)
+
+
+@pytest.mark.asyncio
+async def test_engine_value_error_propagates_as_value_error(fake_encode):
+    """ValueError stays a ValueError so bad args remain separable from ops failures."""
+    reg = EngineRegistry()
+    reg.register(_RaisingEngine(ValueError("bad speaker_id")))
+    gateway = _FakeGateway(_FakeESP32(connected=True))
+
+    with pytest.raises(ValueError, match="bad speaker_id"):
+        await synthesize_and_send(
+            {"text": "hello"},
+            gateway=gateway,
+            registry=reg,
+        )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_translates_mid_stream_disconnect(fake_encode):
+    """A ConnectionError from the device mid-stream becomes a RuntimeError.
+
+    ConnectionError doesn't inherit RuntimeError, so without
+    translation it would skip the MCP handler's exception filter and
+    surface as a stack trace.
+    """
+
+    class FailingESP32:
+        device_connected = True
+
+        def __init__(self) -> None:
+            self.frames: list[bytes] = []
+
+        async def send_audio_frame(self, frame: bytes) -> None:
+            if len(self.frames) >= 1:
+                raise ConnectionError("simulated disconnect")
+            self.frames.append(frame)
+
+    pcm = b"\x01\x00" * 1440  # 1.5 frames worth
+    engine = _PCMEngine(pcm)
+    esp32 = FailingESP32()
+    gateway = _FakeGateway(esp32)  # type: ignore[arg-type]
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await synthesize_and_send(
+            {"text": "hello"},
+            gateway=gateway,
+            registry=reg,
+        )
+    msg = str(exc_info.value)
+    assert "1/2" in msg or "disconnect" in msg.lower()
+    assert isinstance(exc_info.value.__cause__, ConnectionError)
+    # The first frame did make it before the failure.
+    assert len(esp32.frames) == 1
+
+
+@pytest.mark.asyncio
+async def test_opus_encode_error_translated(fake_encode, monkeypatch):
+    """A failure in encode_opus_frames becomes a RuntimeError, not a leak."""
+
+    def boom(pcm: bytes, **kwargs):
+        raise RuntimeError("libopus missing")
+
+    import stackchan_mcp.tts.orchestrator as orchestrator
+
+    monkeypatch.setattr(orchestrator, "encode_opus_frames", boom)
+
+    reg = EngineRegistry()
+    reg.register(_PCMEngine(b"\x01\x00" * 960))
+    gateway = _FakeGateway(_FakeESP32(connected=True))
+
+    with pytest.raises(RuntimeError, match="Opus encoding failed"):
+        await synthesize_and_send(
+            {"text": "hello"},
+            gateway=gateway,
+            registry=reg,
+        )

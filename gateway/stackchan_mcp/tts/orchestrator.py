@@ -119,11 +119,24 @@ async def synthesize_and_send(
     speaker_id = arguments.get("speaker_id")
     reference_audio = arguments.get("reference_audio")
 
-    pcm = await engine.synthesize(
-        text,
-        speaker_id=speaker_id,
-        reference_audio=reference_audio,
-    )
+    # Engine failures (HTTP errors from VOICEVOX, malformed WAV from
+    # the synthesiser, etc.) are translated to RuntimeError so the
+    # MCP layer's narrow exception filter still produces clean error
+    # JSON. Validation errors (ValueError) are kept distinct so bad
+    # arguments stay separable from operational degradation.
+    try:
+        pcm = await engine.synthesize(
+            text,
+            speaker_id=speaker_id,
+            reference_audio=reference_audio,
+        )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"TTS engine '{voice}' failed: {exc}"
+        ) from exc
+
     if not pcm:
         # An engine returning no PCM is a bug, not a runtime condition;
         # surface it to the caller rather than silently sending zero
@@ -135,10 +148,24 @@ async def synthesize_and_send(
     # Encode -> push. Materialising the frame list before pushing keeps
     # the count reportable and makes it easy to short-circuit if Opus
     # encoding fails before any audio reaches the wire.
-    opus_frames = list(encode_opus_frames(pcm))
+    try:
+        opus_frames = list(encode_opus_frames(pcm))
+    except Exception as exc:
+        raise RuntimeError(f"Opus encoding failed: {exc}") from exc
+
     sent = 0
     for frame in opus_frames:
-        await gateway.esp32.send_audio_frame(frame)
+        try:
+            await gateway.esp32.send_audio_frame(frame)
+        except ConnectionError as exc:
+            # Mid-stream disconnect: report what made it through so
+            # callers can decide whether to retry or give up. Keep the
+            # error a RuntimeError so the MCP handler's filter catches
+            # it without needing to know about transport types.
+            raise RuntimeError(
+                f"Device disconnected after sending "
+                f"{sent}/{len(opus_frames)} frames: {exc}"
+            ) from exc
         sent += 1
 
     duration_ms = sent * DEVICE_FRAME_DURATION_MS
