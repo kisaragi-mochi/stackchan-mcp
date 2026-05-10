@@ -512,18 +512,22 @@ void Application::InitializeProtocol() {
         });
     });
     
-    protocol_->OnIncomingJson([this, display](const cJSON* root) {
+    protocol_->OnIncomingJson([this, display, &board](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
-                Schedule([this]() {
+                Schedule([this, &board]() {
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
+                    // Phase 4 audio (Issue #76): drive avatar mouth animation
+                    // for the lifetime of this TTS utterance. Default no-op
+                    // for boards without a mouth display.
+                    board.OnTtsStart();
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
+                Schedule([this, &board]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
@@ -531,6 +535,16 @@ void Application::InitializeProtocol() {
                             SetDeviceState(kDeviceStateListening);
                         }
                     }
+                    // Phase 4 audio (Issue #76): stop the avatar mouth
+                    // animation unconditionally on tts.stop. A wake-word /
+                    // button interrupt can call AbortSpeaking() and move
+                    // the device out of Speaking before the server's
+                    // tts.stop arrives, in which case the previous-state
+                    // guard above is false but the audio playback has
+                    // ended and the mouth animation must still stop.
+                    // OnTtsStop() is idempotent (no-op for boards without
+                    // an avatar / when lip-sync is already stopped).
+                    board.OnTtsStop();
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");

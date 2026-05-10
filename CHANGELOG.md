@@ -17,6 +17,23 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- **TTS lip-sync (state-driven)**: drive avatar mouth animation while
+  the gateway is speaking. The firmware now reacts to the
+  `tts.start` / `tts.stop` JSON notifications introduced in #75 (Issue
+  #70 PR2) and cycles the mouth shape through `closed → half → open →
+  half` on a fixed 150 ms cadence for the lifetime of each utterance,
+  snapping back to `closed` at stop. Autonomous blink is paused while
+  active (same Phase 2 trade-off as the existing `set_mouth_sequence`
+  task: a blink ending would otherwise restore the full-face image
+  and overwrite the mouth overlay) and restored at stop based on
+  `blink_desired_` so a `set_blink` issued mid-playback is honoured.
+  Coexists with user-issued `set_mouth` / `set_mouth_sequence` calls
+  by yielding the current frame when `mouth_seq_active_` is true; the
+  user-issued sequence wins until it completes, then lip-sync resumes
+  on the next tick. Wired through a new no-op `Board::OnTtsStart` /
+  `OnTtsStop` hook so non-stackchan boards are unaffected. The (B)
+  audio-envelope-driven follow-up proposed in the issue will be
+  tracked separately. Closes #76. Refs #70, #75.
 - **Default servo driver switched to MIT FeetechScs** (Phase A of the
   GPL → MIT firmware migration tracked in #79). The opt-in MIT driver
   added in #82 is now the build default for the canonical build path

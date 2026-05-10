@@ -82,6 +82,11 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
+    // Phase 4 audio (Issue #76): TTS playback hooks. Default no-op so non-
+    // stackchan boards are unaffected; boards with an avatar / mouth display
+    // override these to drive lip-sync animation while TTS audio is playing.
+    virtual void OnTtsStart() {}
+    virtual void OnTtsStop() {}
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

@@ -538,6 +538,27 @@ private:
     // Only meaningful while current_avatar_face_ == "off".
     bool blink_enabled_before_off_ = false;
 
+    // Phase 4 audio (Issue #76): state-driven TTS lip-sync animation.
+    // Driven by the gateway's tts.start / tts.stop notifications (see
+    // Application::OnIncomingJson) via Board::OnTtsStart / OnTtsStop;
+    // cycles the mouth through closed -> half -> open -> half on a fixed
+    // TTS_LIPSYNC_STEP_MS cadence until stopped. Autonomous blink is paused
+    // while active (same Phase 2 trade-off as the mouth-sequence task: a
+    // blink ending would otherwise restore the full-face image and overwrite
+    // the mouth overlay). The user's most recent blink intent is read from
+    // blink_desired_ at stop so a set_blink call issued during playback is
+    // honoured.
+    enum class TtsLipSyncShape : uint8_t {
+        CLOSED = 0,
+        HALF_RISING,   // closed -> open transition
+        OPEN,
+        HALF_FALLING,  // open -> closed transition
+    };
+    static constexpr int TTS_LIPSYNC_STEP_MS = 150;
+    esp_timer_handle_t tts_lipsync_timer_ = nullptr;
+    std::atomic<bool> tts_lipsync_active_{false};
+    TtsLipSyncShape tts_lipsync_shape_ = TtsLipSyncShape::CLOSED;
+
     // Phase 7: Si12T head-touch sensing.
     // Polling every TOUCH_POLL_MS samples Output1 (CH1..CH3 -> 3 head zones).
     // Edge detection on the OR of the three zones produces TAP / STROKE
@@ -1740,6 +1761,148 @@ private:
         ESP_LOGI(TAG, "Blink DISABLED");
     }
 
+    // ---- Phase 4 audio (Issue #76): TTS state-driven lip-sync ----------
+    //
+    // While the gateway is playing TTS audio (tts.start..tts.stop), cycle
+    // the mouth shape through CLOSED -> HALF -> OPEN -> HALF on a fixed
+    // TTS_LIPSYNC_STEP_MS cadence. This is the (A) state-driven approach
+    // proposed in Issue #76; the (B) audio-envelope-driven follow-up will
+    // replace this cycle with a per-frame amplitude mapping in a separate
+    // change.
+    //
+    // Concurrency:
+    //   - Single esp_timer self-rearming on ESP_TIMER_TASK.
+    //   - Coexists with the mouth-sequence playback task: when
+    //     mouth_seq_active_ is true (the user issued a set_mouth_sequence
+    //     while we were animating), the lip-sync step yields its frame and
+    //     re-arms; the user-issued sequence wins until it completes, then
+    //     lip-sync resumes naturally on the next tick.
+    //   - Pauses autonomous blink while active (same Phase 2 reasoning as
+    //     the mouth-sequence task: BlinkStepAdvance()'s
+    //     RestoreCurrentFaceLocked() would overwrite the mouth overlay).
+    //     Restores blink at stop based on blink_desired_ so a set_blink
+    //     issued mid-playback is honoured.
+    static void TtsLipSyncStepCb(void* arg) {
+        static_cast<StackChanBoard*>(arg)->TtsLipSyncStepAdvance();
+    }
+
+    void TtsLipSyncStepAdvance() {
+        if (!tts_lipsync_active_.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (display_ == nullptr) {
+            return;
+        }
+        // Yield to an in-flight user-issued mouth sequence; re-arm so we
+        // resume on our cadence as soon as the sequence finishes.
+        if (mouth_seq_active_.load(std::memory_order_acquire)) {
+            esp_timer_start_once(tts_lipsync_timer_,
+                                 (uint64_t)TTS_LIPSYNC_STEP_MS * 1000);
+            return;
+        }
+        const char* shape = nullptr;
+        switch (tts_lipsync_shape_) {
+            case TtsLipSyncShape::CLOSED:
+                shape = "half";
+                tts_lipsync_shape_ = TtsLipSyncShape::HALF_RISING;
+                break;
+            case TtsLipSyncShape::HALF_RISING:
+                shape = "open";
+                tts_lipsync_shape_ = TtsLipSyncShape::OPEN;
+                break;
+            case TtsLipSyncShape::OPEN:
+                shape = "half";
+                tts_lipsync_shape_ = TtsLipSyncShape::HALF_FALLING;
+                break;
+            case TtsLipSyncShape::HALF_FALLING:
+            default:
+                shape = "closed";
+                tts_lipsync_shape_ = TtsLipSyncShape::CLOSED;
+                break;
+        }
+        SetMouthShape(shape);
+        if (tts_lipsync_active_.load(std::memory_order_acquire)) {
+            esp_timer_start_once(tts_lipsync_timer_,
+                                 (uint64_t)TTS_LIPSYNC_STEP_MS * 1000);
+        }
+    }
+
+    void EnsureTtsLipSyncTimer() {
+        if (tts_lipsync_timer_ == nullptr) {
+            esp_timer_create_args_t args = {
+                .callback = &StackChanBoard::TtsLipSyncStepCb,
+                .arg = this,
+                .dispatch_method = ESP_TIMER_TASK,
+                .name = "tts_lipsync",
+                .skip_unhandled_events = true,
+            };
+            ESP_ERROR_CHECK(esp_timer_create(&args, &tts_lipsync_timer_));
+        }
+    }
+
+    void StartTtsLipSync() {
+        if (display_ == nullptr) {
+            ESP_LOGD(TAG, "StartTtsLipSync ignored: display_ not ready");
+            return;
+        }
+        EnsureTtsLipSyncTimer();
+        if (tts_lipsync_active_.exchange(true, std::memory_order_acq_rel)) {
+            // Already active (e.g. duplicate tts.start); nothing to do.
+            return;
+        }
+        // Pause autonomous blink so BlinkStepAdvance()'s
+        // RestoreCurrentFaceLocked() does not overwrite the mouth overlay.
+        // blink_desired_ remembers the user's intent for restore at stop.
+        StopBlinkTimer();
+        // Start the cycle from a known resting position so the first audible
+        // frame opens the mouth from closed.
+        tts_lipsync_shape_ = TtsLipSyncShape::CLOSED;
+        SetMouthShape("closed");
+        esp_timer_start_once(tts_lipsync_timer_,
+                             (uint64_t)TTS_LIPSYNC_STEP_MS * 1000);
+        ESP_LOGI(TAG, "TTS lip-sync STARTED (cycle=%d ms)",
+                 TTS_LIPSYNC_STEP_MS);
+    }
+
+    void StopTtsLipSync() {
+        if (!tts_lipsync_active_.exchange(false, std::memory_order_acq_rel)) {
+            return;  // already stopped
+        }
+        if (tts_lipsync_timer_ != nullptr) {
+            esp_timer_stop(tts_lipsync_timer_);
+        }
+        // If a user-issued mouth sequence is in flight (we were yielding
+        // our frames to it via the mouth_seq_active_ guard in
+        // TtsLipSyncStepAdvance), let the sequence task own both the
+        // mouth shape and the blink restore at sequence end. Touching
+        // either here would race the sequence:
+        //   - SetMouthShape("closed") would clobber the user's current
+        //     frame mid-sequence;
+        //   - StartBlinkTimer() would let BlinkStepAdvance()'s
+        //     RestoreCurrentFaceLocked() overwrite the mouth overlay
+        //     before the sequence finishes drawing (Phase 2 trade-off).
+        // The sequence task already restores blink from blink_desired_
+        // at its own end (see MouthSequenceTaskLoop), so deferring is
+        // safe and idempotent.
+        if (mouth_seq_active_.load(std::memory_order_acquire)) {
+            ESP_LOGI(TAG,
+                     "TTS lip-sync STOPPED (mouth_seq active; deferring "
+                     "mouth + blink restore to sequence end)");
+            return;
+        }
+        // Snap back to a closed mouth so the device does not freeze on a
+        // half-open frame.
+        if (display_ != nullptr) {
+            SetMouthShape("closed");
+        }
+        // Restore blink based on the user's most recent intent (mirrors the
+        // mouth-sequence playback task's restore semantics).
+        if (blink_desired_.load(std::memory_order_acquire)) {
+            StartBlinkTimer();
+        }
+        ESP_LOGI(TAG, "TTS lip-sync STOPPED");
+    }
+
     // ---- Phase 2: lip-sync sequence playback (Issue #5) ----------------
     //
     // set_mouth_sequence accepts a list of {shape, duration_ms} pairs and
@@ -2702,6 +2865,17 @@ public:
             power_save_timer_->WakeUp();
         }
         WifiBoard::SetPowerSaveLevel(level);
+    }
+
+    // Phase 4 audio (Issue #76): drive avatar mouth animation alongside TTS
+    // playback. The gateway's tts.start / tts.stop notifications reach this
+    // board via Application::OnIncomingJson() -> Board::OnTtsStart/Stop().
+    virtual void OnTtsStart() override {
+        StartTtsLipSync();
+    }
+
+    virtual void OnTtsStop() override {
+        StopTtsLipSync();
     }
 
     virtual Backlight *GetBacklight() override {
