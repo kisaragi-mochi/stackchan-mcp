@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from .audio_utils import (
@@ -187,53 +188,72 @@ async def synthesize_and_send(
     # on "stop". Without these notifications the audio frames are
     # silently discarded and the say() tool returns success even
     # though nothing actually plays.
-    try:
-        await gateway.esp32.send_tts_state("start")
-    except ConnectionError as exc:
-        raise RuntimeError(
-            f"Device disconnected before TTS start notification: {exc}"
-        ) from exc
-
-    # Wait for the firmware's state machine to land in
-    # kDeviceStateSpeaking before sending the first frame.
-    await asyncio.sleep(TTS_START_TRANSITION_DELAY_S)
-
-    # Frame pacing: the device's decode queue holds at most ~40 frames
-    # (firmware MAX_DECODE_PACKETS_IN_QUEUE = 2400 / OPUS_FRAME_DURATION_MS),
-    # and pushes that exceed it are dropped silently. Send each frame
-    # at roughly the device's consumption rate (one frame per
-    # frame_duration_ms) so a long utterance never overflows. We let
-    # the loop drift by a single interval if the network is slow —
-    # the wall clock is the reference, not the loop iteration count.
-    frame_period_s = DEVICE_FRAME_DURATION_MS / 1000.0
-    loop = asyncio.get_event_loop()
+    #
+    # The whole start → frames → stop block runs under the device's
+    # TTS lock so two concurrent ``say()`` invocations can't interleave
+    # their Opus frames on the same WebSocket or overlap their state
+    # notifications. Without the lock, utterance B's ``stop`` could
+    # land mid-A and pull the firmware out of ``kDeviceStateSpeaking``
+    # while A's frames are still in flight, silently dropping the
+    # remainder of A's audio.
+    # Acquire the device's TTS lock for the duration of the
+    # start → frames → stop block. ``getattr`` lets test fakes that
+    # don't expose the lock attribute keep working — production always
+    # provides it via :class:`ESP32Manager.tts_lock`.
+    tts_lock = getattr(gateway.esp32, "tts_lock", None)
+    lock_ctx = tts_lock if tts_lock is not None else nullcontext()
 
     sent = 0
     push_error: ConnectionError | None = None
-    try:
-        next_send_time = loop.time()
-        for frame in opus_frames:
-            now = loop.time()
-            if now < next_send_time:
-                await asyncio.sleep(next_send_time - now)
-            try:
-                await gateway.esp32.send_audio_frame(frame)
-            except ConnectionError as exc:
-                # Stop pushing on the first disconnect, but fall through
-                # to the stop notification (see finally) so that *if*
-                # the device is somehow still listening it returns to
-                # idle rather than staying in speaking forever.
-                push_error = exc
-                break
-            sent += 1
-            next_send_time += frame_period_s
-    finally:
+    async with lock_ctx:
         try:
-            await gateway.esp32.send_tts_state("stop")
-        except ConnectionError:
-            # If the device dropped, it'll return to idle on its own
-            # when the WebSocket close lands; nothing to do here.
-            pass
+            await gateway.esp32.send_tts_state("start")
+        except ConnectionError as exc:
+            raise RuntimeError(
+                f"Device disconnected before TTS start notification: {exc}"
+            ) from exc
+
+        # Wait for the firmware's state machine to land in
+        # kDeviceStateSpeaking before sending the first frame.
+        await asyncio.sleep(TTS_START_TRANSITION_DELAY_S)
+
+        # Frame pacing: the device's decode queue holds at most ~40
+        # frames (firmware MAX_DECODE_PACKETS_IN_QUEUE = 2400 /
+        # OPUS_FRAME_DURATION_MS), and pushes that exceed it are
+        # dropped silently. Send each frame at roughly the device's
+        # consumption rate (one frame per frame_duration_ms) so a long
+        # utterance never overflows. We let the loop drift by a single
+        # interval if the network is slow — the wall clock is the
+        # reference, not the loop iteration count.
+        frame_period_s = DEVICE_FRAME_DURATION_MS / 1000.0
+        loop = asyncio.get_event_loop()
+
+        try:
+            next_send_time = loop.time()
+            for frame in opus_frames:
+                now = loop.time()
+                if now < next_send_time:
+                    await asyncio.sleep(next_send_time - now)
+                try:
+                    await gateway.esp32.send_audio_frame(frame)
+                except ConnectionError as exc:
+                    # Stop pushing on the first disconnect, but fall
+                    # through to the stop notification (see finally) so
+                    # that *if* the device is somehow still listening
+                    # it returns to idle rather than staying in speaking
+                    # forever.
+                    push_error = exc
+                    break
+                sent += 1
+                next_send_time += frame_period_s
+        finally:
+            try:
+                await gateway.esp32.send_tts_state("stop")
+            except ConnectionError:
+                # If the device dropped, it'll return to idle on its
+                # own when the WebSocket close lands; nothing to do
+                # here.
+                pass
 
     if push_error is not None:
         raise RuntimeError(

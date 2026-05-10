@@ -36,6 +36,11 @@ class _FakeESP32:
         # notifications were dispatched, so tests can assert that
         # ``start`` precedes any frame and ``stop`` trails them.
         self.events: list[tuple[str, object]] = []
+        # Mirror the production manager's per-device TTS lock so the
+        # orchestrator's ``async with gateway.esp32.tts_lock`` works the
+        # same way under tests as in production. The lock is created
+        # per-fake so each test runs against a fresh instance.
+        self.tts_lock = asyncio.Lock()
 
     async def send_audio_frame(self, frame: bytes) -> None:
         self.frames.append(frame)
@@ -197,6 +202,66 @@ async def test_pipeline_blocks_protocol_v2(fake_encode):
 
 
 @pytest.mark.asyncio
+async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
+    """Concurrent ``say()`` invocations don't interleave on the same device.
+
+    Without the per-device TTS lock, two ``synthesize_and_send`` calls
+    running concurrently would each ``send_tts_state("start")``, race
+    through the ``TTS_START_TRANSITION_DELAY_S`` ``asyncio.sleep`` (the
+    cooperative yield point in this fake), then dump their frames and
+    stop notifications in arbitrary order on the same WebSocket. With
+    the lock, the recorded event stream must show one full
+    ``start → frames → stop`` sequence followed by another, never
+    interleaved — a strictly sequential pattern is what the device
+    relies on to stay in ``kDeviceStateSpeaking`` for one utterance at
+    a time.
+    """
+    pcm = b"\x01\x00" * 1440  # ~3 frames of audio
+    engine_a = _PCMEngine(pcm, name="engine_a")
+    engine_b = _PCMEngine(pcm, name="engine_b")
+    esp32 = _FakeESP32(connected=True)
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine_a)
+    reg.register(engine_b)
+
+    await asyncio.gather(
+        synthesize_and_send(
+            {"text": "first", "voice": "engine_a"},
+            gateway=gateway,
+            registry=reg,
+        ),
+        synthesize_and_send(
+            {"text": "second", "voice": "engine_b"},
+            gateway=gateway,
+            registry=reg,
+        ),
+    )
+
+    events = esp32.events
+    start_indices = [
+        i for i, e in enumerate(events) if e == ("tts_state", "start")
+    ]
+    stop_indices = [
+        i for i, e in enumerate(events) if e == ("tts_state", "stop")
+    ]
+    assert len(start_indices) == 2
+    assert len(stop_indices) == 2
+
+    # The lock guarantees a strictly sequential pattern:
+    #   start_0 < stop_0 < start_1 < stop_1
+    # The second utterance cannot begin until the first one finishes
+    # its stop notification.
+    assert (
+        start_indices[0]
+        < stop_indices[0]
+        < start_indices[1]
+        < stop_indices[1]
+    )
+
+
+@pytest.mark.asyncio
 async def test_pipeline_blocks_protocol_v3(fake_encode):
     """Devices on protocol v3 are blocked the same way as v2."""
     from types import SimpleNamespace
@@ -333,6 +398,7 @@ async def test_pipeline_translates_mid_stream_disconnect(fake_encode):
         def __init__(self) -> None:
             self.frames: list[bytes] = []
             self.tts_states: list[str] = []
+            self.tts_lock = asyncio.Lock()
 
         async def send_audio_frame(self, frame: bytes) -> None:
             if len(self.frames) >= 1:
@@ -448,6 +514,7 @@ async def test_pipeline_disconnect_before_tts_start(fake_encode):
 
         def __init__(self) -> None:
             self.tts_states = []
+            self.tts_lock = asyncio.Lock()
 
         async def send_tts_state(self, state: str) -> None:
             self.tts_states.append(state)

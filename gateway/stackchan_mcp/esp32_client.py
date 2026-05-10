@@ -231,6 +231,17 @@ class ESP32Manager:
         self._init_tasks: list[asyncio.Task] = []
         self._vision_url: str = ""
         self._vision_token: str = ""
+        # Per-device serialisation for TTS send sequences. Acquired by
+        # the orchestrator around the entire start → frames → stop
+        # block so concurrent ``say()`` invocations cannot interleave
+        # their Opus frames on the same WebSocket or overlap their
+        # ``tts.start``/``tts.stop`` notifications (which would yank
+        # the firmware out of ``kDeviceStateSpeaking`` mid-utterance
+        # and silently drop the remaining audio). The lock is scoped
+        # to the manager because the manager owns the device today —
+        # if multi-device support lands later, the lock should move
+        # onto :class:`ESP32Connection` instead.
+        self._tts_lock = asyncio.Lock()
 
     @property
     def device_connected(self) -> bool:
@@ -239,6 +250,15 @@ class ESP32Manager:
     @property
     def connection(self) -> ESP32Connection | None:
         return self._connection
+
+    @property
+    def tts_lock(self) -> asyncio.Lock:
+        """Per-device lock guarding the TTS send sequence.
+
+        See :attr:`_tts_lock` for the rationale; the orchestrator wraps
+        the start → frames → stop block in ``async with`` on this lock.
+        """
+        return self._tts_lock
 
     async def start(
         self,
