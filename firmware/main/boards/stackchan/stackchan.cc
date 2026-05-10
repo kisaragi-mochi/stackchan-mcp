@@ -7,7 +7,26 @@
 #include "i2c_device.h"
 #include "axp2101.h"
 #include "mcp_server.h"
+// Issue #79: servo driver is selectable at build time via Kconfig.
+//   - CONFIG_STACKCHAN_SERVO_SCSCL  (default): GPL-3.0 SCServo_lib
+//   - CONFIG_STACKCHAN_SERVO_FEETECH: MIT clean-room driver vendored at
+//     firmware/components/feetech_scs/.
+// Both drivers share the same begin / WritePos / ReadPos call signatures
+// used by this board, but their WritePos success value differs (see
+// ServoWritePosOk() below). The rest of stackchan.cc treats both drivers
+// uniformly through the ScsBus type alias plus that helper.
+#if CONFIG_STACKCHAN_SERVO_FEETECH
+#include "feetech_scs.h"
+using ScsBus = FeetechScs;
+// FeetechScs::WritePos returns 0 on ACK and -1 on bus error.
+static inline bool ServoWritePosOk(int r) { return r >= 0; }
+#else
 #include "SCSCL.h"
+using ScsBus = SCSCL;
+// SCSCL::WritePos returns 1 on ACK, 0 on ACK timeout, -1 on bus error.
+// Treat ACK timeout as failure to keep the original behaviour intact.
+static inline bool ServoWritePosOk(int r) { return r > 0; }
+#endif
 #include "avatar_images.h"
 
 #include <esp_log.h>
@@ -482,7 +501,7 @@ private:
     EspVideo* camera_;
     esp_timer_handle_t touchpad_timer_;
     PowerSaveTimer* power_save_timer_;
-    SCSCL scs_bus_;
+    ScsBus scs_bus_;
     std::unique_ptr<Py32IoExpander> io_expander_;
 
     // Avatar overlay state. avatar_img_ is created lazily on the active LVGL
@@ -976,7 +995,16 @@ private:
     void InitializeServo() {
         ESP_LOGI(TAG, "Init SCS0009 servo bus (UART%d, baud=%d, tx=%d, rx=%d)",
                  SERVO_UART_NUM, SERVO_BAUDRATE, SERVO_TX_PIN, SERVO_RX_PIN);
+#if CONFIG_STACKCHAN_SERVO_FEETECH
+        // FeetechScs::begin() returns void and uses ESP_ERROR_CHECK internally,
+        // so a UART configuration error aborts the boot rather than reporting
+        // false. If begin() returns to us, init succeeded.
+        scs_bus_.begin(SERVO_UART_NUM, SERVO_BAUDRATE, SERVO_TX_PIN, SERVO_RX_PIN);
+        servo_ok_ = true;
+#else
+        // SCServo_lib SCSCL::begin() returns bool — false if UART setup failed.
         servo_ok_ = scs_bus_.begin(SERVO_UART_NUM, SERVO_BAUDRATE, SERVO_TX_PIN, SERVO_RX_PIN);
+#endif
         // ACK reading is enabled (SCS::Level defaults to 1). genWrite() will
         // wait for the SCS0009's 6-byte ACK packet before returning, which
         // implicitly enforces an inter-frame gap and prevents a follow-up
@@ -1189,7 +1217,7 @@ private:
             if (yaw_local.moving) {
                 int yaw_pos = YawDegToPos(new_yaw_current);
                 int r = scs_bus_.WritePos(SERVO_YAW_ID, yaw_pos, MOTION_PER_WRITE_TIME_MS, 0);
-                if (r <= 0) {
+                if (!ServoWritePosOk(r)) {
                     ESP_LOGW(TAG, "Motion yaw WritePos failed: r=%d (deg=%d, pos=%d)",
                              r, new_yaw_current, yaw_pos);
                 }
@@ -1198,7 +1226,7 @@ private:
             if (pitch_local.moving) {
                 int pitch_pos = PitchDegToPos(new_pitch_current);
                 int r = scs_bus_.WritePos(SERVO_PITCH_ID, pitch_pos, MOTION_PER_WRITE_TIME_MS, 0);
-                if (r <= 0) {
+                if (!ServoWritePosOk(r)) {
                     ESP_LOGW(TAG, "Motion pitch WritePos failed: r=%d (deg=%d, pos=%d)",
                              r, new_pitch_current, pitch_pos);
                 }
@@ -2076,10 +2104,10 @@ private:
                     xSemaphoreGive(motion_mutex_);
                 }
                 ESP_LOGI(TAG, "set_head_angles: yaw=%d (pos=%d) motion_started=%d, pitch=%d (pos=%d) motion_started=%d, uart=%d, servo_ok=%d",
-                         yaw, yaw_pos, yaw_motion_started, pitch, pitch_pos, pitch_motion_started, (int)scs_bus_.uart_num, servo_ok_);
+                         yaw, yaw_pos, yaw_motion_started, pitch, pitch_pos, pitch_motion_started, (int)SERVO_UART_NUM, servo_ok_);
                 cJSON* root = cJSON_CreateObject();
                 cJSON_AddBoolToObject(root, "servo_init_ok", servo_ok_);
-                cJSON_AddNumberToObject(root, "uart_num", (int)scs_bus_.uart_num);
+                cJSON_AddNumberToObject(root, "uart_num", (int)SERVO_UART_NUM);
                 cJSON_AddNumberToObject(root, "yaw_pos", yaw_pos);
                 cJSON_AddNumberToObject(root, "pitch_pos", pitch_pos);
                 cJSON_AddNumberToObject(root, "yaw_motion_started", yaw_motion_started ? 1 : 0);

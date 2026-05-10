@@ -836,6 +836,31 @@ if(CONFIG_BOARD_TYPE_STACKCHAN)
         list(REMOVE_ITEM BOARD_SOURCES ${STACKCHAN_BOARD_DIR}/avatar_images.cc)
         message(STATUS "Using StackChan local avatar override: ${STACKCHAN_LOCAL_AVATAR_CC}")
     endif()
+
+    # Issue #79: when the experimental MIT FeetechScs driver is selected,
+    # exclude the GPL-3.0 SCServo_lib sources from the build so the firmware
+    # ships under MIT only. The default (CONFIG_STACKCHAN_SERVO_SCSCL) keeps
+    # SCServo_lib in place for stability until validation completes.
+    #
+    # The MIT driver lives under firmware/components/feetech_scs/ for clean
+    # license separation. We pull its source/header directly into main's
+    # build rather than registering it as an independent ESP-IDF component:
+    # this project uses MINIMAL_BUILD (top-level CMakeLists.txt) which trims
+    # components not in main's REQUIRES *before* their public include paths
+    # propagate to main, so the component-style integration would silently
+    # fail with `feetech_scs.h: No such file or directory`. Inlining the
+    # source into main avoids the chicken-and-egg dependency.
+    if(CONFIG_STACKCHAN_SERVO_FEETECH)
+        list(REMOVE_ITEM BOARD_SOURCES
+            ${STACKCHAN_BOARD_DIR}/SCS.cc
+            ${STACKCHAN_BOARD_DIR}/SCSCL.cc
+            ${STACKCHAN_BOARD_DIR}/SCSerial.cc)
+        list(APPEND BOARD_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/../components/feetech_scs/feetech_scs.cpp")
+        list(APPEND INCLUDE_DIRS
+            "${CMAKE_CURRENT_SOURCE_DIR}/../components/feetech_scs")
+        message(STATUS "StackChan: using MIT FeetechScs driver, excluding SCServo_lib sources from build")
+    endif()
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 

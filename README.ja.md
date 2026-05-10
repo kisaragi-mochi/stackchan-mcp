@@ -393,6 +393,16 @@ X 軸（yaw、`-90..+90°`）には同等のハードウェア制限はなく、
 
 一方、`gateway/` は独立した Python プロセスで、ESP32 とはネットワーク経由 (WebSocket) でしか通信しないため、**MIT License** のまま利用・派生できます。
 
+> **MIT 単一ライセンス firmware ビルドのオプション (experimental, [#79](https://github.com/kisaragi-mochi/stackchan-mcp/issues/79) 以降):**
+> SCServo_lib のクリーンルーム MIT 代替実装
+> ([`necobit/feetech_scs_esp_idf`](https://github.com/necobit/feetech_scs_esp_idf)、
+> `firmware/components/feetech_scs/` 配下に vendor 取り込み) を opt-in
+> として Kconfig で選べます。`CONFIG_STACKCHAN_SERVO_FEETECH=y` でビルド
+> すると GPL-3.0 の SCServo_lib ソースがビルドから除外され、MIT 単一
+> ライセンスの firmware バイナリが生成されます。デフォルトは
+> `SCServo_lib` のまま (実機検証完了まで)、状況は #79 でトラッキング
+> しています。
+
 ### upstream
 
 `firmware/` は [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) のフォーク ([kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32)) を git subtree で取り込んでいます。upstream 同期手順は [`docs/firmware-sync.md`](docs/firmware-sync.md) を参照してください。SCServo_lib は公式 [stack-chan](https://github.com/mongonta0716/stack-chan) (タカヲさん) から移植したファームウェアコンポーネントです。

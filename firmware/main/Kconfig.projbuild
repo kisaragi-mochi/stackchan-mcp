@@ -1035,4 +1035,34 @@ menu "TAIJIPAI_S3_CONFIG"
         启动双声道
 endmenu
 
+if BOARD_TYPE_STACKCHAN
+
+choice STACKCHAN_SERVO_DRIVER
+    prompt "StackChan Servo Driver"
+    default STACKCHAN_SERVO_SCSCL
+    help
+        Choose between the original GPL-3.0 SCServo_lib (current default)
+        and the MIT-licensed clean-room reimplementation
+        (necobit/feetech_scs_esp_idf, vendored under
+        firmware/components/feetech_scs/).
+
+        See Issue #79 for the migration roadmap to MIT-only firmware.
+
+    config STACKCHAN_SERVO_SCSCL
+        bool "SCServo_lib (GPL-3.0, current default)"
+        help
+            Use the original SCServo_lib sources shipped under
+            firmware/main/boards/stackchan/. License: GPL-3.0.
+
+    config STACKCHAN_SERVO_FEETECH
+        bool "feetech_scs_esp_idf (MIT, experimental)"
+        help
+            Use the MIT-licensed clean-room driver vendored at
+            firmware/components/feetech_scs/. Currently under validation —
+            firmware behavior is expected to match SCSCL but real-device
+            verification is in progress (#79).
+endchoice
+
+endif # BOARD_TYPE_STACKCHAN
+
 endmenu

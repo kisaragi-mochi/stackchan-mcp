@@ -17,6 +17,14 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Add opt-in MIT-licensed servo driver alternative
+  (`firmware/components/feetech_scs/`, vendored from
+  [necobit/feetech_scs_esp_idf](https://github.com/necobit/feetech_scs_esp_idf)
+  at commit `38a91984`). Build with Kconfig
+  `CONFIG_STACKCHAN_SERVO_FEETECH=y` to exclude the GPL-3.0 SCServo_lib
+  sources and produce a fully MIT-licensed firmware binary. The default
+  keeps the existing GPL-3.0 SCServo_lib driver for stability until
+  real-device validation completes. Refs #79.
 - **Hardware safety**: clamp `set_head_angles` pitch parameter to a
   hardware-safe sub-range (`0..+30°`) to prevent driving the SCS0009 servo
   into its mechanical end-stop. M5Stack docs explicitly warn that operating

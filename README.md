@@ -441,6 +441,15 @@ This split exists because Feetech's SCServo SDK is distributed under GPL-3.0. Th
 
 The `gateway/` runs as an independent Python process and only talks to the ESP32 over the network (WebSocket), so it stays usable and derivable under the **MIT License**.
 
+> **Optional MIT-only firmware build (experimental, since [#79](https://github.com/kisaragi-mochi/stackchan-mcp/issues/79)):**
+> A clean-room MIT alternative to SCServo_lib
+> ([`necobit/feetech_scs_esp_idf`](https://github.com/necobit/feetech_scs_esp_idf),
+> vendored under `firmware/components/feetech_scs/`) is available as an
+> opt-in via Kconfig. Building with `CONFIG_STACKCHAN_SERVO_FEETECH=y`
+> excludes the GPL-3.0 SCServo_lib sources, producing a fully
+> MIT-licensed firmware binary. The default remains `SCServo_lib` until
+> real-device validation completes; track #79 for status.
+
 ### upstream
 
 `firmware/` is taken in via git subtree from [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) — specifically the [kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32) fork. See [`docs/firmware-sync.md`](docs/firmware-sync.md) for the upstream sync playbook. SCServo_lib is a firmware component ported from the official [stack-chan](https://github.com/mongonta0716/stack-chan) (Takawo-san) repository.
