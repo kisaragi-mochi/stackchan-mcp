@@ -30,9 +30,19 @@ class _FakeESP32:
     def __init__(self, *, connected: bool = True) -> None:
         self.device_connected = connected
         self.frames: list[bytes] = []
+        self.tts_states: list[str] = []
+        # Records the relative order in which audio frames and TTS state
+        # notifications were dispatched, so tests can assert that
+        # ``start`` precedes any frame and ``stop`` trails them.
+        self.events: list[tuple[str, object]] = []
 
     async def send_audio_frame(self, frame: bytes) -> None:
         self.frames.append(frame)
+        self.events.append(("frame", frame))
+
+    async def send_tts_state(self, state: str) -> None:
+        self.tts_states.append(state)
+        self.events.append(("tts_state", state))
 
 
 class _FakeGateway:
@@ -97,6 +107,13 @@ async def test_pipeline_synthesises_encodes_and_pushes(fake_encode):
     assert esp32.frames == [b"opus_frame_0", b"opus_frame_1"]
     assert engine.calls[0][0] == "こんにちは"
     assert engine.calls[0][1]["speaker_id"] == 7
+    # TTS start before any frame, stop after the last frame.
+    assert esp32.tts_states == ["start", "stop"]
+    assert esp32.events[0] == ("tts_state", "start")
+    assert esp32.events[-1] == ("tts_state", "stop")
+    # All frames sit between start and stop.
+    middle = esp32.events[1:-1]
+    assert all(kind == "frame" for kind, _ in middle)
 
 
 @pytest.mark.asyncio
@@ -256,11 +273,18 @@ async def test_pipeline_translates_mid_stream_disconnect(fake_encode):
 
         def __init__(self) -> None:
             self.frames: list[bytes] = []
+            self.tts_states: list[str] = []
 
         async def send_audio_frame(self, frame: bytes) -> None:
             if len(self.frames) >= 1:
                 raise ConnectionError("simulated disconnect")
             self.frames.append(frame)
+
+        async def send_tts_state(self, state: str) -> None:
+            # The disconnect can race the stop notification; if the
+            # caller still tries to send it after the failure, simulate
+            # a benign no-op rather than raising again.
+            self.tts_states.append(state)
 
     pcm = b"\x01\x00" * 1440  # 1.5 frames worth
     engine = _PCMEngine(pcm)
@@ -281,6 +305,9 @@ async def test_pipeline_translates_mid_stream_disconnect(fake_encode):
     assert isinstance(exc_info.value.__cause__, ConnectionError)
     # The first frame did make it before the failure.
     assert len(esp32.frames) == 1
+    # The stop notification was attempted regardless of the disconnect.
+    assert "start" in esp32.tts_states
+    assert "stop" in esp32.tts_states
 
 
 @pytest.mark.asyncio
@@ -304,3 +331,43 @@ async def test_opus_encode_error_translated(fake_encode, monkeypatch):
             gateway=gateway,
             registry=reg,
         )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_disconnect_before_tts_start(fake_encode):
+    """ConnectionError on the start notification surfaces clearly.
+
+    Without a clean message here the pipeline would degenerate into a
+    confusing "0/N frames" report even though no frame was attempted.
+    """
+
+    class FailingESP32:
+        device_connected = True
+        tts_states: list[str] = []  # noqa: RUF012
+
+        def __init__(self) -> None:
+            self.tts_states = []
+
+        async def send_tts_state(self, state: str) -> None:
+            self.tts_states.append(state)
+            if state == "start":
+                raise ConnectionError("device dropped during start")
+
+        async def send_audio_frame(self, frame: bytes) -> None:
+            raise AssertionError("frame should not be attempted after start failure")
+
+    pcm = b"\x01\x00" * 960
+    engine = _PCMEngine(pcm)
+    esp32 = FailingESP32()
+    gateway = _FakeGateway(esp32)  # type: ignore[arg-type]
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(RuntimeError, match="TTS start"):
+        await synthesize_and_send(
+            {"text": "hello"},
+            gateway=gateway,
+            registry=reg,
+        )
+    assert esp32.tts_states == ["start"]

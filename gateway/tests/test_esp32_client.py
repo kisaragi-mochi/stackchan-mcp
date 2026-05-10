@@ -275,6 +275,45 @@ async def test_manager_send_audio_frame_no_device():
         await mgr.send_audio_frame(b"opus_payload_bytes")
 
 
+@pytest.mark.asyncio
+async def test_connection_send_tts_state_sends_json():
+    """ESP32Connection.send_tts_state writes a tts state JSON message."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-tts")  # type: ignore[arg-type]
+
+    await conn.send_tts_state("start")
+
+    assert len(ws.sent) == 1
+    payload = json.loads(ws.sent[0])
+    assert payload == {
+        "session_id": "session-tts",
+        "type": "tts",
+        "state": "start",
+    }
+
+
+@pytest.mark.asyncio
+async def test_connection_send_tts_state_raises_after_disconnect():
+    """A disconnected connection refuses to send TTS notifications."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-tts")  # type: ignore[arg-type]
+
+    conn.disconnect()
+
+    with pytest.raises(ConnectionError):
+        await conn.send_tts_state("stop")
+    assert ws.sent == []
+
+
+@pytest.mark.asyncio
+async def test_manager_send_tts_state_no_device():
+    """ESP32Manager.send_tts_state raises when no device is attached."""
+    mgr = ESP32Manager()
+
+    with pytest.raises(ConnectionError):
+        await mgr.send_tts_state("start")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

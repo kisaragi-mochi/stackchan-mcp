@@ -244,6 +244,9 @@ async def test_say_returns_error_json_when_voicevox_returns_5xx(monkeypatch):
         async def send_audio_frame(self, frame):
             raise AssertionError("synthesise should have failed before push")
 
+        async def send_tts_state(self, state):  # noqa: ARG002 - test stub
+            return None
+
     class FakeGateway:
         esp32 = FakeESP32()
 
@@ -298,6 +301,9 @@ async def test_say_returns_error_json_when_device_disconnects_mid_stream(
             if self.frames:
                 raise ConnectionError("simulated disconnect")
             self.frames.append(frame)
+
+        async def send_tts_state(self, state):  # noqa: ARG002 - test stub
+            return None
 
     class FakeGateway:
         esp32 = FailingESP32()

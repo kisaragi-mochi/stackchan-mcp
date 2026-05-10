@@ -153,20 +153,47 @@ async def synthesize_and_send(
     except Exception as exc:
         raise RuntimeError(f"Opus encoding failed: {exc}") from exc
 
+    # Bracket the binary audio frames in TTS start/stop notifications.
+    # The device firmware (Application::OnIncomingAudio) only accepts
+    # binary audio frames while in kDeviceStateSpeaking, which is
+    # entered on receipt of {"type":"tts","state":"start"} and exited
+    # on "stop". Without these notifications the audio frames are
+    # silently discarded and the say() tool returns success even
+    # though nothing actually plays.
+    try:
+        await gateway.esp32.send_tts_state("start")
+    except ConnectionError as exc:
+        raise RuntimeError(
+            f"Device disconnected before TTS start notification: {exc}"
+        ) from exc
+
     sent = 0
-    for frame in opus_frames:
+    push_error: ConnectionError | None = None
+    try:
+        for frame in opus_frames:
+            try:
+                await gateway.esp32.send_audio_frame(frame)
+            except ConnectionError as exc:
+                # Stop pushing on the first disconnect, but fall through
+                # to the stop notification (see finally) so that *if*
+                # the device is somehow still listening it returns to
+                # idle rather than staying in speaking forever.
+                push_error = exc
+                break
+            sent += 1
+    finally:
         try:
-            await gateway.esp32.send_audio_frame(frame)
-        except ConnectionError as exc:
-            # Mid-stream disconnect: report what made it through so
-            # callers can decide whether to retry or give up. Keep the
-            # error a RuntimeError so the MCP handler's filter catches
-            # it without needing to know about transport types.
-            raise RuntimeError(
-                f"Device disconnected after sending "
-                f"{sent}/{len(opus_frames)} frames: {exc}"
-            ) from exc
-        sent += 1
+            await gateway.esp32.send_tts_state("stop")
+        except ConnectionError:
+            # If the device dropped, it'll return to idle on its own
+            # when the WebSocket close lands; nothing to do here.
+            pass
+
+    if push_error is not None:
+        raise RuntimeError(
+            f"Device disconnected after sending "
+            f"{sent}/{len(opus_frames)} frames: {push_error}"
+        ) from push_error
 
     duration_ms = sent * DEVICE_FRAME_DURATION_MS
 

@@ -154,6 +154,27 @@ class ESP32Connection:
             raise ConnectionError("ESP32 not connected")
         await self._ws.send(opus_frame)
 
+    async def send_tts_state(self, state: str) -> None:
+        """Send a TTS state notification (``start`` / ``stop`` / ...).
+
+        The device's :func:`Application::OnIncomingJson` translates
+        ``{"type":"tts","state":"start"}`` into
+        :data:`kDeviceStateSpeaking`, which is the gate for
+        :func:`OnIncomingAudio` pushing packets into the decode queue
+        (see ``firmware/main/application.cc``). Without bracketing the
+        audio frames in start/stop, the device drops them on the floor
+        and the speaker stays silent — the TTS tool returns success
+        without anything actually playing.
+        """
+        if not self._connected:
+            raise ConnectionError("ESP32 not connected")
+        message = {
+            "session_id": self.session_id,
+            "type": "tts",
+            "state": state,
+        }
+        await self._ws.send(json.dumps(message))
+
     def disconnect(self) -> None:
         """Mark connection as disconnected."""
         self._connected = False
@@ -346,6 +367,17 @@ class ESP32Manager:
         if not self._connection or not self._connection.connected:
             raise ConnectionError("No ESP32 device connected")
         await self._connection.send_audio_frame(opus_frame)
+
+    async def send_tts_state(self, state: str) -> None:
+        """Send a TTS state notification (``start`` / ``stop`` / ...).
+
+        Required around audio frame egress so the device transitions
+        into ``kDeviceStateSpeaking`` and back; see
+        :meth:`ESP32Connection.send_tts_state` for the full rationale.
+        """
+        if not self._connection or not self._connection.connected:
+            raise ConnectionError("No ESP32 device connected")
+        await self._connection.send_tts_state(state)
 
     def get_status(self) -> dict[str, Any]:
         """Get current connection status."""
