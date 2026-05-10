@@ -362,6 +362,21 @@ async def test_send_tts_state_translates_oserror_to_connection_error():
     assert not conn.connected
 
 
+def test_connection_default_protocol_version_is_one():
+    """Fresh ESP32Connection defaults to WebSocket protocol v1.
+
+    v1 is what the gateway's audio framing currently targets (raw
+    Opus binary frames). v2/v3 wrap payloads in a BinaryProtocol
+    header which this gateway does not yet emit; the hello handler
+    logs a warning when a non-v1 device negotiates so operators know
+    the TTS path may not work for them.
+    """
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-1")  # type: ignore[arg-type]
+
+    assert conn.protocol_version == 1
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

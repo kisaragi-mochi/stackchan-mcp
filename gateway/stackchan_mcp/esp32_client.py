@@ -37,6 +37,13 @@ class ESP32Connection:
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._connected = True
         self._initialized = False
+        # Device-declared WebSocket protocol version (from the hello
+        # message). Defaults to 1, which matches the firmware's default
+        # (firmware/main/protocols/websocket_protocol.h: ``version_ = 1``)
+        # and the audio framing this gateway emits today (raw Opus
+        # payload). v2/v3 add a BinaryProtocol header that this gateway
+        # does not yet wrap — see Issue follow-up to #70.
+        self.protocol_version: int = 1
 
     @property
     def connected(self) -> bool:
@@ -321,6 +328,26 @@ class ESP32Manager:
                         logger.warning("ESP32 does not support MCP, rejecting")
                         await ws.close()
                         return
+
+                    # Capture the device's WebSocket protocol version
+                    # so callers (e.g. the TTS pipeline) can decide
+                    # whether their wire format is compatible. The
+                    # firmware accepts raw Opus only on v1; v2/v3 wrap
+                    # the payload in a BinaryProtocol header.
+                    raw_version = data.get("version", 1)
+                    try:
+                        connection.protocol_version = int(raw_version)
+                    except (TypeError, ValueError):
+                        connection.protocol_version = 1
+                    if connection.protocol_version != 1:
+                        logger.warning(
+                            "ESP32 negotiated WebSocket protocol "
+                            "version=%s (gateway only emits v1 raw "
+                            "Opus binary frames; TTS audio may not "
+                            "play correctly until binary header "
+                            "wrapping is added)",
+                            connection.protocol_version,
+                        )
 
                     # Send hello response
                     resp = HelloResponse(session_id=session_id)
