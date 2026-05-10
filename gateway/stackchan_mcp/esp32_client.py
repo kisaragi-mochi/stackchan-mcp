@@ -342,10 +342,11 @@ class ESP32Manager:
                     if connection.protocol_version != 1:
                         logger.warning(
                             "ESP32 negotiated WebSocket protocol "
-                            "version=%s (gateway only emits v1 raw "
-                            "Opus binary frames; TTS audio may not "
-                            "play correctly until binary header "
-                            "wrapping is added)",
+                            "version=%s; the gateway emits raw Opus "
+                            "binary frames matching v1 only. TTS "
+                            "calls (say) will be blocked at the "
+                            "orchestrator until v2/v3 BinaryProtocol "
+                            "header wrapping is implemented",
                             connection.protocol_version,
                         )
 

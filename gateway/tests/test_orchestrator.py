@@ -162,6 +162,64 @@ async def test_pipeline_raises_when_device_disconnected(fake_encode):
 
 
 @pytest.mark.asyncio
+async def test_pipeline_blocks_protocol_v2(fake_encode):
+    """Devices that negotiated WebSocket protocol v2 are blocked.
+
+    The gateway emits raw Opus binary frames matching firmware v1; v2/v3
+    expect a BinaryProtocol header wrapped around each binary message.
+    Streaming raw frames to a v2/v3 device causes silent playback
+    failure, so the orchestrator must fail fast with a clear error
+    rather than reporting say() success for an utterance that will
+    never play.
+    """
+    from types import SimpleNamespace
+
+    pcm = b"\x01\x00" * 1440
+    engine = _PCMEngine(pcm)
+    esp32 = _FakeESP32(connected=True)
+    esp32.connection = SimpleNamespace(protocol_version=2)
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(RuntimeError, match="protocol v1"):
+        await synthesize_and_send(
+            {"text": "hello"}, gateway=gateway, registry=reg
+        )
+
+    # Nothing should reach the device — neither TTS state notifications
+    # nor audio frames — and the engine must not even be invoked, since
+    # synthesis would be wasted work.
+    assert esp32.tts_states == []
+    assert esp32.frames == []
+    assert engine.calls == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_blocks_protocol_v3(fake_encode):
+    """Devices on protocol v3 are blocked the same way as v2."""
+    from types import SimpleNamespace
+
+    pcm = b"\x01\x00" * 1440
+    engine = _PCMEngine(pcm)
+    esp32 = _FakeESP32(connected=True)
+    esp32.connection = SimpleNamespace(protocol_version=3)
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(RuntimeError, match=r"v3"):
+        await synthesize_and_send(
+            {"text": "hi"}, gateway=gateway, registry=reg
+        )
+
+    assert esp32.tts_states == []
+    assert esp32.frames == []
+
+
+@pytest.mark.asyncio
 async def test_pipeline_raises_when_engine_returns_no_pcm(fake_encode):
     """An engine returning empty PCM is a bug, surfaced as a RuntimeError."""
     engine = _PCMEngine(b"")
