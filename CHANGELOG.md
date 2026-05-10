@@ -15,6 +15,19 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Firmware
+
+- **Hardware safety**: clamp `set_head_angles` pitch parameter to a
+  hardware-safe sub-range (`0..+30°`) to prevent driving the SCS0009 servo
+  into its mechanical end-stop. M5Stack docs explicitly warn that operating
+  the Y-axis outside the recommended range may cause servo stall and
+  permanent damage; on the CoreS3 + SCS0009 hardware this firmware targets,
+  the mechanical end-stop sits at approximately `pitch=-1°` (validated on
+  a real unit during #79). The MCP property declaration keeps the
+  `-30..+30°` numerical range for backward compatibility, but the handler
+  silently raises sub-zero requests with an `ESP_LOGW` warning. README
+  gains a new "Hardware safety notes" section. Refs #80.
+
 ## [0.5.0] - 2026-05-10
 
 ### Added

@@ -605,6 +605,24 @@ private:
     static constexpr uint32_t MOTION_DEFAULT_DURATION_MS = 600;
     static constexpr uint32_t MOTION_PER_WRITE_TIME_MS = 30;
 
+    // Issue #80: pitch hardware-safe range. The mechanical end-stop on the
+    // M5Stack CoreS3 + SCS0009 hardware sits very close to pitch=-1°, and
+    // M5Stack's official docs warn that operating the Y-axis outside the
+    // recommended 5°-85° range may cause servo stall and permanent damage
+    // (https://docs.m5stack.com/en/StackChan). On this firmware's coordinate
+    // system, pitch=0 leaves ~1° margin above the validated end-stop.
+    //
+    // Defense-in-depth: we enforce this range at every servo-write boundary
+    //   1. PitchDegToPos() clamps its input (covers motion-task interpolation
+    //      and any future caller that bypasses the MCP layer).
+    //   2. The start-up restore from ReadPos clamps the recovered angle so
+    //      a device booting with the head physically pushed below 0° does
+    //      not carry that negative starting angle into motion interpolation.
+    //   3. The set_head_angles MCP handler additionally clamps the request
+    //      target so the original out-of-range value is logged.
+    static constexpr int SAFE_PITCH_MIN = 0;
+    static constexpr int SAFE_PITCH_MAX = 30;
+
     static int YawDegToPos(int deg) {
         int pos = 460 + deg * 16 / 5;
         if (pos < 0) pos = 0;
@@ -613,6 +631,11 @@ private:
     }
 
     static int PitchDegToPos(int deg) {
+        // Issue #80: defense-in-depth — clamp at the servo-write boundary so
+        // motion-task interpolation and any other future caller cannot
+        // bypass the input-layer clamp.
+        if (deg < SAFE_PITCH_MIN) deg = SAFE_PITCH_MIN;
+        if (deg > SAFE_PITCH_MAX) deg = SAFE_PITCH_MAX;
         int pos = 620 + deg * 16 / 5;
         if (pos < 0) pos = 0;
         if (pos > 1000) pos = 1000;
@@ -992,9 +1015,17 @@ private:
                 ESP_LOGW(TAG, "Failed to ReadPos(yaw); current_deg stays at 0");
             }
             if (pitch_pos_actual >= 0) {
-                pitch_motion_.current_deg = (pitch_pos_actual - 620) * 5 / 16;
-                ESP_LOGI(TAG, "Restored pitch_motion_.current_deg=%d from ReadPos=%d",
-                         pitch_motion_.current_deg, pitch_pos_actual);
+                int restored_pitch = (pitch_pos_actual - 620) * 5 / 16;
+                // Issue #80: if the device booted with the head physically
+                // pushed below the safe range (e.g. previous unsafe firmware
+                // or manual handling), don't carry that negative starting
+                // angle into motion interpolation — clamp before storing so
+                // subsequent interpolation runs only over safe positions.
+                if (restored_pitch < SAFE_PITCH_MIN) restored_pitch = SAFE_PITCH_MIN;
+                if (restored_pitch > SAFE_PITCH_MAX) restored_pitch = SAFE_PITCH_MAX;
+                pitch_motion_.current_deg = restored_pitch;
+                ESP_LOGI(TAG, "Restored pitch_motion_.current_deg=%d from ReadPos=%d (clamped to safe range %d..%d)",
+                         pitch_motion_.current_deg, pitch_pos_actual, SAFE_PITCH_MIN, SAFE_PITCH_MAX);
             } else {
                 ESP_LOGW(TAG, "Failed to ReadPos(pitch); current_deg stays at 0");
             }
@@ -2007,15 +2038,32 @@ private:
 
         // Set head angles (yaw, pitch in degrees)
         // SCS0009: 1 step = 0.3125 degrees, so 1 degree = 3.2 steps (= 16/5)
-        // yaw: -90..90 degrees, pitch: -30..30 degrees
+        // yaw: -90..90 degrees, pitch: -30..30 (declared) but the handler
+        // clamps to a hardware-safe sub-range — see SAFE_PITCH_MIN/MAX below
+        // and Issue #80.
         mcp_server.AddTool(
             "self.robot.set_head_angles",
-            "Set the head angles of the robot. yaw: horizontal (-90 to 90), pitch: vertical (-30 to 30).",
+            "Set the head angles of the robot. yaw: horizontal (-90 to 90), pitch: vertical (recommended 0 to 30; the lower half of the -30..0 range may hit the mechanical end-stop on M5Stack CoreS3 + SCS0009 hardware and risks servo stall — see README \"Hardware safety notes\").",
             PropertyList({Property("yaw", kPropertyTypeInteger, 0, -90, 90),
                           Property("pitch", kPropertyTypeInteger, 0, -30, 30)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 int yaw = properties["yaw"].value<int>();
                 int pitch = properties["pitch"].value<int>();
+                // Issue #80: clamp the requested pitch to the hardware-safe
+                // sub-range. PitchDegToPos() clamps again at the servo-write
+                // boundary (defense-in-depth), but doing it here too lets us
+                // log when the original request was out of range. See the
+                // SAFE_PITCH_MIN/MAX comment block above for rationale.
+                if (pitch < SAFE_PITCH_MIN) {
+                    ESP_LOGW(TAG, "set_head_angles: pitch=%d below SAFE_PITCH_MIN=%d, clamping (servo end-stop protection)",
+                             pitch, SAFE_PITCH_MIN);
+                    pitch = SAFE_PITCH_MIN;
+                }
+                if (pitch > SAFE_PITCH_MAX) {
+                    ESP_LOGW(TAG, "set_head_angles: pitch=%d above SAFE_PITCH_MAX=%d, clamping",
+                             pitch, SAFE_PITCH_MAX);
+                    pitch = SAFE_PITCH_MAX;
+                }
                 int yaw_pos = YawDegToPos(yaw);
                 int pitch_pos = PitchDegToPos(pitch);
                 WriteHeadAngles(yaw, pitch);

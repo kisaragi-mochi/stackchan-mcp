@@ -406,6 +406,23 @@ Expected PNG filenames under `~/.stackchan/avatar/`:
 
 Do not commit personal PNGs, generated local avatar files, photos, or other user-specific assets.
 
+## Hardware safety notes
+
+> ⚠️ **Y-axis (pitch) safe range**
+
+M5Stack's official documentation explicitly warns:
+
+> The movement angle of the StackChan Y-axis servo (vertical direction) is recommended to be controlled within 5 ~ 85°. Operating at extreme angles may cause **servo stall and permanent damage**.
+> — https://docs.m5stack.com/en/StackChan
+
+On the M5Stack CoreS3 + SCS0009 hardware that this firmware targets, the **mechanical end-stop on the down direction sits very close to this firmware's pitch coordinate of `-1°`** (validated on a real unit). Driving below that value (e.g. `pitch=-5`, `pitch=-10`) presses the servo gear into the physical stopper and produces an audible click.
+
+To prevent that, the `set_head_angles` MCP tool **clamps pitch to `0..+30°`** internally even though the declared property range is `-30..+30°`. Requests below `0°` are silently raised to `0°` (with an `ESP_LOGW`); the original out-of-range numerical bounds are kept on the property declaration only for backward compatibility with older callers — please target `0..+30°` going forward.
+
+The X-axis (yaw, `-90..+90°`) is not subject to a comparable hardware restriction and remains usable across its full declared range.
+
+See [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80) for the engineering background and validation notes.
+
 ## Known issues
 
 - The servo bus may hang on large-angle abrupt reversals (e.g. +60° → -60°). A fix is in progress via Motion::update_task interpolation.

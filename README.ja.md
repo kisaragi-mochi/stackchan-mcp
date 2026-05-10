@@ -361,6 +361,25 @@ python scripts/avatar_convert/convert_avatars.py
 - 大角度急逆転 (±60° → -60° 等) でサーボハングする場合あり (Motion::update_task の補間移植で改善予定)
 - タッチセンサ (Si12T) のぽん判定取りこぼし (感度レジスタ調整余地)
 
+## ハードウェア安全上の注意
+
+> ⚠️ **Y軸 (pitch) の安全範囲**
+
+M5Stack 公式ドキュメントには以下の警告があります:
+
+> The movement angle of the StackChan Y-axis servo (vertical direction) is recommended to be controlled within 5 ~ 85°. Operating at extreme angles may cause **servo stall and permanent damage**.
+> — https://docs.m5stack.com/en/StackChan
+>
+> (StackChan の Y 軸サーボの可動角度は 5°〜85° の範囲内に制御することを推奨します。極端な角度で動作させると **サーボストール や 永久故障** を引き起こす可能性があります。)
+
+このファームウェアが対象とする M5Stack CoreS3 + SCS0009 ハードウェアでは、**下方向の機械的エンドストップがファームウェア座標系の `pitch=-1°` 付近にある** ことを実機で確認しています（テストユニットで検証）。それより低い値（例: `pitch=-5`、`pitch=-10`）を要求するとサーボのギアが物理的なストッパーに当たり、「カチッ」と音がします。
+
+これを防ぐため、`set_head_angles` MCP ツールは Property 宣言上の範囲は `-30..+30°` のままですが、**handler 側で `pitch` を `0..+30°` に clamp** します。`0°` 未満のリクエストは `0°` に引き上げられます（`ESP_LOGW` 付き）。Property 宣言の数値範囲は後方互換性のためそのまま維持していますが、今後は `0..+30°` を target にしてください。
+
+X 軸（yaw、`-90..+90°`）には同等のハードウェア制限はなく、宣言範囲全体を使えます。
+
+詳細な背景・検証ノートは [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80) を参照してください。
+
 ## ライセンス
 
 このリポジトリはデュアルライセンス構成です。
