@@ -17,14 +17,57 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- **Default servo driver switched to MIT FeetechScs** (Phase A of the
+  GPL → MIT firmware migration tracked in #79). The opt-in MIT driver
+  added in #82 is now the build default for the canonical build path
+  (`firmware/scripts/release.py stackchan`), which now appends
+  `CONFIG_STACKCHAN_SERVO_FEETECH=y` to the per-board `sdkconfig` so
+  the selection is enforced regardless of any pre-existing
+  `firmware/sdkconfig` left in the workspace. Builds produced this way
+  exclude the GPL-3.0 SCServo_lib sources from the linked binary —
+  i.e. the firmware binary is MIT-licensed end-to-end. Equivalence
+  with SCSCL was validated on M5Stack CoreS3 + SCS0009 x2 in #82.
+
+  **Migration note for users with an existing `firmware/sdkconfig`:**
+  ESP-IDF persists Kconfig choices into `firmware/sdkconfig`, and a
+  Kconfig `default` change does not retroactively rewrite that file.
+  This release works around that by enforcing the choice at the
+  `release.py` layer (`sdkconfig_append`); rebuilding via
+  `release.py stackchan` produces an MIT default binary even on a
+  workspace that previously selected SCSCL. If you build by directly
+  invoking `idf.py` instead and have an existing `sdkconfig`, you may
+  need to run `idf.py menuconfig` (or delete `firmware/sdkconfig`) to
+  pick up the new default.
+
+  **Opting back into the GPL fallback:** the GPL-3.0 SCServo_lib
+  sources remain in-tree. To build against them, add
+  `CONFIG_STACKCHAN_SERVO_SCSCL=y` to `firmware/sdkconfig.defaults.local`
+  (which `release.py` merges in *after* `sdkconfig_append`, so it wins
+  over the FEETECH default).
+
+  Phase B (removal of the SCServo_lib sources, fully MIT-only
+  firmware) is gated on a multi-week observation period in #79 closing
+  without regressions. Please open an issue referencing #79 if you
+  observe any regression after rebuilding so the migration can be held
+  or rolled back. Refs #79.
+- `firmware/scripts/release.py` no longer **skips** the build when
+  `releases/v{PROJECT_VER}_{board}.zip` already exists. `PROJECT_VER`
+  is pinned to the upstream xiaozhi-esp32 firmware version
+  (currently `2.2.6`) and is not bumped per stackchan-mcp change, so
+  the previous skip behaviour silently let an old artifact survive a
+  rebuild invocation — including across license-sensitive
+  configuration changes such as the FEETECH/SCSCL servo driver swap
+  above. Existing `releases/v2.2.6_<board>.zip` files are now
+  automatically replaced by a fresh build (`zip_bin` already unlinks
+  before writing). Manual `rm -rf firmware/releases/v2.2.6_*.zip`
+  before invoking `release.py` is no longer required. Refs #79.
 - Add opt-in MIT-licensed servo driver alternative
   (`firmware/components/feetech_scs/`, vendored from
   [necobit/feetech_scs_esp_idf](https://github.com/necobit/feetech_scs_esp_idf)
   at commit `38a91984`). Build with Kconfig
   `CONFIG_STACKCHAN_SERVO_FEETECH=y` to exclude the GPL-3.0 SCServo_lib
-  sources and produce a fully MIT-licensed firmware binary. The default
-  keeps the existing GPL-3.0 SCServo_lib driver for stability until
-  real-device validation completes. Refs #79.
+  sources and produce a fully MIT-licensed firmware binary. (Promoted
+  to default in the entry above.) Refs #79.
 - **Hardware safety**: clamp `set_head_angles` pitch parameter to a
   hardware-safe sub-range (`0..+30°`) to prevent driving the SCS0009 servo
   into its mechanical end-stop. M5Stack docs explicitly warn that operating
