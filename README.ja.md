@@ -61,6 +61,7 @@
 | `set_all_leds(r, g, b)` | ベース部の RGB LED 12 個すべてを同じ色に設定 | ✅ |
 | `set_leds(colors)` | `[[r,g,b], ...]` 配列で先頭 N 個を一括設定（I2C 1 回のバースト送信、アニメーション等向け）。指定外の LED は前の色を保持 | ✅ |
 | `clear_leds` | ベース部の RGB LED 12 個すべて消灯 | ✅ |
+| `say(text, voice?, speaker_id?, reference_audio?)` | gateway 側 TTS でデバイススピーカーから喋らせる。デフォルトエンジンは **VOICEVOX**（別 HTTP サービスとして起動 — [TTS セットアップ](#4-オプション-tts-セットアップ-voicevox) 参照）。`[tts]` extras が必要 | ✅ |
 
 詳細スキーマは `gateway/README.md` 参照。
 
@@ -264,6 +265,61 @@ callback 設定を [`docs/remote-access.md`](docs/remote-access.md) にまとめ
 ```
 
 詳細は `gateway/README.md` 参照。
+
+### 4. オプション: TTS セットアップ (VOICEVOX)
+
+デバイスを喋らせるには、`[tts]` extras をインストールして
+[VOICEVOX](https://voicevox.hiroshiba.jp/) エンジンを gateway と
+並行起動します。VOICEVOX は別 HTTP プロセスとして動くので、
+LGPL-3.0 ライセンスはそのプロセスの中だけで完結し、MIT
+ライセンスの gateway は HTTP リクエストを発行するだけです。
+
+#### エンジン起動 (Docker)
+
+```bash
+docker run --rm -p '127.0.0.1:50021:50021' \
+  voicevox/voicevox_engine:cpu-ubuntu20.04-latest
+```
+
+デフォルトポートは 50021。短い発話なら CPU 版で十分。GPU 版も
+upstream に公開されています。
+
+#### TTS extras のインストール
+
+```bash
+pip install 'stackchan-mcp[tts]'
+# または等価:
+pip install 'stackchan-mcp[tts-voicevox]'
+```
+
+これで `httpx` (HTTP クライアント) と `opuslib` (Opus
+エンコーダバインディング) が入ります。エンコーダはシステム側に
+`libopus` が必要 — macOS なら `brew install opus`、Debian/Ubuntu
+なら `sudo apt-get install libopus0`。
+
+#### 設定 (任意)
+
+| 環境変数 | デフォルト | 補足 |
+|---|---|---|
+| `STACKCHAN_VOICEVOX_URL` | `http://127.0.0.1:50021` | VOICEVOX エンジンの URL |
+| `STACKCHAN_VOICEVOX_DEFAULT_SPEAKER` | `3` | デフォルト話者 ID（ずんだもん ノーマル）。他の話者は [VOICEVOX 公式](https://github.com/VOICEVOX/voicevox_engine) 参照 |
+
+#### 試す
+
+MCP クライアントから:
+
+```
+say(text="こんにちは、わたしはスタックチャンです")
+```
+
+gateway は VOICEVOX に POST → 返ってきた WAV をデコード →
+16 kHz mono にリサンプル → 60 ms の Opus フレームにエンコード →
+既存の WebSocket バイナリチャネルでデバイスへ送信、という流れで
+喋らせます。デバイスは受け取ったフレームを既存の音声デコーダで
+再生するだけなので、**ファームウェア側の変更は不要**です。
+TTS フレームワークはエンジン非依存なので、Irodori-TTS による
+ボイスクローン等、他のエンジンも `say` API を変えずに後から
+追加できます。
 
 ## アバター画像について
 

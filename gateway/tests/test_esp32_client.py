@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 import websockets
 
-from stackchan_mcp.esp32_client import ESP32Manager
+from stackchan_mcp.esp32_client import ESP32Connection, ESP32Manager
 
 
 @pytest_asyncio.fixture
@@ -221,6 +221,58 @@ async def test_auth_rejection(manager):
                 await ws.recv()
     finally:
         del os.environ["STACKCHAN_TOKEN"]
+
+
+# ---------------------------------------------------------------------------
+# send_audio_frame (TTS pipeline egress, Issue #70 PR2)
+# ---------------------------------------------------------------------------
+
+
+class _FakeWebSocket:
+    """Minimal stand-in for websockets.ServerConnection used in unit tests."""
+
+    def __init__(self) -> None:
+        self.sent: list[bytes | str] = []
+
+    async def send(self, data):
+        self.sent.append(data)
+
+
+@pytest.mark.asyncio
+async def test_connection_send_audio_frame_sends_binary():
+    """ESP32Connection.send_audio_frame writes the bytes to the underlying WS."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-1")  # type: ignore[arg-type]
+
+    await conn.send_audio_frame(b"opus_payload_bytes")
+
+    assert ws.sent == [b"opus_payload_bytes"]
+
+
+@pytest.mark.asyncio
+async def test_connection_send_audio_frame_raises_after_disconnect():
+    """A disconnected connection refuses to send rather than silently dropping."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-1")  # type: ignore[arg-type]
+
+    conn.disconnect()
+
+    with pytest.raises(ConnectionError):
+        await conn.send_audio_frame(b"opus_payload_bytes")
+    assert ws.sent == []
+
+
+@pytest.mark.asyncio
+async def test_manager_send_audio_frame_no_device():
+    """ESP32Manager.send_audio_frame raises when no device is attached.
+
+    The orchestrator turns this into a clean MCP error JSON; without
+    this guard the call would AttributeError on a None connection.
+    """
+    mgr = ESP32Manager()
+
+    with pytest.raises(ConnectionError):
+        await mgr.send_audio_frame(b"opus_payload_bytes")
 
 
 # ---------------------------------------------------------------------------

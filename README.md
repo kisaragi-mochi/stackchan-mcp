@@ -61,6 +61,7 @@ This repository is a monorepo.
 | `set_all_leds(r, g, b)` | Set all 12 base RGB LEDs to the same color | ✅ |
 | `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array in a single I2C burst (use this for animations / multi-color patterns); trailing LEDs keep their previous color | ✅ |
 | `clear_leds` | Turn all 12 base RGB LEDs off | ✅ |
+| `say(text, voice?, speaker_id?, reference_audio?)` | Speak text on the device speaker via gateway-side TTS. Default engine: **VOICEVOX** (runs as a separate HTTP service — see [TTS setup](#optional-tts-setup-voicevox)). Requires the `[tts]` extra. | ✅ |
 
 See `gateway/README.md` for full schemas.
 
@@ -314,6 +315,61 @@ If you installed from source via `uv`:
 ```
 
 See `gateway/README.md` for details.
+
+### 4. Optional: TTS setup (VOICEVOX)
+
+To make the device speak, install the `[tts]` extra and run a
+[VOICEVOX](https://voicevox.hiroshiba.jp/) engine alongside the
+gateway. VOICEVOX runs as a separate HTTP service, so its LGPL-3.0
+license stays scoped to that process — the MIT-licensed gateway only
+issues HTTP requests against it.
+
+#### Run the engine (Docker)
+
+```bash
+docker run --rm -p '127.0.0.1:50021:50021' \
+  voicevox/voicevox_engine:cpu-ubuntu20.04-latest
+```
+
+The engine listens on port 50021 by default. The CPU image is fine
+for short sentences; GPU images are also published upstream.
+
+#### Install the TTS extra
+
+```bash
+pip install 'stackchan-mcp[tts]'
+# or, equivalently:
+pip install 'stackchan-mcp[tts-voicevox]'
+```
+
+This pulls in `httpx` (HTTP client) and `opuslib` (Opus encoder
+bindings). The encoder needs `libopus` on the system —
+`brew install opus` on macOS, `sudo apt-get install libopus0` on
+Debian/Ubuntu.
+
+#### Configure (optional)
+
+| Environment variable | Default | Notes |
+|---|---|---|
+| `STACKCHAN_VOICEVOX_URL` | `http://127.0.0.1:50021` | VOICEVOX engine URL. |
+| `STACKCHAN_VOICEVOX_DEFAULT_SPEAKER` | `3` | Default speaker ID (Zundamon normal). See the [VOICEVOX speaker list](https://github.com/VOICEVOX/voicevox_engine) for other options. |
+
+#### Try it
+
+From an MCP client:
+
+```
+say(text="こんにちは、わたしはスタックチャンです")
+```
+
+The gateway POSTs to VOICEVOX, decodes the returned WAV, resamples to
+16 kHz mono, encodes Opus frames (60 ms each), and pushes them as
+WebSocket binary frames to the device — which decodes and plays them
+through its speaker. **No firmware changes are required**: the
+existing audio decoder pipeline already accepts these frames. The
+TTS framework is engine-agnostic, so additional engines (Irodori-TTS
+voice cloning is on the roadmap) can be added without changing the
+`say` API.
 
 ## About the avatar images
 

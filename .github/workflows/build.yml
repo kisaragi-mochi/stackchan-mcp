@@ -54,15 +54,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install libopus
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libopus0 libopus-dev
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v3
         with:
           version: latest
           enable-cache: true
 
-      - name: Install gateway dependencies
+      - name: Install gateway dependencies (with TTS extras)
         working-directory: gateway
-        run: uv sync --frozen
+        run: uv sync --frozen --extra tts
 
       - name: Run ruff
         working-directory: gateway

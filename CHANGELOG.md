@@ -17,6 +17,24 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Added
 
+- Phase 4 TTS — gateway-side `say(text, voice?, speaker_id?,
+  reference_audio?)` MCP tool. The gateway synthesises speech via a
+  registered TTS engine, encodes the result to Opus (16 kHz mono,
+  60 ms frames), and pushes the frames to the device over the existing
+  WebSocket binary channel. **No firmware changes are required**: the
+  device's WebSocket protocol already accepts Opus payloads as binary
+  frames. The default engine is **VOICEVOX**, which runs as a separate
+  HTTP service (the official `voicevox/voicevox_engine` Docker image is
+  the recommended setup), so VOICEVOX's LGPL-3.0 license stays scoped
+  to the engine process and does not affect the gateway. Install with
+  `pip install stackchan-mcp[tts]` (adds `httpx` and `opuslib`); the
+  `[tts-voicevox]` extra is provided as an intent-declaring alias.
+  Configure with `STACKCHAN_VOICEVOX_URL` (default
+  `http://127.0.0.1:50021`) and `STACKCHAN_VOICEVOX_DEFAULT_SPEAKER`
+  (default `3`, Zundamon normal). The framework is engine-agnostic
+  (`tts.TTSEngine` ABC + `tts.EngineRegistry`), so additional engines —
+  e.g. Irodori-TTS for zero-shot voice cloning — can be added in
+  follow-up PRs without touching the orchestration pipeline. Refs #70.
 - New MCP tools to drive the 12× WS2812C RGB LEDs on the StackChan
   base: `set_led(index, r, g, b)`, `set_all_leds(r, g, b)`,
   `set_leds(colors)` (batch, single I2C burst for animations), and

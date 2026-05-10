@@ -754,6 +754,12 @@ wheels = [
 ]
 
 [[package]]
+name = "opuslib"
+version = "3.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/55/826befabb29fd3902bad6d6d7308790894c7ad4d73f051728a0c53d37cd7/opuslib-3.0.1.tar.gz", hash = "sha256:2cb045e5b03e7fc50dfefe431e3404dddddbd8f5961c10c51e32dfb69a044c97", size = 8550, upload-time = "2018-01-16T06:04:42.184Z" }
+
+[[package]]
 name = "packaging"
 version = "26.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1323,6 +1329,16 @@ dependencies = [
     { name = "websockets" },
 ]
 
+[package.optional-dependencies]
+tts = [
+    { name = "httpx" },
+    { name = "opuslib" },
+]
+tts-voicevox = [
+    { name = "httpx" },
+    { name = "opuslib" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -1333,11 +1349,15 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3" },
+    { name = "httpx", marker = "extra == 'tts'", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.0" },
+    { name = "opuslib", marker = "extra == 'tts'", specifier = ">=3" },
     { name = "pydantic", specifier = ">=2" },
     { name = "python-dotenv" },
+    { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-voicevox'" },
     { name = "websockets", specifier = ">=12" },
 ]
+provides-extras = ["tts", "tts-voicevox"]
 
 [package.metadata.requires-dev]
 dev = [

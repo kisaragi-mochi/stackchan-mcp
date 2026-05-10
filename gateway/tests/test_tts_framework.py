@@ -126,12 +126,17 @@ async def test_synthesize_and_send_unregistered_voice_raises():
 
 
 @pytest.mark.asyncio
-async def test_synthesize_and_send_registered_voice_raises_pipeline_not_wired():
-    """Even with an engine present, PR1 stops short of running the pipeline."""
+async def test_synthesize_and_send_requires_gateway():
+    """Validation passes but pipeline refuses without a gateway argument.
+
+    Surfacing a clear RuntimeError beats silently synthesising PCM that
+    has nowhere to go. Validation tests can still exercise the
+    argument-shape surface without spinning up a Gateway.
+    """
     reg = EngineRegistry()
     reg.register(_FakeEngine(name="voicevox"))
 
-    with pytest.raises(NotImplementedError, match="pipeline"):
+    with pytest.raises(RuntimeError, match="gateway"):
         await synthesize_and_send({"text": "hello"}, registry=reg)
 
 

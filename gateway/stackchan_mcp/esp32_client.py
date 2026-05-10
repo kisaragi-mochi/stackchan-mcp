@@ -142,6 +142,18 @@ class ESP32Connection:
             method = payload.get("method", "")
             logger.info("ESP32 notification: %s", method)
 
+    async def send_audio_frame(self, opus_frame: bytes) -> None:
+        """Send a single Opus frame to the ESP32 as a WebSocket binary frame.
+
+        The device's ``OnData`` handler (firmware/main/protocols/
+        websocket_protocol.cc) treats every binary frame as an Opus
+        audio payload to feed into its decoder, so this method is the
+        TTS pipeline's egress point.
+        """
+        if not self._connected:
+            raise ConnectionError("ESP32 not connected")
+        await self._ws.send(opus_frame)
+
     def disconnect(self) -> None:
         """Mark connection as disconnected."""
         self._connected = False
@@ -322,6 +334,18 @@ class ESP32Manager:
         if not self._connection.initialized:
             return None, {"code": -32000, "message": "ESP32 not initialized"}
         return await self._connection.call_tool(name, arguments)
+
+    async def send_audio_frame(self, opus_frame: bytes) -> None:
+        """Push a single Opus frame to the connected device.
+
+        Used by the TTS pipeline to deliver synthesised audio. Raises
+        :class:`ConnectionError` if no device is currently attached so
+        the orchestrator can surface a clean error to the MCP client
+        instead of silently dropping audio.
+        """
+        if not self._connection or not self._connection.connected:
+            raise ConnectionError("No ESP32 device connected")
+        await self._connection.send_audio_frame(opus_frame)
 
     def get_status(self) -> dict[str, Any]:
         """Get current connection status."""

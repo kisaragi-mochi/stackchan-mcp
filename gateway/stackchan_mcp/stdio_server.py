@@ -422,20 +422,15 @@ def create_server() -> Server:
             return [TextContent(type="text", text=json.dumps(status, indent=2))]
 
         if name == "say":
-            # TTS runs on the gateway side. Engine concrete implementations
-            # land in follow-up PRs of Issue #70; until then the orchestrator
-            # raises NotImplementedError, which we surface as a clean error
-            # rather than a stack trace.
+            # TTS runs on the gateway side. The orchestrator validates
+            # arguments, looks up an engine, synthesises PCM, encodes
+            # Opus, and pushes frames through the WebSocket binary
+            # channel that the device's audio decoder consumes. Errors
+            # are surfaced as clean MCP error JSON rather than letting
+            # tracebacks leak into the agent's transcript.
             try:
-                result = await synthesize_and_send(arguments)
-            except ValueError as exc:
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps({"error": str(exc)}),
-                    )
-                ]
-            except NotImplementedError as exc:
+                result = await synthesize_and_send(arguments, gateway=gw)
+            except (ValueError, NotImplementedError, RuntimeError) as exc:
                 return [
                     TextContent(
                         type="text",
