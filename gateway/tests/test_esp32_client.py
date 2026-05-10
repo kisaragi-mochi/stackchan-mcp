@@ -314,6 +314,54 @@ async def test_manager_send_tts_state_no_device():
         await mgr.send_tts_state("start")
 
 
+class _FailingWebSocket:
+    """WebSocket that raises a websockets-specific error on send()."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.send_calls = 0
+
+    async def send(self, data):
+        self.send_calls += 1
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_send_audio_frame_translates_websockets_close_to_connection_error():
+    """websockets.ConnectionClosed becomes ConnectionError + marks dead.
+
+    Without translation the websockets-specific exception would
+    bypass the orchestrator's ``except ConnectionError`` filter and
+    leak as a stack trace through the MCP transport.
+    """
+    import websockets.exceptions
+
+    closed = websockets.exceptions.ConnectionClosed(rcvd=None, sent=None)
+    ws = _FailingWebSocket(closed)
+    conn = ESP32Connection(ws, session_id="session-1")  # type: ignore[arg-type]
+
+    with pytest.raises(ConnectionError, match="WebSocket send"):
+        await conn.send_audio_frame(b"opus")
+
+    # After the translated failure, the connection is marked dead so
+    # subsequent sends fail fast without re-touching the dead socket.
+    assert not conn.connected
+    with pytest.raises(ConnectionError):
+        await conn.send_audio_frame(b"more")
+    assert ws.send_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_send_tts_state_translates_oserror_to_connection_error():
+    """OSError on send (e.g. broken pipe) is translated to ConnectionError."""
+    ws = _FailingWebSocket(OSError("broken pipe"))
+    conn = ESP32Connection(ws, session_id="session-1")  # type: ignore[arg-type]
+
+    with pytest.raises(ConnectionError, match="WebSocket send"):
+        await conn.send_tts_state("start")
+    assert not conn.connected
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

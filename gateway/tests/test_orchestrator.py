@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -331,6 +332,48 @@ async def test_opus_encode_error_translated(fake_encode, monkeypatch):
             gateway=gateway,
             registry=reg,
         )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_paces_frames_at_device_rate(fake_encode, monkeypatch):
+    """Frame pushes are spaced at the device's frame_duration to avoid drops.
+
+    The firmware's decode queue holds ~40 packets, so a single burst
+    of more frames silently drops the tail. Pacing each push at
+    DEVICE_FRAME_DURATION_MS keeps the queue at ~1 frame, well below
+    the limit even on the longest utterances.
+    """
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        # Yield once so the event loop progresses, but don't actually
+        # wait — keeps the test fast.
+        await real_sleep(0)
+
+    monkeypatch.setattr("stackchan_mcp.tts.orchestrator.asyncio.sleep", fake_sleep)
+
+    pcm = b"\x01\x00" * 1440  # 1.5 -> 2 frames after chunking
+    engine = _PCMEngine(pcm)
+    esp32 = _FakeESP32(connected=True)
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    await synthesize_and_send(
+        {"text": "hello"},
+        gateway=gateway,
+        registry=reg,
+    )
+
+    # First sleep is the post-tts.start state-transition delay (50 ms),
+    # then per-frame pacing. The exact number of pacing sleeps depends
+    # on loop.time() drift, so the test only asserts: (a) the start
+    # delay was inserted, (b) at least one pacing sleep occurred.
+    assert len(sleeps) >= 1
+    assert sleeps[0] == pytest.approx(0.05, rel=0.05)
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ synthesising audio with no destination.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,14 @@ from .base import EngineRegistry, get_registry
 
 if TYPE_CHECKING:
     from ..gateway import Gateway
+
+#: Delay between the ``tts.start`` notification and the first audio
+#: frame, in seconds. Firmware dispatches the state transition through
+#: ``Schedule()`` (queued onto the main task), so the first frame can
+#: race the ``kDeviceStateSpeaking`` transition and be discarded by
+#: ``OnIncomingAudio``. 50 ms is well above typical scheduling latency
+#: but well below human-perceptible delay.
+TTS_START_TRANSITION_DELAY_S = 0.05
 
 logger = logging.getLogger(__name__)
 
@@ -167,10 +176,28 @@ async def synthesize_and_send(
             f"Device disconnected before TTS start notification: {exc}"
         ) from exc
 
+    # Wait for the firmware's state machine to land in
+    # kDeviceStateSpeaking before sending the first frame.
+    await asyncio.sleep(TTS_START_TRANSITION_DELAY_S)
+
+    # Frame pacing: the device's decode queue holds at most ~40 frames
+    # (firmware MAX_DECODE_PACKETS_IN_QUEUE = 2400 / OPUS_FRAME_DURATION_MS),
+    # and pushes that exceed it are dropped silently. Send each frame
+    # at roughly the device's consumption rate (one frame per
+    # frame_duration_ms) so a long utterance never overflows. We let
+    # the loop drift by a single interval if the network is slow —
+    # the wall clock is the reference, not the loop iteration count.
+    frame_period_s = DEVICE_FRAME_DURATION_MS / 1000.0
+    loop = asyncio.get_event_loop()
+
     sent = 0
     push_error: ConnectionError | None = None
     try:
+        next_send_time = loop.time()
         for frame in opus_frames:
+            now = loop.time()
+            if now < next_send_time:
+                await asyncio.sleep(next_send_time - now)
             try:
                 await gateway.esp32.send_audio_frame(frame)
             except ConnectionError as exc:
@@ -181,6 +208,7 @@ async def synthesize_and_send(
                 push_error = exc
                 break
             sent += 1
+            next_send_time += frame_period_s
     finally:
         try:
             await gateway.esp32.send_tts_state("stop")

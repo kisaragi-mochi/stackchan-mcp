@@ -14,6 +14,7 @@ import uuid
 from typing import Any
 
 import websockets
+import websockets.exceptions
 from websockets.asyncio.server import ServerConnection
 
 from .protocol import HelloResponse, make_mcp_message, parse_jsonrpc_response
@@ -142,6 +143,29 @@ class ESP32Connection:
             method = payload.get("method", "")
             logger.info("ESP32 notification: %s", method)
 
+    async def _ws_send(self, payload: bytes | str) -> None:
+        """Send a payload, translating websockets errors to ConnectionError.
+
+        The ``websockets`` library raises its own exception hierarchy
+        (``ConnectionClosed`` and friends), which is *not* a subclass
+        of the built-in :class:`ConnectionError`. Without translation
+        the orchestrator's ``except ConnectionError`` filter — and the
+        MCP handler's ``except RuntimeError`` filter — would let those
+        errors leak as raw tracebacks into the MCP transport, breaking
+        the say() tool's clean error JSON contract on mid-stream
+        disconnect.
+        """
+        try:
+            await self._ws.send(payload)
+        except (
+            websockets.exceptions.ConnectionClosed,
+            OSError,
+        ) as exc:
+            # Mark the connection dead so subsequent calls fail fast
+            # rather than each one re-discovering the broken socket.
+            self.disconnect()
+            raise ConnectionError(f"WebSocket send failed: {exc}") from exc
+
     async def send_audio_frame(self, opus_frame: bytes) -> None:
         """Send a single Opus frame to the ESP32 as a WebSocket binary frame.
 
@@ -152,7 +176,7 @@ class ESP32Connection:
         """
         if not self._connected:
             raise ConnectionError("ESP32 not connected")
-        await self._ws.send(opus_frame)
+        await self._ws_send(opus_frame)
 
     async def send_tts_state(self, state: str) -> None:
         """Send a TTS state notification (``start`` / ``stop`` / ...).
@@ -173,7 +197,7 @@ class ESP32Connection:
             "type": "tts",
             "state": state,
         }
-        await self._ws.send(json.dumps(message))
+        await self._ws_send(json.dumps(message))
 
     def disconnect(self) -> None:
         """Mark connection as disconnected."""
