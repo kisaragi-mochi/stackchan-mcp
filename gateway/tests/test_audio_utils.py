@@ -12,6 +12,7 @@ from stackchan_mcp.tts.audio_utils import (
     DEVICE_SAMPLE_RATE,
     SAMPLES_PER_FRAME,
     chunk_pcm_into_frames,
+    compute_pcm_frame_rms,
     encode_opus_frames,
     resample_pcm16_linear,
     wav_to_pcm16_mono,
@@ -220,3 +221,61 @@ def test_encode_opus_frames_produces_frames_when_libopus_available():
     assert len(frames) == 1
     assert isinstance(frames[0], bytes)
     assert len(frames[0]) > 0
+
+
+# ---------------------------------------------------------------------------
+# RMS amplitude (Issue #85 — TTS lip-sync envelope)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_pcm_frame_rms_silence_returns_zero():
+    """A frame of all zeros has RMS exactly 0."""
+    silence = b"\x00\x00" * 960
+    assert compute_pcm_frame_rms(silence) == 0.0
+
+
+def test_compute_pcm_frame_rms_empty_returns_zero():
+    """An empty buffer yields 0 rather than raising on division-by-zero."""
+    assert compute_pcm_frame_rms(b"") == 0.0
+
+
+def test_compute_pcm_frame_rms_full_scale_square_wave_near_one():
+    """A full-scale ±32767 square wave hits the top of the [0,1] range."""
+    n = 960
+    samples = array.array(
+        "h", [32767 if i % 2 == 0 else -32767 for i in range(n)]
+    )
+    rms = compute_pcm_frame_rms(samples.tobytes())
+    # Theoretical RMS of a full-scale square wave is exactly 32767/32768
+    # (one tick below 1.0 because 32767 is the positive peak of signed
+    # 16-bit, but the divisor is 32768 to keep the result strictly in
+    # [0, 1] for symmetric ±32768 inputs the encoder may produce).
+    assert rms == pytest.approx(32767 / 32768, rel=1e-4)
+    assert 0.0 <= rms <= 1.0
+
+
+def test_compute_pcm_frame_rms_known_amplitude():
+    """A square wave at amplitude A yields RMS A/32768 within float error."""
+    n = 480  # short frame, doesn't have to match SAMPLES_PER_FRAME
+    samples = array.array(
+        "h", [10000 if i % 2 == 0 else -10000 for i in range(n)]
+    )
+    rms = compute_pcm_frame_rms(samples.tobytes())
+    assert rms == pytest.approx(10000 / 32768, rel=1e-4)
+
+
+def test_compute_pcm_frame_rms_drops_odd_trailing_byte():
+    """An unaligned trailing byte is dropped instead of raising.
+
+    Production callers always feed aligned PCM (chunk_pcm_into_frames
+    zero-pads), but a forgiving helper avoids hard-crashing the entire
+    TTS pipeline on a one-byte slicing bug upstream.
+    """
+    n = 480
+    samples = array.array("h", [5000] * n)
+    aligned = samples.tobytes()
+    # Append a stray byte; helper should ignore it and produce the
+    # same RMS as the aligned input.
+    rms_aligned = compute_pcm_frame_rms(aligned)
+    rms_unaligned = compute_pcm_frame_rms(aligned + b"\xff")
+    assert rms_aligned == pytest.approx(rms_unaligned, rel=1e-9)

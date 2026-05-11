@@ -15,25 +15,55 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Gateway
+
+- **TTS audio amplitude envelope sidecar (Issue #85)**: the
+  orchestrator now emits one
+  `{"type":"tts","state":"envelope","frame_id":N,"rms":...}` JSON
+  message per Opus audio frame, carrying the per-frame RMS amplitude
+  (normalised to `[0.0, 1.0]`) computed from the same PCM that fed
+  the encoder. Firmware on the StackChan board (see Firmware section)
+  consumes this to drive amplitude-based mouth-shape selection during
+  lip-sync; older firmware ignores the message and falls back to the
+  fixed lip-sync cycle introduced in the previous release. Each
+  envelope is awaited inline before the matching audio frame so the
+  WebSocket write order is guaranteed at the connection layer (a new
+  per-connection `_send_lock` on `ESP32Connection` serialises every
+  underlying `websockets.send()`). To keep that ordering from
+  inflating the 60 ms audio pacing budget, the envelope path uses a
+  bounded `lock_acquire_timeout=30 ms` — if another sender already
+  holds the send lock past that window, the envelope is dropped
+  silently and the audio frame proceeds on schedule, with the
+  firmware fallback cycle covering the missed update. The bound is
+  applied at the *lock acquire* layer rather than around `ws.send()`
+  itself because the `websockets` library documents cancelling an
+  in-flight send as unsafe. Refs #76, #84.
+
 ### Firmware
 
-- **TTS lip-sync (state-driven)**: drive avatar mouth animation while
-  the gateway is speaking. The firmware now reacts to the
-  `tts.start` / `tts.stop` JSON notifications introduced in #75 (Issue
-  #70 PR2) and cycles the mouth shape through `closed → half → open →
-  half` on a fixed 150 ms cadence for the lifetime of each utterance,
-  snapping back to `closed` at stop. Autonomous blink is paused while
-  active (same Phase 2 trade-off as the existing `set_mouth_sequence`
-  task: a blink ending would otherwise restore the full-face image
-  and overwrite the mouth overlay) and restored at stop based on
-  `blink_desired_` so a `set_blink` issued mid-playback is honoured.
-  Coexists with user-issued `set_mouth` / `set_mouth_sequence` calls
-  by yielding the current frame when `mouth_seq_active_` is true; the
-  user-issued sequence wins until it completes, then lip-sync resumes
-  on the next tick. Wired through a new no-op `Board::OnTtsStart` /
-  `OnTtsStop` hook so non-stackchan boards are unaffected. The (B)
-  audio-envelope-driven follow-up proposed in the issue will be
-  tracked separately. Closes #76. Refs #70, #75.
+- **TTS lip-sync now envelope-driven (Issue #85), with the previous
+  state cycle as fallback**: the `closed → half → open → half`
+  rotation introduced for the (A) state-driven path in the previous
+  release is replaced — at the per-step shape selection layer only —
+  by amplitude-based mouth shape selection that reads the per-frame
+  RMS envelope sent by the gateway as
+  `{"type":"tts","state":"envelope","frame_id":N,"rms":...}`. The
+  step cadence is reduced from 150 ms to **60 ms** so the firmware
+  samples envelopes at the same rate the gateway emits them
+  (`audio_utils.DEVICE_FRAME_DURATION_MS`); plosive / onset peaks
+  that would otherwise be overwritten between consecutive 150 ms
+  steps now reach `SetMouthShape()`. When the gateway has not sent
+  an envelope within the last 200 ms (older release, network gap,
+  or a non-envelope-capable engine), the step callback falls back
+  to the fixed cycle so the mouth still moves with no protocol
+  regression. The start/stop, blink-yield, mouth-sequence-yield, and
+  `Board::OnTtsStart` / `OnTtsStop` machinery from the previous
+  release is unchanged; a new no-op `Board::OnTtsEnvelope(frame_id,
+  rms)` hook is added for non-avatar boards. Default amplitude
+  thresholds are `0.05` (low → closed) and `0.15` (high → open),
+  tuned against VOICEVOX (Zundamon) at the device's default volume;
+  re-tune in firmware (and re-flash) when adding engines with a
+  different dynamic range. Closes #85. Refs #76, #84.
 - **Default servo driver switched to MIT FeetechScs** (Phase A of the
   GPL → MIT firmware migration tracked in #79). The opt-in MIT driver
   added in #82 is now the build default for the canonical build path

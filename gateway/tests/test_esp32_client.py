@@ -314,6 +314,100 @@ async def test_manager_send_tts_state_no_device():
         await mgr.send_tts_state("start")
 
 
+# ---------------------------------------------------------------------------
+# send_tts_envelope (Issue #85 — per-frame audio amplitude envelope)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connection_send_tts_envelope_sends_json():
+    """ESP32Connection.send_tts_envelope writes the expected JSON payload.
+
+    The firmware reads ``frame_id`` and ``rms`` out of this message
+    and feeds them to ``Board::OnTtsEnvelope``; both keys must be
+    present and typed as numbers (``frame_id`` int, ``rms`` float)
+    or the firmware-side ``cJSON_IsNumber`` guard drops the message.
+    """
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-env")  # type: ignore[arg-type]
+
+    sent_ok = await conn.send_tts_envelope(7, 0.123)
+
+    assert sent_ok is True
+    assert len(ws.sent) == 1
+    payload = json.loads(ws.sent[0])
+    assert payload == {
+        "session_id": "session-env",
+        "type": "tts",
+        "state": "envelope",
+        "frame_id": 7,
+        "rms": 0.123,
+    }
+
+
+@pytest.mark.asyncio
+async def test_connection_send_tts_envelope_returns_false_on_lock_timeout():
+    """When the send lock can't be acquired in time, envelope is dropped silently.
+
+    Issue #85: the orchestrator passes ``lock_acquire_timeout`` to
+    bound how long the per-frame envelope can hold up the next
+    audio frame's pacing budget. When another sender holds the
+    connection's send lock past that window, ``send_tts_envelope``
+    must return ``False`` without ever calling ``ws.send()`` —
+    cancelling an in-flight ``ws.send()`` is documented as unsafe
+    by the ``websockets`` library, so the bound has to live at the
+    *acquire* layer rather than around the send itself.
+    """
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-env")  # type: ignore[arg-type]
+
+    # Hold the send lock from another task so the envelope's
+    # acquire times out cleanly.
+    holder_release = asyncio.Event()
+
+    async def lock_holder():
+        async with conn._send_lock:
+            await holder_release.wait()
+
+    holder_task = asyncio.create_task(lock_holder())
+    # Yield once so the holder grabs the lock before we try.
+    await asyncio.sleep(0)
+
+    try:
+        sent_ok = await conn.send_tts_envelope(
+            0, 0.5, lock_acquire_timeout=0.005
+        )
+        assert sent_ok is False
+        # Nothing was written to the socket — the JSON payload was
+        # not even rendered, let alone enqueued.
+        assert ws.sent == []
+    finally:
+        holder_release.set()
+        await holder_task
+
+
+@pytest.mark.asyncio
+async def test_connection_send_tts_envelope_raises_after_disconnect():
+    """A disconnected connection refuses to send envelope notifications."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-env")  # type: ignore[arg-type]
+
+    conn.disconnect()
+
+    with pytest.raises(ConnectionError):
+        await conn.send_tts_envelope(0, 0.0)
+    assert ws.sent == []
+
+
+@pytest.mark.asyncio
+async def test_manager_send_tts_envelope_no_device():
+    """ESP32Manager.send_tts_envelope raises when no device is attached."""
+    mgr = ESP32Manager()
+
+    with pytest.raises(ConnectionError):
+        await mgr.send_tts_envelope(0, 0.0)
+
+
 class _FailingWebSocket:
     """WebSocket that raises a websockets-specific error on send()."""
 

@@ -87,6 +87,19 @@ public:
     // override these to drive lip-sync animation while TTS audio is playing.
     virtual void OnTtsStart() {}
     virtual void OnTtsStop() {}
+
+    // Phase 4 audio (Issue #85): per-frame audio envelope hook. The gateway
+    // computes the RMS of each PCM frame before Opus encoding and sends a
+    // {"type":"tts","state":"envelope","frame_id":N,"rms":...} message
+    // immediately before each audio frame. Boards with an avatar override
+    // this to drive amplitude-based mouth shape selection. ``rms`` is
+    // normalised to the [0.0, 1.0] range (signed 16-bit sample magnitude
+    // divided by 32768). Default no-op so non-avatar boards and older
+    // gateways (which do not emit the message) both work unchanged.
+    virtual void OnTtsEnvelope(uint32_t frame_id, float rms) {
+        (void)frame_id;
+        (void)rms;
+    }
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

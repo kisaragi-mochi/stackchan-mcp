@@ -305,6 +305,19 @@ async def test_say_returns_error_json_when_device_disconnects_mid_stream(
         async def send_tts_state(self, state):  # noqa: ARG002 - test stub
             return None
 
+        async def send_tts_envelope(  # noqa: ARG002
+            self,
+            frame_id,
+            rms,
+            *,
+            lock_acquire_timeout=None,
+        ):
+            # Issue #85: orchestrator emits one envelope per audio
+            # frame; the disconnect path is on send_audio_frame, not
+            # here, so a no-op is sufficient for this test. Returning
+            # True matches the real method's "envelope sent" signal.
+            return True
+
     class FakeGateway:
         esp32 = FailingESP32()
 

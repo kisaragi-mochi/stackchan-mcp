@@ -45,6 +45,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <cJSON.h>
 #include <lvgl.h>
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -554,10 +555,49 @@ private:
         OPEN,
         HALF_FALLING,  // open -> closed transition
     };
-    static constexpr int TTS_LIPSYNC_STEP_MS = 150;
+    // Step cadence when an envelope is fresh: aligned with the
+    // gateway's 60 ms Opus frame period
+    // (see audio_utils.DEVICE_FRAME_DURATION_MS) so each per-frame
+    // envelope reaches SetMouthShape() instead of being overwritten by
+    // the next frame between samples. Plosive / onset peaks survive
+    // the firmware-side per-frame map at this rate.
+    static constexpr int TTS_LIPSYNC_STEP_MS = 60;
+    // Fallback step cadence when no envelope has arrived recently.
+    // Pinned to the previous (pre-Issue-#85) value so an older gateway
+    // (no envelope channel), or a network gap mid-utterance, sees the
+    // same CLOSED -> HALF -> OPEN -> HALF cycle period it always did
+    // (~600 ms) rather than the busier 240 ms loop that 60 ms timing
+    // would produce. The single esp_timer is re-armed on each step
+    // with the appropriate delay based on envelope freshness.
+    static constexpr int TTS_LIPSYNC_FALLBACK_STEP_MS = 150;
     esp_timer_handle_t tts_lipsync_timer_ = nullptr;
     std::atomic<bool> tts_lipsync_active_{false};
     TtsLipSyncShape tts_lipsync_shape_ = TtsLipSyncShape::CLOSED;
+
+    // Phase 4 audio (Issue #85): per-frame audio amplitude envelope from
+    // the gateway. When fresh (within TTS_LIPSYNC_ENVELOPE_FRESHNESS_MS),
+    // the step callback maps RMS to a discrete mouth shape; otherwise it
+    // walks the fixed CLOSED -> HALF -> OPEN -> HALF cycle so older
+    // gateways (which do not emit {"type":"tts","state":"envelope"})
+    // still produce mouth movement during TTS playback.
+    //
+    // Both fields are written from the WebSocket task (see
+    // Application::OnIncomingJson) and read from the esp_timer task
+    // (TtsLipSyncStepAdvance), so they must be std::atomic.
+    std::atomic<float> tts_lipsync_envelope_rms_{0.0f};
+    std::atomic<uint64_t> tts_lipsync_envelope_at_us_{0};
+    // Threshold pair tuned against VOICEVOX (Zundamon) at the device's
+    // default volume; quieter engines may sit perpetually below the low
+    // threshold and stay closed. Re-tune (and re-flash) as additional
+    // engines (Irodori, etc.) come online.
+    static constexpr float TTS_LIPSYNC_RMS_LOW = 0.05f;
+    static constexpr float TTS_LIPSYNC_RMS_HIGH = 0.15f;
+    // How fresh an envelope value must be to drive the mouth. If we have
+    // not seen a {tts.envelope} message within this window, we assume
+    // the gateway is not emitting them (or there is a network gap) and
+    // fall back to the fixed cycle. Slightly larger than a few audio
+    // frames so a single dropped envelope does not flicker the mode.
+    static constexpr int TTS_LIPSYNC_ENVELOPE_FRESHNESS_MS = 200;
 
     // Phase 7: Si12T head-touch sensing.
     // Polling every TOUCH_POLL_MS samples Output1 (CH1..CH3 -> 3 head zones).
@@ -1801,29 +1841,76 @@ private:
             return;
         }
         const char* shape = nullptr;
-        switch (tts_lipsync_shape_) {
-            case TtsLipSyncShape::CLOSED:
-                shape = "half";
-                tts_lipsync_shape_ = TtsLipSyncShape::HALF_RISING;
-                break;
-            case TtsLipSyncShape::HALF_RISING:
+        const uint64_t now_us = esp_timer_get_time();
+        const uint64_t env_at = tts_lipsync_envelope_at_us_.load(
+            std::memory_order_acquire);
+        const uint64_t freshness_us =
+            (uint64_t)TTS_LIPSYNC_ENVELOPE_FRESHNESS_MS * 1000;
+        const bool envelope_fresh =
+            (env_at != 0) && (now_us - env_at < freshness_us);
+
+        if (envelope_fresh) {
+            // Envelope-driven (Issue #85): amplitude maps to a discrete
+            // mouth shape. Keep tts_lipsync_shape_ coherent with the
+            // displayed shape so a transition back to the cycle
+            // fallback (envelope drops out mid-utterance) starts from
+            // a sensible position rather than wherever the cycle was
+            // left off before envelopes arrived.
+            const float rms = tts_lipsync_envelope_rms_.load(
+                std::memory_order_acquire);
+            if (rms >= TTS_LIPSYNC_RMS_HIGH) {
                 shape = "open";
                 tts_lipsync_shape_ = TtsLipSyncShape::OPEN;
-                break;
-            case TtsLipSyncShape::OPEN:
+            } else if (rms >= TTS_LIPSYNC_RMS_LOW) {
                 shape = "half";
-                tts_lipsync_shape_ = TtsLipSyncShape::HALF_FALLING;
-                break;
-            case TtsLipSyncShape::HALF_FALLING:
-            default:
+                // Mark as RISING so a subsequent fallback step that
+                // reads HALF_RISING advances correctly to OPEN rather
+                // than HALF_FALLING.
+                tts_lipsync_shape_ = TtsLipSyncShape::HALF_RISING;
+            } else {
                 shape = "closed";
                 tts_lipsync_shape_ = TtsLipSyncShape::CLOSED;
-                break;
+            }
+        } else {
+            // Fallback: gateway has not sent an envelope (older
+            // release, or network gap mid-utterance). Walk the fixed
+            // CLOSED -> HALF -> OPEN -> HALF cycle so the user still
+            // sees mouth movement.
+            switch (tts_lipsync_shape_) {
+                case TtsLipSyncShape::CLOSED:
+                    shape = "half";
+                    tts_lipsync_shape_ = TtsLipSyncShape::HALF_RISING;
+                    break;
+                case TtsLipSyncShape::HALF_RISING:
+                    shape = "open";
+                    tts_lipsync_shape_ = TtsLipSyncShape::OPEN;
+                    break;
+                case TtsLipSyncShape::OPEN:
+                    shape = "half";
+                    tts_lipsync_shape_ = TtsLipSyncShape::HALF_FALLING;
+                    break;
+                case TtsLipSyncShape::HALF_FALLING:
+                default:
+                    shape = "closed";
+                    tts_lipsync_shape_ = TtsLipSyncShape::CLOSED;
+                    break;
+            }
         }
         SetMouthShape(shape);
         if (tts_lipsync_active_.load(std::memory_order_acquire)) {
+            // Re-arm cadence depends on whether the most recent step
+            // ran the envelope-driven path or the fallback. Doing the
+            // selection here (not at start time) keeps the cadence in
+            // sync as the source flips mid-utterance — e.g. an older
+            // gateway begins a session in fallback mode and stays
+            // there, while a hybrid gateway can fall briefly into
+            // fallback during a network gap and then return to 60 ms
+            // sampling once envelopes resume.
+            const int next_delay_ms = envelope_fresh
+                ? TTS_LIPSYNC_STEP_MS
+                : TTS_LIPSYNC_FALLBACK_STEP_MS;
             esp_timer_start_once(tts_lipsync_timer_,
-                                 (uint64_t)TTS_LIPSYNC_STEP_MS * 1000);
+                                 (uint64_t)next_delay_ms * 1000);
         }
     }
 
@@ -1854,14 +1941,31 @@ private:
         // RestoreCurrentFaceLocked() does not overwrite the mouth overlay.
         // blink_desired_ remembers the user's intent for restore at stop.
         StopBlinkTimer();
+        // Issue #85: discard any envelope value left over from a
+        // previous utterance so the first step of this utterance does
+        // not consult a stale RMS reading from minutes ago. The next
+        // tts.envelope message from the gateway re-arms envelope-
+        // driven mode; until then we run the fixed cycle.
+        tts_lipsync_envelope_at_us_.store(0, std::memory_order_release);
+        tts_lipsync_envelope_rms_.store(0.0f, std::memory_order_release);
         // Start the cycle from a known resting position so the first audible
         // frame opens the mouth from closed.
         tts_lipsync_shape_ = TtsLipSyncShape::CLOSED;
         SetMouthShape("closed");
-        esp_timer_start_once(tts_lipsync_timer_,
-                             (uint64_t)TTS_LIPSYNC_STEP_MS * 1000);
-        ESP_LOGI(TAG, "TTS lip-sync STARTED (cycle=%d ms)",
-                 TTS_LIPSYNC_STEP_MS);
+        // Initial step delay matches the cadence the next step would
+        // pick (envelope_fresh is false at start, since we just zeroed
+        // the envelope timestamp), so an older gateway with no
+        // envelope channel sees a uniform fallback cadence from the
+        // very first step rather than a 60 ms outlier followed by
+        // 150 ms intervals. A new envelope arriving before the first
+        // step fires will be picked up at that step and the next
+        // re-arm switches to the 60 ms cadence.
+        esp_timer_start_once(
+            tts_lipsync_timer_,
+            (uint64_t)TTS_LIPSYNC_FALLBACK_STEP_MS * 1000);
+        ESP_LOGI(TAG,
+                 "TTS lip-sync STARTED (envelope=%d ms, fallback=%d ms)",
+                 TTS_LIPSYNC_STEP_MS, TTS_LIPSYNC_FALLBACK_STEP_MS);
     }
 
     void StopTtsLipSync() {
@@ -1871,6 +1975,13 @@ private:
         if (tts_lipsync_timer_ != nullptr) {
             esp_timer_stop(tts_lipsync_timer_);
         }
+        // Issue #85: clear the envelope freshness timestamp so an
+        // overdue envelope arriving after stop does not influence the
+        // next utterance's first step. The RMS value itself is harmless
+        // to leave behind because it is only read when env_at_us_ is
+        // non-zero, but we reset both for symmetry with StartTtsLipSync.
+        tts_lipsync_envelope_at_us_.store(0, std::memory_order_release);
+        tts_lipsync_envelope_rms_.store(0.0f, std::memory_order_release);
         // If a user-issued mouth sequence is in flight (we were yielding
         // our frames to it via the mouth_seq_active_ guard in
         // TtsLipSyncStepAdvance), let the sequence task own both the
@@ -2876,6 +2987,30 @@ public:
 
     virtual void OnTtsStop() override {
         StopTtsLipSync();
+    }
+
+    // Phase 4 audio (Issue #85): per-frame audio amplitude envelope from
+    // the gateway. Cheap atomic stores; safe to call directly from the
+    // WebSocket task without going through Application::Schedule(). The
+    // step callback (TtsLipSyncStepAdvance) reads the latest RMS and
+    // freshness timestamp on its own cadence, so frame_id is currently
+    // informational only.
+    virtual void OnTtsEnvelope(uint32_t frame_id, float rms) override {
+        (void)frame_id;
+        // Defensive clamp: malformed envelopes (NaN, infinity, out-of-
+        // range) are ignored or pinned to [0, 1] so the threshold
+        // comparisons stay well-defined.
+        if (!std::isfinite(rms)) {
+            return;
+        }
+        if (rms < 0.0f) {
+            rms = 0.0f;
+        } else if (rms > 1.0f) {
+            rms = 1.0f;
+        }
+        tts_lipsync_envelope_rms_.store(rms, std::memory_order_release);
+        tts_lipsync_envelope_at_us_.store(esp_timer_get_time(),
+                                          std::memory_order_release);
     }
 
     virtual Backlight *GetBacklight() override {

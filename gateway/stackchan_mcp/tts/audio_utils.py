@@ -23,6 +23,7 @@ from __future__ import annotations
 import array
 import io
 import logging
+import math
 import wave
 from typing import Iterator
 
@@ -124,6 +125,43 @@ def resample_pcm16_linear(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
         # Round toward zero is fine for 16-bit speech.
         out.append(int(a + (b - a) * frac))
     return out.tobytes()
+
+
+def compute_pcm_frame_rms(pcm_frame: bytes) -> float:
+    """Compute the RMS amplitude of a single PCM16 mono frame.
+
+    The result is normalised against the signed 16-bit full-scale value
+    (32768) so it sits in ``[0.0, 1.0]`` regardless of frame length and
+    matches the firmware-side threshold scale (Issue #85). An empty
+    frame yields ``0.0`` rather than raising so a stray short tail
+    chunk from upstream slicing does not crash the envelope path.
+
+    Args:
+        pcm_frame: Raw signed 16-bit little-endian mono PCM bytes for a
+            single frame. Length should be a multiple of 2; an odd
+            trailing byte (which would not appear in production but
+            could in tests) is silently dropped to keep the helper
+            forgiving.
+
+    Returns:
+        RMS amplitude normalised to ``[0.0, 1.0]``. ``0.0`` for silence
+        or empty input; near ``1.0`` for a full-scale square wave.
+    """
+    # Drop a trailing odd byte rather than raising; an unaligned chunk
+    # is a caller bug, but a noisy one breaks the entire TTS pipeline
+    # over a single sample boundary.
+    aligned_len = (len(pcm_frame) // 2) * 2
+    if aligned_len == 0:
+        return 0.0
+    samples = array.array("h")
+    samples.frombytes(pcm_frame[:aligned_len])
+    if not samples:
+        return 0.0
+    # Sum of squares stays inside Python's arbitrary-precision int, so
+    # there's no overflow risk even for the longest plausible frame.
+    sum_sq = sum(s * s for s in samples)
+    rms = math.sqrt(sum_sq / len(samples))
+    return rms / 32768.0
 
 
 def chunk_pcm_into_frames(

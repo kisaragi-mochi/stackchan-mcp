@@ -44,6 +44,29 @@ class ESP32Connection:
         # payload). v2/v3 add a BinaryProtocol header that this gateway
         # does not yet wrap — see Issue follow-up to #70.
         self.protocol_version: int = 1
+        # Per-connection send lock (Issue #85). Serialises every
+        # underlying ``websockets.send()`` so a ``send_tts_envelope``
+        # cannot race a ``send_audio_frame`` on the same socket — the
+        # firmware needs envelope[N] to land before audio[N] for the
+        # per-frame mouth shape map to track the right frame, and
+        # ``websockets`` does not internally serialise concurrent send
+        # calls. Held only across the actual ``await self._ws.send()``,
+        # so contention windows are short.
+        #
+        # NOTE: this is a non-reentrant ``asyncio.Lock``. Callers must
+        # not invoke another send on the same connection while already
+        # inside a locked send (e.g. from a websocket-side callback,
+        # an instrumentation wrapper, or any future hook that fires
+        # mid-write) — the second acquire would await the lock the
+        # outer send still holds and wedge the connection. The current
+        # callers are linear (``send_audio_frame`` /
+        # ``send_tts_state`` / ``send_tts_envelope`` /
+        # ``send_mcp_request``), none of which dispatch back into
+        # another send, so this is safe today; if a future change
+        # introduces a re-entrant send path, switch this to an
+        # owner-tracking lock or refactor the egress to a single
+        # writer queue first.
+        self._send_lock = asyncio.Lock()
 
     @property
     def connected(self) -> bool:
@@ -161,17 +184,27 @@ class ESP32Connection:
         errors leak as raw tracebacks into the MCP transport, breaking
         the say() tool's clean error JSON contract on mid-stream
         disconnect.
+
+        Acquires :attr:`_send_lock` for the duration of the
+        ``ws.send()`` call so concurrent senders on the same
+        connection (e.g. an envelope and an audio frame from the TTS
+        orchestrator, see Issue #85) are serialised in the order they
+        arrive at this method rather than racing inside the
+        ``websockets`` library.
         """
-        try:
-            await self._ws.send(payload)
-        except (
-            websockets.exceptions.ConnectionClosed,
-            OSError,
-        ) as exc:
-            # Mark the connection dead so subsequent calls fail fast
-            # rather than each one re-discovering the broken socket.
-            self.disconnect()
-            raise ConnectionError(f"WebSocket send failed: {exc}") from exc
+        async with self._send_lock:
+            try:
+                await self._ws.send(payload)
+            except (
+                websockets.exceptions.ConnectionClosed,
+                OSError,
+            ) as exc:
+                # Mark the connection dead so subsequent calls fail fast
+                # rather than each one re-discovering the broken socket.
+                self.disconnect()
+                raise ConnectionError(
+                    f"WebSocket send failed: {exc}"
+                ) from exc
 
     async def send_audio_frame(self, opus_frame: bytes) -> None:
         """Send a single Opus frame to the ESP32 as a WebSocket binary frame.
@@ -205,6 +238,96 @@ class ESP32Connection:
             "state": state,
         }
         await self._ws_send(json.dumps(message))
+
+    async def send_tts_envelope(
+        self,
+        frame_id: int,
+        rms: float,
+        *,
+        lock_acquire_timeout: float | None = None,
+    ) -> bool:
+        """Send a per-frame audio amplitude envelope (Issue #85).
+
+        The device's :func:`Application::OnIncomingJson` reads
+        ``{"type":"tts","state":"envelope","frame_id":N,"rms":...}``
+        and forwards the value to ``Board::OnTtsEnvelope``, which on
+        the StackChan board drives amplitude-based mouth shape
+        selection. Older firmware (before #85) ignores the message
+        because the ``"envelope"`` state branch falls through the
+        ``OnIncomingJson`` switch as an unknown TTS state. New firmware
+        falls back to a fixed lip-sync cycle if envelopes stop
+        arriving for more than 200 ms, so a single dropped envelope is
+        non-fatal.
+
+        Args:
+            frame_id: Sequence number of the audio frame this envelope
+                corresponds to (orchestrator-assigned, starts at 0).
+            rms: RMS amplitude of the PCM frame, normalised to
+                ``[0.0, 1.0]``.
+            lock_acquire_timeout: If set, give up after this many
+                seconds when waiting for :attr:`_send_lock` rather
+                than blocking indefinitely. Used by the TTS
+                orchestrator to bound how long an envelope can hold
+                up the next audio frame's 60 ms pacing budget — if
+                the lock is held that long by another sender, the
+                envelope is silently dropped instead of cancelling
+                the in-flight ``websockets.send()`` (which the library
+                documents as unsafe).
+
+        Returns:
+            ``True`` if the envelope was actually pushed to the
+            socket, ``False`` if it was dropped due to lock
+            contention timeout. Callers may treat ``False`` as a
+            best-effort skip (firmware will fall back to its fixed
+            lip-sync cycle).
+        """
+        if not self._connected:
+            raise ConnectionError("ESP32 not connected")
+
+        if lock_acquire_timeout is not None:
+            # Wait for the send lock up to the budgeted window. The
+            # acquire() coroutine is safe to cancel (no half-written
+            # bytes hit the wire), unlike cancelling a ws.send() that
+            # has already started.
+            try:
+                await asyncio.wait_for(
+                    self._send_lock.acquire(),
+                    timeout=lock_acquire_timeout,
+                )
+            except asyncio.TimeoutError:
+                return False
+            try:
+                message = {
+                    "session_id": self.session_id,
+                    "type": "tts",
+                    "state": "envelope",
+                    "frame_id": int(frame_id),
+                    "rms": float(rms),
+                }
+                try:
+                    await self._ws.send(json.dumps(message))
+                except (
+                    websockets.exceptions.ConnectionClosed,
+                    OSError,
+                ) as exc:
+                    self.disconnect()
+                    raise ConnectionError(
+                        f"WebSocket send failed: {exc}"
+                    ) from exc
+            finally:
+                self._send_lock.release()
+            return True
+
+        # Unbounded path: delegate to the standard locked sender.
+        message = {
+            "session_id": self.session_id,
+            "type": "tts",
+            "state": "envelope",
+            "frame_id": int(frame_id),
+            "rms": float(rms),
+        }
+        await self._ws_send(json.dumps(message))
+        return True
 
     def disconnect(self) -> None:
         """Mark connection as disconnected."""
@@ -450,6 +573,28 @@ class ESP32Manager:
         if not self._connection or not self._connection.connected:
             raise ConnectionError("No ESP32 device connected")
         await self._connection.send_tts_state(state)
+
+    async def send_tts_envelope(
+        self,
+        frame_id: int,
+        rms: float,
+        *,
+        lock_acquire_timeout: float | None = None,
+    ) -> bool:
+        """Send a per-frame audio amplitude envelope to the device.
+
+        See :meth:`ESP32Connection.send_tts_envelope` for the protocol
+        rationale (Issue #85), the lock-acquire timeout semantics, and
+        the meaning of the ``True`` / ``False`` return value. The
+        orchestrator emits one envelope per Opus audio frame
+        immediately before the corresponding binary frame so the
+        firmware's mouth shape can update in step with playback.
+        """
+        if not self._connection or not self._connection.connected:
+            raise ConnectionError("No ESP32 device connected")
+        return await self._connection.send_tts_envelope(
+            frame_id, rms, lock_acquire_timeout=lock_acquire_timeout
+        )
 
     def get_status(self) -> dict[str, Any]:
         """Get current connection status."""

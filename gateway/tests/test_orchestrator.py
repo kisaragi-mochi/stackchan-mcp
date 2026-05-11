@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import array
 import asyncio
 from typing import Any
 
@@ -32,9 +33,16 @@ class _FakeESP32:
         self.device_connected = connected
         self.frames: list[bytes] = []
         self.tts_states: list[str] = []
-        # Records the relative order in which audio frames and TTS state
-        # notifications were dispatched, so tests can assert that
-        # ``start`` precedes any frame and ``stop`` trails them.
+        # Issue #85: per-frame envelopes recorded as (frame_id, rms)
+        # tuples. The orchestrator emits one envelope before each
+        # audio frame so the firmware can drive amplitude-based mouth
+        # shapes; tests can assert the count and ordering.
+        self.envelopes: list[tuple[int, float]] = []
+        # Records the relative order in which audio frames, envelopes,
+        # and TTS state notifications were dispatched, so tests can
+        # assert that ``start`` precedes any frame and ``stop`` trails
+        # them, and that each envelope precedes its corresponding
+        # audio frame.
         self.events: list[tuple[str, object]] = []
         # Mirror the production manager's per-device TTS lock so the
         # orchestrator's ``async with gateway.esp32.tts_lock`` works the
@@ -49,6 +57,20 @@ class _FakeESP32:
     async def send_tts_state(self, state: str) -> None:
         self.tts_states.append(state)
         self.events.append(("tts_state", state))
+
+    async def send_tts_envelope(
+        self,
+        frame_id: int,
+        rms: float,
+        *,
+        lock_acquire_timeout: float | None = None,
+    ) -> bool:
+        # ``lock_acquire_timeout`` is honoured implicitly: this fake
+        # never blocks, so acquire-timeout never fires.
+        del lock_acquire_timeout
+        self.envelopes.append((frame_id, rms))
+        self.events.append(("envelope", (frame_id, rms)))
+        return True
 
 
 class _FakeGateway:
@@ -117,9 +139,21 @@ async def test_pipeline_synthesises_encodes_and_pushes(fake_encode):
     assert esp32.tts_states == ["start", "stop"]
     assert esp32.events[0] == ("tts_state", "start")
     assert esp32.events[-1] == ("tts_state", "stop")
-    # All frames sit between start and stop.
+    # Issue #85: each envelope is awaited inline before its
+    # corresponding audio frame so the WebSocket write order is
+    # guaranteed (firmware needs envelope[N] to land before audio
+    # frame[N] for the per-frame mouth shape map to track the right
+    # frame). The middle slice should therefore be a strict
+    # ``envelope, frame`` interleave.
     middle = esp32.events[1:-1]
-    assert all(kind == "frame" for kind, _ in middle)
+    assert len(esp32.envelopes) == len(esp32.frames)
+    pair_kinds = [kind for kind, _ in middle]
+    assert pair_kinds == ["envelope", "frame"] * len(esp32.frames), (
+        f"expected strict envelope-then-frame interleave, got {pair_kinds}"
+    )
+    # frame_id sequence is contiguous starting from 0.
+    sent_frame_ids = [fid for fid, _ in esp32.envelopes]
+    assert sent_frame_ids == list(range(len(esp32.frames)))
 
 
 @pytest.mark.asyncio
@@ -398,6 +432,7 @@ async def test_pipeline_translates_mid_stream_disconnect(fake_encode):
         def __init__(self) -> None:
             self.frames: list[bytes] = []
             self.tts_states: list[str] = []
+            self.envelopes: list[tuple[int, float]] = []
             self.tts_lock = asyncio.Lock()
 
         async def send_audio_frame(self, frame: bytes) -> None:
@@ -410,6 +445,19 @@ async def test_pipeline_translates_mid_stream_disconnect(fake_encode):
             # caller still tries to send it after the failure, simulate
             # a benign no-op rather than raising again.
             self.tts_states.append(state)
+
+        async def send_tts_envelope(
+            self,
+            frame_id: int,
+            rms: float,
+            *,
+            lock_acquire_timeout: float | None = None,
+        ) -> bool:
+            del lock_acquire_timeout
+            # Envelope delivery is best-effort; record but don't fail
+            # so we exercise the same disconnect path on send_audio_frame.
+            self.envelopes.append((frame_id, rms))
+            return True
 
     pcm = b"\x01\x00" * 1440  # 1.5 frames worth
     engine = _PCMEngine(pcm)
@@ -524,6 +572,18 @@ async def test_pipeline_disconnect_before_tts_start(fake_encode):
         async def send_audio_frame(self, frame: bytes) -> None:
             raise AssertionError("frame should not be attempted after start failure")
 
+        async def send_tts_envelope(
+            self,
+            frame_id: int,
+            rms: float,
+            *,
+            lock_acquire_timeout: float | None = None,
+        ) -> bool:
+            del lock_acquire_timeout
+            raise AssertionError(
+                "envelope should not be attempted after start failure"
+            )
+
     pcm = b"\x01\x00" * 960
     engine = _PCMEngine(pcm)
     esp32 = FailingESP32()
@@ -539,3 +599,319 @@ async def test_pipeline_disconnect_before_tts_start(fake_encode):
             registry=reg,
         )
     assert esp32.tts_states == ["start"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #85 — per-frame audio amplitude envelope channel
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pipeline_emits_envelope_with_real_rms(fake_encode):
+    """Envelopes carry the actual RMS of each PCM frame, not a placeholder.
+
+    Builds two frames with very different amplitudes (silence vs. a
+    near-full-scale square wave) so the test can assert that the
+    second frame's envelope is much larger than the first. This guards
+    against an implementation that always sends ``0.0`` (e.g. a stub
+    that records the call shape but never wires up
+    :func:`compute_pcm_frame_rms`).
+    """
+    samples_per_frame = (
+        DEVICE_SAMPLE_RATE * DEVICE_FRAME_DURATION_MS // 1000
+    )
+    # Frame 0: pure silence -> RMS = 0
+    silence = b"\x00\x00" * samples_per_frame
+    # Frame 1: alternating ±10000 (near full-scale) -> RMS ≈ 10000/32768
+    loud_samples = array.array(
+        "h", [10000 if i % 2 == 0 else -10000 for i in range(samples_per_frame)]
+    )
+    loud = loud_samples.tobytes()
+    pcm = silence + loud
+
+    engine = _PCMEngine(pcm)
+    esp32 = _FakeESP32(connected=True)
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    await synthesize_and_send(
+        {"text": "envelope-check"}, gateway=gateway, registry=reg
+    )
+
+    assert len(esp32.envelopes) == 2
+    frame_id_0, rms_0 = esp32.envelopes[0]
+    frame_id_1, rms_1 = esp32.envelopes[1]
+    assert frame_id_0 == 0
+    assert frame_id_1 == 1
+    assert rms_0 == 0.0
+    # Loud frame's RMS should be roughly 10000/32768 ≈ 0.305.
+    assert rms_1 == pytest.approx(10000 / 32768, rel=0.01)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_envelope_send_failure_is_nonfatal(fake_encode):
+    """A ConnectionError on send_tts_envelope must not abort the utterance.
+
+    Envelope delivery is best-effort: the firmware falls back to a
+    fixed mouth cycle when envelopes stop arriving, so a transient
+    failure on the envelope channel is invisible to the user. The
+    audio frames must still be pushed and the stop notification
+    must still fire so the device leaves ``kDeviceStateSpeaking``.
+    """
+
+    class EnvelopeFailingESP32:
+        device_connected = True
+
+        def __init__(self) -> None:
+            self.frames: list[bytes] = []
+            self.tts_states: list[str] = []
+            self.envelope_attempts = 0
+            self.tts_lock = asyncio.Lock()
+
+        async def send_audio_frame(self, frame: bytes) -> None:
+            self.frames.append(frame)
+
+        async def send_tts_state(self, state: str) -> None:
+            self.tts_states.append(state)
+
+        async def send_tts_envelope(
+            self,
+            frame_id: int,
+            rms: float,
+            *,
+            lock_acquire_timeout: float | None = None,
+        ) -> bool:
+            del lock_acquire_timeout
+            self.envelope_attempts += 1
+            raise ConnectionError("envelope channel down")
+
+    pcm = b"\x01\x00" * 1440  # 1.5 -> 2 frames
+    engine = _PCMEngine(pcm)
+    esp32 = EnvelopeFailingESP32()
+    gateway = _FakeGateway(esp32)  # type: ignore[arg-type]
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await synthesize_and_send(
+        {"text": "hello"}, gateway=gateway, registry=reg
+    )
+
+    assert result["frame_count"] == 2
+    assert len(esp32.frames) == 2
+    assert esp32.tts_states == ["start", "stop"]
+    # Every frame still attempted an envelope before its audio.
+    assert esp32.envelope_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_pipeline_envelope_length_mismatch_skips_envelope_channel(
+    fake_encode, monkeypatch
+):
+    """Defensive guard: opus/envelope length mismatch falls back gracefully.
+
+    The two helpers (:func:`chunk_pcm_into_frames` and
+    :func:`encode_opus_frames`) share ``samples_per_frame`` so a
+    mismatch should be impossible in production, but a future refactor
+    of either one shouldn't silently misalign envelopes against the
+    wrong audio frame. The orchestrator detects the mismatch and skips
+    the envelope channel for that utterance instead of corrupting
+    lip-sync; this test pins that contract.
+    """
+    import stackchan_mcp.tts.orchestrator as orchestrator
+
+    real_chunk = orchestrator.chunk_pcm_into_frames
+
+    def short_chunks(pcm, **kwargs):
+        # Drop the first chunk so envelopes is one shorter than
+        # opus_frames (which the fake_encode fixture sizes correctly).
+        chunks = list(real_chunk(pcm, **kwargs))
+        return iter(chunks[1:])
+
+    monkeypatch.setattr(orchestrator, "chunk_pcm_into_frames", short_chunks)
+
+    pcm = b"\x01\x00" * 1440  # -> 2 opus frames, but only 1 envelope chunk
+    engine = _PCMEngine(pcm)
+    esp32 = _FakeESP32(connected=True)
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await synthesize_and_send(
+        {"text": "hello"}, gateway=gateway, registry=reg
+    )
+
+    # Audio still pushed in full.
+    assert result["frame_count"] == 2
+    assert len(esp32.frames) == 2
+    # Envelope channel skipped entirely for this utterance.
+    assert esp32.envelopes == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_envelope_lock_contention_skipped_silently(fake_encode):
+    """Envelope drops cleanly when the connection's send lock is busy.
+
+    Regression for the codex findings on Issue #85: an unbounded
+    inline ``await send_tts_envelope`` would chain into the audio
+    frame's pacing sleep math, so a slow envelope (e.g. WiFi
+    backpressure or another sender holding the connection's send
+    lock) could push every iteration past the 60 ms audio pacing
+    budget. The orchestrator now passes ``lock_acquire_timeout=
+    TTS_ENVELOPE_SEND_TIMEOUT_S`` to ``send_tts_envelope``, which
+    silently returns ``False`` on the timeout path instead of
+    raising or cancelling an in-flight ``ws.send()`` (the
+    ``websockets`` library documents that cancellation as unsafe).
+    The firmware's freshness check then falls back to its fixed
+    lip-sync cycle, hiding the dropped envelope from the user.
+    """
+
+    class LockBusyESP32:
+        device_connected = True
+
+        def __init__(self) -> None:
+            self.frames: list[bytes] = []
+            self.tts_states: list[str] = []
+            self.envelopes: list[tuple[int, float]] = []
+            self.envelope_attempts = 0
+            self.tts_lock = asyncio.Lock()
+            self._loop = asyncio.get_event_loop()
+            self._prev_frame_at: float | None = None
+            self.frame_intervals_ms: list[float] = []
+
+        async def send_audio_frame(self, frame: bytes) -> None:
+            now = self._loop.time()
+            if self._prev_frame_at is not None:
+                self.frame_intervals_ms.append(
+                    (now - self._prev_frame_at) * 1000.0
+                )
+            self._prev_frame_at = now
+            self.frames.append(frame)
+
+        async def send_tts_state(self, state: str) -> None:
+            self.tts_states.append(state)
+
+        async def send_tts_envelope(
+            self,
+            frame_id: int,
+            rms: float,
+            *,
+            lock_acquire_timeout: float | None = None,
+        ) -> bool:
+            self.envelope_attempts += 1
+            # Simulate the ``lock_acquire_timeout`` path inside
+            # ``ESP32Connection.send_tts_envelope``: the lock could
+            # not be acquired in time, so the envelope is dropped
+            # without ever touching the wire. ``False`` tells the
+            # caller "skipped, firmware fallback covers it".
+            if lock_acquire_timeout is not None:
+                await asyncio.sleep(lock_acquire_timeout)
+                return False
+            self.envelopes.append((frame_id, rms))
+            return True
+
+    pcm = b"\x01\x00" * (960 * 5)  # 5 frames @ 60 ms
+    engine = _PCMEngine(pcm)
+    esp32 = LockBusyESP32()
+    gateway = _FakeGateway(esp32)  # type: ignore[arg-type]
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await synthesize_and_send(
+        {"text": "hello"}, gateway=gateway, registry=reg
+    )
+
+    assert result["frame_count"] == 5
+    # Each frame attempted an envelope but every one was skipped.
+    assert esp32.envelope_attempts == 5
+    assert esp32.envelopes == []
+    # Audio pacing must stay within budget despite the lock-acquire
+    # timeout eating ~30 ms per frame. Worst case per frame is the
+    # lock timeout (30 ms) + the 60 ms pacing target; allow 25 ms
+    # slack for event-loop scheduling jitter on a busy CI runner.
+    from stackchan_mcp.tts.orchestrator import TTS_ENVELOPE_SEND_TIMEOUT_S
+
+    assert len(esp32.frame_intervals_ms) == 4
+    budget_ms = (TTS_ENVELOPE_SEND_TIMEOUT_S * 1000) + 60 + 25
+    for interval in esp32.frame_intervals_ms:
+        assert interval < budget_ms, (
+            f"audio pacing slipped to {interval:.1f} ms "
+            f"(budget {budget_ms:.0f} ms); envelope skip path may "
+            f"have regressed"
+        )
+    # Stop still fires after all frames.
+    assert esp32.tts_states[-1] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_envelope_precedes_audio_per_frame(fake_encode):
+    """Each envelope reaches the wire before its corresponding audio frame.
+
+    The firmware's per-frame mouth shape map (Issue #85) only works
+    if envelope[N] arrives at-or-before audio[N] — otherwise the
+    mouth update for frame N races the audio playback or lands one
+    frame late, eroding the per-frame sync the protocol promises.
+    The orchestrator awaits ``send_tts_envelope`` inline (with a
+    small timeout cap to bound pacing slip) precisely so this
+    ordering is guaranteed at the WebSocket write layer; this test
+    pins it for a 3-frame utterance with the envelope deliberately
+    delayed slightly to make any reordering observable.
+    """
+
+    class OrderedESP32:
+        device_connected = True
+
+        def __init__(self) -> None:
+            self.events: list[str] = []
+            self.tts_lock = asyncio.Lock()
+
+        async def send_audio_frame(self, frame: bytes) -> None:
+            self.events.append("frame")
+
+        async def send_tts_state(self, state: str) -> None:
+            self.events.append(f"state:{state}")
+
+        async def send_tts_envelope(
+            self,
+            frame_id: int,
+            rms: float,
+            *,
+            lock_acquire_timeout: float | None = None,
+        ) -> bool:
+            del lock_acquire_timeout
+            # Tiny artificial delay so any reordering bug surfaces
+            # rather than being masked by both sends completing
+            # synchronously. Stays well under the orchestrator's
+            # envelope timeout so the send completes normally.
+            await asyncio.sleep(0.001)
+            self.events.append(f"envelope:{frame_id}")
+            return True
+
+    pcm = b"\x01\x00" * (960 * 3)
+    engine = _PCMEngine(pcm)
+    esp32 = OrderedESP32()
+    gateway = _FakeGateway(esp32)  # type: ignore[arg-type]
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    await synthesize_and_send(
+        {"text": "hello"}, gateway=gateway, registry=reg
+    )
+
+    # Expected event sequence — strict envelope-then-frame interleave
+    # bracketed by the start/stop notifications.
+    assert esp32.events == [
+        "state:start",
+        "envelope:0",
+        "frame",
+        "envelope:1",
+        "frame",
+        "envelope:2",
+        "frame",
+        "state:stop",
+    ]

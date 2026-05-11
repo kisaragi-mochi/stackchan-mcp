@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any
 from .audio_utils import (
     DEVICE_FRAME_DURATION_MS,
     DEVICE_SAMPLE_RATE,
+    chunk_pcm_into_frames,
+    compute_pcm_frame_rms,
     encode_opus_frames,
 )
 from .base import EngineRegistry, get_registry
@@ -46,6 +48,21 @@ logger = logging.getLogger(__name__)
 #: VOICEVOX is the canonical default (Issue #70); the concrete engine
 #: ships in PR2 of that Issue.
 DEFAULT_VOICE = "voicevox"
+
+
+#: Maximum time the orchestrator will wait for the connection's send
+#: lock when pushing an envelope. Past this, the envelope is silently
+#: dropped (firmware falls back to its fixed lip-sync cycle, see
+#: Issue #85). Bounded waits live at the *lock acquire* layer rather
+#: than around ``ws.send()`` itself: the ``websockets`` library
+#: explicitly documents cancelling an in-flight ``send()`` as unsafe
+#: (it can leave the socket in a state that breaks the next message),
+#: while an unstarted ``acquire()`` is safe to cancel cleanly. 30 ms
+#: leaves enough headroom over the typical sub-millisecond JSON write
+#: that a transient lock-contention spike does not cascade into audio
+#: underrun, while keeping the worst-case slip well below the 60 ms
+#: per-frame audio pacing budget.
+TTS_ENVELOPE_SEND_TIMEOUT_S = 0.030
 
 
 async def synthesize_and_send(
@@ -181,6 +198,31 @@ async def synthesize_and_send(
     except Exception as exc:
         raise RuntimeError(f"Opus encoding failed: {exc}") from exc
 
+    # Issue #85: precompute the per-frame audio amplitude envelope from
+    # the same PCM that fed the Opus encoder. The two iterators
+    # (chunk_pcm_into_frames, encode_opus_frames) walk the PCM in
+    # lockstep with the same samples_per_frame, so envelopes[i]
+    # corresponds to opus_frames[i] by construction. Older firmware
+    # ignores the envelope message; newer firmware drives mouth shape
+    # selection from it (or falls back to a fixed cycle if envelopes
+    # stop arriving for ~200 ms). Computing the list up front keeps
+    # the per-frame loop branch-free.
+    pcm_chunks = list(chunk_pcm_into_frames(pcm))
+    envelopes = [compute_pcm_frame_rms(chunk) for chunk in pcm_chunks]
+    if len(envelopes) != len(opus_frames):
+        # Defensive guard: the two helpers share samples_per_frame so
+        # this should be impossible, but a future refactor of either
+        # one shouldn't silently corrupt envelope/audio alignment.
+        # Fall back to no-envelope mode rather than misaligning shapes
+        # against the wrong audio frame.
+        logger.warning(
+            "TTS envelope/opus length mismatch (envelopes=%d frames=%d); "
+            "skipping envelope channel for this utterance",
+            len(envelopes),
+            len(opus_frames),
+        )
+        envelopes = [None] * len(opus_frames)
+
     # Bracket the binary audio frames in TTS start/stop notifications.
     # The device firmware (Application::OnIncomingAudio) only accepts
     # binary audio frames while in kDeviceStateSpeaking, which is
@@ -230,10 +272,40 @@ async def synthesize_and_send(
 
         try:
             next_send_time = loop.time()
-            for frame in opus_frames:
+            for frame_id, (frame, envelope) in enumerate(
+                zip(opus_frames, envelopes)
+            ):
                 now = loop.time()
                 if now < next_send_time:
                     await asyncio.sleep(next_send_time - now)
+                # Issue #85: push the envelope first so the firmware's
+                # mouth-shape update lands at-or-before the audio
+                # frame's playback. Envelope delivery is awaited
+                # inline (not via ``create_task``) so the WebSocket
+                # send order is guaranteed by the connection's
+                # ``_send_lock`` — firmware needs envelope[N] to land
+                # before audio[N] for the per-frame mouth shape map
+                # to track the right frame. Pacing is bounded at the
+                # *lock acquire* layer (``lock_acquire_timeout``):
+                # if another sender is already mid-write when this
+                # envelope is ready, we give up after 30 ms rather
+                # than cancelling the in-flight ``ws.send()`` (which
+                # the ``websockets`` library documents as unsafe).
+                # ``send_tts_envelope`` returns ``False`` on the
+                # timeout path; the firmware fallback cycle covers
+                # the dropped frame, so a False return is invisible
+                # to the user.
+                if envelope is not None:
+                    try:
+                        await gateway.esp32.send_tts_envelope(
+                            frame_id,
+                            envelope,
+                            lock_acquire_timeout=TTS_ENVELOPE_SEND_TIMEOUT_S,
+                        )
+                    except ConnectionError:
+                        # Re-raised authoritatively by the audio frame
+                        # send below; nothing useful to log here.
+                        pass
                 try:
                     await gateway.esp32.send_audio_frame(frame)
                 except ConnectionError as exc:

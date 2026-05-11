@@ -546,6 +546,22 @@ void Application::InitializeProtocol() {
                     // an avatar / when lip-sync is already stopped).
                     board.OnTtsStop();
                 });
+            } else if (strcmp(state->valuestring, "envelope") == 0) {
+                // Phase 4 audio (Issue #85): per-frame audio amplitude
+                // envelope. Drives amplitude-based mouth-shape selection
+                // on boards with an avatar; default no-op elsewhere.
+                // OnTtsEnvelope is intentionally lock-free (atomic stores
+                // only on the avatar board) so it is safe to invoke
+                // directly from the WebSocket task without Schedule().
+                // Avoids loading the main task queue at the per-audio-
+                // frame cadence (~16 Hz for 60 ms Opus frames).
+                auto frame_id = cJSON_GetObjectItem(root, "frame_id");
+                auto rms = cJSON_GetObjectItem(root, "rms");
+                if (cJSON_IsNumber(frame_id) && cJSON_IsNumber(rms)) {
+                    board.OnTtsEnvelope(
+                        static_cast<uint32_t>(frame_id->valueint),
+                        static_cast<float>(rms->valuedouble));
+                }
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
