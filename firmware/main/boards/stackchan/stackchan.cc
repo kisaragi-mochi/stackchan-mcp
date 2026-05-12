@@ -45,6 +45,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <cJSON.h>
 #include <lvgl.h>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -645,23 +646,58 @@ private:
     static constexpr uint32_t MOTION_DEFAULT_DURATION_MS = 600;
     static constexpr uint32_t MOTION_PER_WRITE_TIME_MS = 30;
 
-    // Issue #80: pitch hardware-safe range. The mechanical end-stop on the
-    // M5Stack CoreS3 + SCS0009 hardware sits very close to pitch=-1°, and
-    // M5Stack's official docs warn that operating the Y-axis outside the
-    // recommended 5°-85° range may cause servo stall and permanent damage
-    // (https://docs.m5stack.com/en/StackChan). On this firmware's coordinate
-    // system, pitch=0 leaves ~1° margin above the validated end-stop.
+    // Issue #80 / #98: pitch is guarded by two complementary tiers.
     //
-    // Defense-in-depth: we enforce this range at every servo-write boundary
-    //   1. PitchDegToPos() clamps its input (covers motion-task interpolation
-    //      and any future caller that bypasses the MCP layer).
-    //   2. The start-up restore from ReadPos clamps the recovered angle so
-    //      a device booting with the head physically pushed below 0° does
-    //      not carry that negative starting angle into motion interpolation.
-    //   3. The set_head_angles MCP handler additionally clamps the request
-    //      target so the original out-of-range value is logged.
+    // Tier 1 — Hard clamp [SAFE_PITCH_MIN, SAFE_PITCH_MAX]:
+    //   The absolute mechanical safety net. Its only job is to prevent
+    //   physical damage to the servo / gear / chassis. Values are silently
+    //   clamped to this range at every servo-write boundary and an
+    //   ESP_LOGW is emitted when clamping occurs.
+    //   - Lower bound 0°: the mechanical end-stop on the M5Stack CoreS3 +
+    //     SCS0009 hardware sits very close to pitch=-1° (validated on a
+    //     real unit, PR #81). Driving below 0° presses the servo gear into
+    //     the physical stopper and produces an audible click.
+    //   - Upper bound (SAFE_PITCH_MAX): chosen 1° inside the validated
+    //     mechanical upper limit. The M5Stack-documented servo features
+    //     advertise "90-degree movement on the vertical axis", so the
+    //     mechanical upper end-stop is expected near 90°; the precise
+    //     value is established by real-device sweep (Issue #98 validation).
+    //
+    // Tier 2 — Recommended operating range [RECOMMENDED_PITCH_MIN,
+    //          RECOMMENDED_PITCH_MAX]:
+    //   The M5Stack-documented sweet spot for long-term servo reliability
+    //   (https://docs.m5stack.com/en/StackChan, "Motion Angle Notice":
+    //   "The movement angle of the StackChan Y-axis servo (vertical
+    //   direction) is recommended to be controlled within 5 ~ 85°.
+    //   Operating at extreme angles may cause servo stall and permanent
+    //   damage.").
+    //   Values inside the hard clamp but outside this range are accepted
+    //   (they are not hardware-damaging on a single call), and an
+    //   ESP_LOGI is emitted so callers / agents can notice the deviation
+    //   without blocking the motion.
+    //
+    // Defense-in-depth: the hard clamp is enforced at every servo-write
+    // boundary —
+    //   1. PitchDegToPos() clamps its input (covers motion-task
+    //      interpolation and any future caller that bypasses the MCP
+    //      layer).
+    //   2. The start-up restore from ReadPos clamps the recovered angle
+    //      so a device booting with the head physically pushed past the
+    //      safe range does not carry that out-of-range starting angle
+    //      into motion interpolation.
+    //   3. The set_head_angles MCP handler additionally clamps the
+    //      request target so the original out-of-range value is logged.
     static constexpr int SAFE_PITCH_MIN = 0;
-    static constexpr int SAFE_PITCH_MAX = 30;
+    static constexpr int SAFE_PITCH_MAX = 88;  // Issue #98: validated on real hardware
+                                                // (M5Stack CoreS3 + SCS0009 ×2). On-device
+                                                // sweep observed clean motion at pitch=85
+                                                // and pitch=88 reached without end-stop, but
+                                                // pitch=89 exhibited an audible sub-stall
+                                                // ("ji-ji-" gear strain sound). Mirrors PR #81
+                                                // lower-bound rationale: stay 1° inside the
+                                                // observed servo-strain boundary.
+    static constexpr int RECOMMENDED_PITCH_MIN = 5;   // M5Stack official docs
+    static constexpr int RECOMMENDED_PITCH_MAX = 85;  // M5Stack official docs
 
     static int YawDegToPos(int deg) {
         int pos = 460 + deg * 16 / 5;
@@ -2229,31 +2265,60 @@ private:
 
         // Set head angles (yaw, pitch in degrees)
         // SCS0009: 1 step = 0.3125 degrees, so 1 degree = 3.2 steps (= 16/5)
-        // yaw: -90..90 degrees, pitch: -30..30 (declared) but the handler
-        // clamps to a hardware-safe sub-range — see SAFE_PITCH_MIN/MAX below
-        // and Issue #80.
+        // yaw: -90..90 degrees (no hardware restriction). pitch: two-tier
+        // guard — see SAFE_PITCH_MIN/MAX (hard clamp for mechanical safety)
+        // and RECOMMENDED_PITCH_MIN/MAX (M5Stack-documented operating sweet
+        // spot) above, plus Issue #80 / #98.
         mcp_server.AddTool(
             "self.robot.set_head_angles",
-            "Set the head angles of the robot. yaw: horizontal (-90 to 90), pitch: vertical (recommended 0 to 30; the lower half of the -30..0 range may hit the mechanical end-stop on M5Stack CoreS3 + SCS0009 hardware and risks servo stall — see README \"Hardware safety notes\").",
+            "Set the head angles of the robot. yaw: horizontal (-90 to 90). pitch: vertical. M5Stack-recommended operating range is 5 to 85 degrees per https://docs.m5stack.com/en/StackChan (\"Motion Angle Notice\"). The firmware also accepts values up to 88 degrees (the hard clamp guards against the audible sub-stall observed at pitch=89 on real hardware), but values outside 5-85 degrees are not officially endorsed and may stress the servo over time. Requests below 0 degrees or above 88 degrees are silently clamped with an ESP_LOGW. See README \"Hardware safety notes\".",
+            // Pitch schema range is intentionally permissive across the
+            // entire `int` value range (std::numeric_limits<int>::min/max):
+            // the authoritative Tier 1 enforcement lives in the handler
+            // below (silent clamp to [SAFE_PITCH_MIN, SAFE_PITCH_MAX] with
+            // ESP_LOGW). Any narrower range would cause McpServer::Property
+            // to reject sufficiently-extreme requests (e.g. pitch=200 or
+            // pitch=INT_MIN) before the handler can run, leaving the
+            // Tier 1 clamp / log unreachable for those callers and
+            // contradicting the tool-description / README claim that
+            // out-of-range requests are silently clamped with ESP_LOGW —
+            // see Issue #98 (three adversarial-review rounds zeroed in on
+            // this exact contract, including the int-boundary corners) and
+            // PR #81's defense-in-depth requirement that every servo-write
+            // boundary be guarded inside the firmware regardless of
+            // caller behavior.
             PropertyList({Property("yaw", kPropertyTypeInteger, 0, -90, 90),
-                          Property("pitch", kPropertyTypeInteger, 0, -30, 30)}),
+                          Property("pitch", kPropertyTypeInteger, 0,
+                                   std::numeric_limits<int>::min(),
+                                   std::numeric_limits<int>::max())}),
             [this](const PropertyList& properties) -> ReturnValue {
                 int yaw = properties["yaw"].value<int>();
                 int pitch = properties["pitch"].value<int>();
-                // Issue #80: clamp the requested pitch to the hardware-safe
-                // sub-range. PitchDegToPos() clamps again at the servo-write
-                // boundary (defense-in-depth), but doing it here too lets us
-                // log when the original request was out of range. See the
-                // SAFE_PITCH_MIN/MAX comment block above for rationale.
+                // Issue #80 / #98: two-tier pitch guard.
+                //
+                // Tier 1 (hard clamp): silently clamp to [SAFE_PITCH_MIN,
+                // SAFE_PITCH_MAX] and ESP_LOGW. PitchDegToPos() clamps
+                // again at the servo-write boundary (defense-in-depth);
+                // doing it here lets us log the original out-of-range
+                // value. See the SAFE_PITCH_MIN/MAX comment block above.
                 if (pitch < SAFE_PITCH_MIN) {
                     ESP_LOGW(TAG, "set_head_angles: pitch=%d below SAFE_PITCH_MIN=%d, clamping (servo end-stop protection)",
                              pitch, SAFE_PITCH_MIN);
                     pitch = SAFE_PITCH_MIN;
                 }
                 if (pitch > SAFE_PITCH_MAX) {
-                    ESP_LOGW(TAG, "set_head_angles: pitch=%d above SAFE_PITCH_MAX=%d, clamping",
+                    ESP_LOGW(TAG, "set_head_angles: pitch=%d above SAFE_PITCH_MAX=%d, clamping (servo end-stop protection)",
                              pitch, SAFE_PITCH_MAX);
                     pitch = SAFE_PITCH_MAX;
+                }
+                // Tier 2 (recommended-range soft signal): inside the hard
+                // clamp but outside the M5Stack-documented operating
+                // range — accept the value and emit an ESP_LOGI so callers
+                // can notice the deviation without blocking the motion.
+                if (pitch < RECOMMENDED_PITCH_MIN || pitch > RECOMMENDED_PITCH_MAX) {
+                    ESP_LOGI(TAG, "set_head_angles: pitch=%d outside M5Stack-recommended range %d..%d (within hard clamp %d..%d); acceptable but not officially endorsed",
+                             pitch, RECOMMENDED_PITCH_MIN, RECOMMENDED_PITCH_MAX,
+                             SAFE_PITCH_MIN, SAFE_PITCH_MAX);
                 }
                 int yaw_pos = YawDegToPos(yaw);
                 int pitch_pos = PitchDegToPos(pitch);

@@ -468,20 +468,25 @@ Do not commit personal PNGs, generated local avatar files, photos, or other user
 
 ## Hardware safety notes
 
-> ⚠️ **Y-axis (pitch) safe range**
+> ⚠️ **Y-axis (pitch) safe range — two-tier guard**
 
-M5Stack's official documentation explicitly warns:
+The pitch axis is guarded by two complementary tiers, both encoded in firmware and surfaced through the `set_head_angles` MCP tool description:
+
+| Tier | Range | Enforcement | Rationale |
+|---|---|---|---|
+| **Tier 1 — Hard clamp** | `0..+88°` | Silent clamp + `ESP_LOGW` | Prevents mechanical damage. Lower bound `0°` leaves ~1° margin above the validated mechanical end-stop on M5Stack CoreS3 + SCS0009 hardware (PR #81). Upper bound `88°` sits ~1° inside the audible sub-stall boundary observed at `pitch=89°` during the Issue #98 on-device sweep ("ji-ji-" gear strain sound). |
+| **Tier 2 — Recommended operating range** | `5..+85°` | Accept + `ESP_LOGI` (soft signal) | The M5Stack-documented sweet spot for long-term servo reliability. Single requests outside this range are not hardware-damaging, but sustained operation outside `5..85°` may stress the servo over time. |
+
+M5Stack's official documentation states:
 
 > The movement angle of the StackChan Y-axis servo (vertical direction) is recommended to be controlled within 5 ~ 85°. Operating at extreme angles may cause **servo stall and permanent damage**.
-> — https://docs.m5stack.com/en/StackChan
+> — https://docs.m5stack.com/en/StackChan ("Motion Angle Notice")
 
-On the M5Stack CoreS3 + SCS0009 hardware that this firmware targets, the **mechanical end-stop on the down direction sits very close to this firmware's pitch coordinate of `-1°`** (validated on a real unit). Driving below that value (e.g. `pitch=-5`, `pitch=-10`) presses the servo gear into the physical stopper and produces an audible click.
+The `set_head_angles` MCP tool declares pitch with a fully permissive schema range — the entire `int` value range, `std::numeric_limits<int>::min()` to `std::numeric_limits<int>::max()`, corner values included; the firmware-side handler is the authoritative Tier 1 enforcement layer. Any narrower schema range would cause `McpServer::Property` to reject sufficiently-extreme out-of-range requests (e.g. `pitch=200` or `pitch=INT_MIN`) before the handler could clamp / log them, leaving the documented Tier 1 behavior unreachable for those callers — see #98. Requests below `0°` are silently raised to `0°` (with `ESP_LOGW`), requests above `88°` are silently lowered to `88°` (with `ESP_LOGW`), and requests inside `[0, 88]` but outside `[5, 85]` are accepted with an `ESP_LOGI` soft signal. Older callers that targeted `-30..+30°` continue to work without modification (the negative half clamps to `0°`).
 
-To prevent that, the `set_head_angles` MCP tool **clamps pitch to `0..+30°`** internally even though the declared property range is `-30..+30°`. Requests below `0°` are silently raised to `0°` (with an `ESP_LOGW`); the original out-of-range numerical bounds are kept on the property declaration only for backward compatibility with older callers — please target `0..+30°` going forward.
+The X-axis (yaw, `-90..+90°`) is not subject to a comparable hardware restriction — M5Stack's documentation explicitly notes "No angle restriction is required for the X-axis" — and remains usable across its full declared range.
 
-The X-axis (yaw, `-90..+90°`) is not subject to a comparable hardware restriction and remains usable across its full declared range.
-
-See [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80) for the engineering background and validation notes.
+See [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80) for the lower-bound engineering background and [#98](https://github.com/kisaragi-mochi/stackchan-mcp/issues/98) for the two-tier upper-bound widening (firmware hard clamp `30°` → `88°`, with the M5Stack-recommended `5..85°` operating range surfaced as a soft-signal tier).
 
 ## Known issues
 

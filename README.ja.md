@@ -422,22 +422,27 @@ python scripts/avatar_convert/convert_avatars.py
 
 ## ハードウェア安全上の注意
 
-> ⚠️ **Y軸 (pitch) の安全範囲**
+> ⚠️ **Y軸 (pitch) の安全範囲 — 2 層ガード**
+
+Pitch 軸は firmware に組み込まれた 2 つの相補的なガードで保護されており、いずれも `set_head_angles` MCP ツールの description にも反映されています:
+
+| 層 | 範囲 | 強制方法 | 根拠 |
+|---|---|---|---|
+| **Tier 1 — ハードクランプ** | `0..+88°` | 黙ってクランプ + `ESP_LOGW` | 機械的破損の防止。下限 `0°` は M5Stack CoreS3 + SCS0009 ハードウェアで実機検証したエンドストップ (`-1°` 付近) から ~1° のマージンを取った値 (PR #81)。上限 `88°` は Issue #98 の実機 sweep で `pitch=89°` に audible sub-stall（「じーーー」というギア負荷音）が観測されたため、そこから ~1° 内側に取った値。 |
+| **Tier 2 — 推奨動作範囲** | `5..+85°` | 受け付ける + `ESP_LOGI` (ソフトシグナル) | M5Stack 公式が長期信頼性のために推奨している範囲。この外を 1 回叩いてもハード破損には至りませんが、`5..85°` の外で長期間動かし続けるとサーボに負担が蓄積する可能性があります。 |
 
 M5Stack 公式ドキュメントには以下の警告があります:
 
 > The movement angle of the StackChan Y-axis servo (vertical direction) is recommended to be controlled within 5 ~ 85°. Operating at extreme angles may cause **servo stall and permanent damage**.
-> — https://docs.m5stack.com/en/StackChan
+> — https://docs.m5stack.com/en/StackChan ("Motion Angle Notice")
 >
 > (StackChan の Y 軸サーボの可動角度は 5°〜85° の範囲内に制御することを推奨します。極端な角度で動作させると **サーボストール や 永久故障** を引き起こす可能性があります。)
 
-このファームウェアが対象とする M5Stack CoreS3 + SCS0009 ハードウェアでは、**下方向の機械的エンドストップがファームウェア座標系の `pitch=-1°` 付近にある** ことを実機で確認しています（テストユニットで検証）。それより低い値（例: `pitch=-5`、`pitch=-10`）を要求するとサーボのギアが物理的なストッパーに当たり、「カチッ」と音がします。
+`set_head_angles` MCP ツールは pitch を完全に **permissive** な schema range として宣言しています — `int` 型の全範囲 (`std::numeric_limits<int>::min()` から `std::numeric_limits<int>::max()` まで、境界値含む)。Tier 1 の権威ある enforcement は firmware ハンドラ側にあります — schema range を狭めると `McpServer::Property` が十分に極端な out-of-range リクエスト (例: `pitch=200` や `pitch=INT_MIN`) をハンドラ呼び出し前に reject してしまい、ドキュメントに書かれた Tier 1 挙動が到達不能になります（詳しくは #98 を参照）。`0°` 未満のリクエストは `0°` に引き上げられ (`ESP_LOGW`)、`88°` 超のリクエストは `88°` に引き下げられ (`ESP_LOGW`)、`[0, 88]` 内かつ `[5, 85]` 外のリクエストはそのまま受け入れた上で `ESP_LOGI` のソフトシグナルを出力します。過去に `-30..+30°` を target にしていた caller はそのまま動作します（負側は `0°` にクランプされます）。
 
-これを防ぐため、`set_head_angles` MCP ツールは Property 宣言上の範囲は `-30..+30°` のままですが、**handler 側で `pitch` を `0..+30°` に clamp** します。`0°` 未満のリクエストは `0°` に引き上げられます（`ESP_LOGW` 付き）。Property 宣言の数値範囲は後方互換性のためそのまま維持していますが、今後は `0..+30°` を target にしてください。
+X 軸 (yaw、`-90..+90°`) には同等のハードウェア制限はなく — M5Stack 公式が「X 軸には角度制限は不要」と明記しています — 宣言範囲全体を使えます。
 
-X 軸（yaw、`-90..+90°`）には同等のハードウェア制限はなく、宣言範囲全体を使えます。
-
-詳細な背景・検証ノートは [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80) を参照してください。
+下限の経緯は [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80)、2 層ガードへの拡張 (firmware ハードクランプ `30°` → `88°`、M5Stack 推奨 `5..85°` をソフトシグナル層に格上げ) は [#98](https://github.com/kisaragi-mochi/stackchan-mcp/issues/98) を参照してください。
 
 ## ライセンス
 
