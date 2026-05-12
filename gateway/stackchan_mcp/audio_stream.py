@@ -86,23 +86,47 @@ def is_recording() -> bool:
 async def handle_audio_frame(data: bytes, session_id: str) -> None:
     """Process an incoming binary Opus frame from the device.
 
-    When a recording slot is active (see :func:`start_recording`),
-    appends the frame to the in-memory buffer for later decoding by
-    the STT orchestrator. Outside of an active recording the frame is
-    logged at debug level and discarded — the device may emit audio
-    on its own (e.g. after an autonomous wake-word detection) and the
-    gateway has no STT pipeline running for those frames yet.
+    When a recording slot is active (see :func:`start_recording`) AND
+    the frame belongs to the recording's session, appends the frame
+    to the in-memory buffer for later decoding by the STT
+    orchestrator. Frames from a different session — typical during
+    a connection swap, where the old WebSocket handler is still
+    draining incoming bytes after :meth:`ESP32Connection.disconnect`
+    has been called on the main task — are dropped so they cannot
+    bleed into the new connection's capture buffer.
+
+    Outside of an active recording the frame is logged at debug
+    level and discarded; the device may emit audio on its own (e.g.
+    after an autonomous wake-word detection) and the gateway has no
+    STT pipeline running for those frames yet.
     """
-    if _recording_session_id is not None:
-        _recording_frames.append(data)
+    if _recording_session_id is None:
         logger.debug(
-            "audio_frame session=%s bytes=%d buffered (recording active)",
+            "audio_frame session=%s bytes=%d (discarded — no active recording)",
             session_id,
             len(data),
         )
         return
+    if _recording_session_id != session_id:
+        # A different connection is sending audio while a recording
+        # for this session is in flight. This happens when ESP32
+        # reconnects: ``ESP32Manager._handler`` swaps in a new
+        # ``ESP32Connection`` and marks the old one disconnected,
+        # but the old socket's ``async for message in ws`` loop can
+        # still drain a frame or two before the close lands. Letting
+        # those into the buffer would corrupt the new session's
+        # transcription, so drop them here.
+        logger.debug(
+            "audio_frame session=%s bytes=%d (discarded — does not match "
+            "recording session=%s)",
+            session_id,
+            len(data),
+            _recording_session_id,
+        )
+        return
+    _recording_frames.append(data)
     logger.debug(
-        "audio_frame session=%s bytes=%d (discarded — no active recording)",
+        "audio_frame session=%s bytes=%d buffered (recording active)",
         session_id,
         len(data),
     )

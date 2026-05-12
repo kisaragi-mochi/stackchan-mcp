@@ -66,6 +66,30 @@ async def test_recording_lifecycle_buffers_frames_between_start_and_stop():
 
 
 @pytest.mark.asyncio
+async def test_handle_audio_frame_drops_frames_from_other_session():
+    """Frames from a session other than the recording's are discarded.
+
+    When ESP32 reconnects, ``ESP32Manager._handler`` swaps in a new
+    connection and marks the old one disconnected, but the old
+    socket's ``async for message in ws`` loop can still drain a
+    binary frame or two before the close fully lands. Without
+    session-id matching, those stale frames would land in the new
+    session's recording buffer and corrupt the transcription.
+    """
+    start_recording("session-current")
+
+    # Frame from the current session — buffered.
+    await handle_audio_frame(b"current-frame", session_id="session-current")
+    # Stale frame from the previous (now-disconnected) session.
+    await handle_audio_frame(b"stale-frame", session_id="session-old")
+    # Another current-session frame — still buffered.
+    await handle_audio_frame(b"current-frame-2", session_id="session-current")
+
+    frames = stop_recording()
+    assert frames == [b"current-frame", b"current-frame-2"]
+
+
+@pytest.mark.asyncio
 async def test_start_recording_resets_previous_buffer():
     """Re-opening the slot drops any frames buffered from a leaked prior run.
 
