@@ -62,6 +62,7 @@
 | `set_leds(colors)` | `[[r,g,b], ...]` 配列で先頭 N 個を一括設定（I2C 1 回のバースト送信、アニメーション等向け）。指定外の LED は前の色を保持 | ✅ |
 | `clear_leds` | ベース部の RGB LED 12 個すべて消灯 | ✅ |
 | `say(text, voice?, speaker_id?, reference_audio?)` | gateway 側 TTS でデバイススピーカーから喋らせる。デフォルトエンジンは **VOICEVOX**（別 HTTP サービスとして起動 — [TTS セットアップ](#4-オプション-tts-セットアップ-voicevox) 参照）。`[tts]` extras が必要 | ✅ |
+| `listen(duration_ms?, engine?, language?, model?)` | デバイスマイクから短い発話をキャプチャし、gateway 側 STT で文字起こし。デフォルトエンジンは **faster-whisper**（ローカル動作・MIT — [STT セットアップ](#5-オプション-stt-セットアップ-faster-whisper) 参照）。`[stt-faster-whisper]`（または `[stt-openai]`）extras と、`listen` ワイヤタイプを受け付けるファームウェアが必要 | ✅ |
 
 詳細スキーマは `gateway/README.md` 参照。
 
@@ -320,6 +321,64 @@ gateway は VOICEVOX に POST → 返ってきた WAV をデコード →
 TTS フレームワークはエンジン非依存なので、Irodori-TTS による
 ボイスクローン等、他のエンジンも `say` API を変えずに後から
 追加できます。
+
+### 5. オプション: STT セットアップ (faster-whisper)
+
+デバイスに聞いてもらうには、`[stt-*]` extras のどれかをインストール
+し、`listen` ワイヤタイプを受け付けるファームウェア（本リリース以降）
+とペアにします。gateway が `listen.start` 通知を投げると
+ファームウェアがマイクを開き、上り Opus フレームが gateway で
+デコード・文字起こしされます — デフォルトの `faster-whisper`
+エンジンを使う限り、音声がマシンの外に出ることはありません。
+
+#### STT extras のインストール
+
+ローカル文字起こし（[faster-whisper](https://github.com/SYSTRAN/faster-whisper)、
+MIT ライセンス、CTranslate2 ベース、CPU で動作）:
+
+```bash
+pip install 'stackchan-mcp[stt-faster-whisper]'
+```
+
+[OpenAI Whisper API](https://platform.openai.com/docs/guides/speech-to-text)
+（クラウド、ローカル計算資源が少ない場合に有用）:
+
+```bash
+pip install 'stackchan-mcp[stt-openai]'
+export OPENAI_API_KEY=sk-...
+```
+
+どちらの extras にも、上り Opus フレームのデコードに必要な
+`opuslib` を含む `[stt]` ベース extras が含まれます。デコーダは
+システム側の `libopus` ライブラリを要求します — macOS なら
+`brew install opus`、Debian/Ubuntu なら
+`sudo apt-get install libopus0`（`[tts]` extras と同じ前提）。
+
+#### 設定 (任意)
+
+| 環境変数 | デフォルト | 補足 |
+|---|---|---|
+| `STACKCHAN_FASTER_WHISPER_MODEL` | `base` | モデル識別子 — `tiny` / `base` / `small` / `medium` / `large-v3`。大きいモデルほど精度は上がるが、メモリ消費と推論時間も増える |
+| `STACKCHAN_FASTER_WHISPER_DEVICE` | `cpu` | `cpu` / `cuda` / `auto` |
+| `STACKCHAN_FASTER_WHISPER_COMPUTE_TYPE` | `int8` | `int8` / `float16` / `float32` |
+| `STACKCHAN_OPENAI_WHISPER_MODEL` | `whisper-1` | OpenAI Whisper モデル識別子（公式 API では現状 `whisper-1` のみ） |
+
+#### 試す
+
+MCP クライアントから:
+
+```
+listen(duration_ms=5000, language="ja")
+```
+
+gateway がデバイスに `{"type":"listen","state":"start","mode":"manual"}`
+を送信 → キャプチャ窓の間に上ってくる Opus フレームをバッファ →
+`{"type":"listen","state":"stop"}` を送信 → 蓄積した音声を登録済み
+STT エンジンに渡して文字起こし、という流れです。`faster-whisper`
+エンジンの初回呼び出しではモデル（`base` で約 140 MB）が Hugging
+Face キャッシュにダウンロードされ、以降は再利用されます。
+STT フレームワークもエンジン非依存なので、Vosk・whisper.cpp・他の
+クラウドサービス等を `listen` API を変えずに後から追加できます。
 
 ## アバター画像について
 

@@ -15,6 +15,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from .gateway import get_gateway
+from .stt import listen_and_transcribe
 from .tts import synthesize_and_send
 
 logger = logging.getLogger(__name__)
@@ -408,6 +409,65 @@ def create_server() -> Server:
                     "required": ["text"],
                 },
             ),
+            Tool(
+                name="listen",
+                description=(
+                    "Capture a short utterance from the device microphone and "
+                    "transcribe it via a gateway-side STT engine (Phase 4, "
+                    "Issue #91). The gateway sends a 'listen' notification "
+                    "over the existing WebSocket to put the device firmware "
+                    "into listening mode, buffers the Opus frames the device "
+                    "streams up during the capture window, then decodes and "
+                    "transcribes them once the window closes. Requires a "
+                    "minimal firmware change to handle the inbound 'listen' "
+                    "wire type (paired with this gateway release). Engine is "
+                    "selectable via 'engine' (default 'faster-whisper', local). "
+                    "Install the relevant extra "
+                    "('pip install stackchan-mcp[stt-faster-whisper]' or "
+                    "'stt-openai'); calling this tool before an engine is "
+                    "registered returns a clear error."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "duration_ms": {
+                            "type": "integer",
+                            "description": (
+                                "Capture window in milliseconds. Clamped to "
+                                "[100, 30000]."
+                            ),
+                            "default": 5000,
+                            "minimum": 100,
+                            "maximum": 30000,
+                        },
+                        "engine": {
+                            "type": "string",
+                            "description": (
+                                "Engine identifier (e.g. 'faster-whisper', "
+                                "'openai-whisper'). Default 'faster-whisper'."
+                            ),
+                            "default": "faster-whisper",
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": (
+                                "ISO 639-1 language code (e.g. 'ja'). Pass "
+                                "an empty string or omit for autodetect."
+                            ),
+                            "default": "ja",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Engine-specific model identifier (e.g. "
+                                "'base' / 'small' / 'medium' for faster-"
+                                "whisper, 'whisper-1' for OpenAI). Engines "
+                                "fall back to their default when omitted."
+                            ),
+                        },
+                    },
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -430,6 +490,25 @@ def create_server() -> Server:
             # tracebacks leak into the agent's transcript.
             try:
                 result = await synthesize_and_send(arguments, gateway=gw)
+            except (ValueError, NotImplementedError, RuntimeError) as exc:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": str(exc)}),
+                    )
+                ]
+            return [TextContent(type="text", text=json.dumps(result))]
+
+        if name == "listen":
+            # STT runs on the gateway side. The orchestrator drives the
+            # device's listening state via ``listen.start``/``stop``
+            # notifications, buffers the inbound Opus frames, decodes
+            # them, and hands the PCM blob to the registered engine.
+            # Same error-class discipline as say(): ValueError /
+            # NotImplementedError / RuntimeError all turn into clean
+            # MCP error JSON.
+            try:
+                result = await listen_and_transcribe(arguments, gateway=gw)
             except (ValueError, NotImplementedError, RuntimeError) as exc:
                 return [
                     TextContent(

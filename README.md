@@ -62,6 +62,7 @@ This repository is a monorepo.
 | `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array in a single I2C burst (use this for animations / multi-color patterns); trailing LEDs keep their previous color | ✅ |
 | `clear_leds` | Turn all 12 base RGB LEDs off | ✅ |
 | `say(text, voice?, speaker_id?, reference_audio?)` | Speak text on the device speaker via gateway-side TTS. Default engine: **VOICEVOX** (runs as a separate HTTP service — see [TTS setup](#optional-tts-setup-voicevox)). Requires the `[tts]` extra. | ✅ |
+| `listen(duration_ms?, engine?, language?, model?)` | Capture a short utterance from the device microphone and transcribe it via gateway-side STT. Default engine: **faster-whisper** (local, MIT) — see [STT setup](#optional-stt-setup-faster-whisper). Requires the `[stt-faster-whisper]` (or `[stt-openai]`) extra and a firmware update with the inbound `listen` wire type. | ✅ |
 
 See `gateway/README.md` for full schemas.
 
@@ -370,6 +371,65 @@ existing audio decoder pipeline already accepts these frames. The
 TTS framework is engine-agnostic, so additional engines (Irodori-TTS
 voice cloning is on the roadmap) can be added without changing the
 `say` API.
+
+### 5. Optional: STT setup (faster-whisper)
+
+To let the device hear, install one of the `[stt-*]` extras and pair
+it with a firmware that supports the inbound `listen` wire type
+(present from this release onward). The gateway sends a `listen.start`
+notification, the firmware opens the microphone, and the inbound
+Opus frames are decoded and transcribed locally — no audio leaves
+your machine when you use the default `faster-whisper` engine.
+
+#### Install the STT extra
+
+For local transcription with [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+(MIT-licensed, CTranslate2-based, runs on CPU):
+
+```bash
+pip install 'stackchan-mcp[stt-faster-whisper]'
+```
+
+For the [OpenAI Whisper API](https://platform.openai.com/docs/guides/speech-to-text)
+(cloud, useful when local compute is constrained):
+
+```bash
+pip install 'stackchan-mcp[stt-openai]'
+export OPENAI_API_KEY=sk-...
+```
+
+Both extras include the base `[stt]` extra which pulls in `opuslib`
+for decoding the inbound frames. The decoder needs the system
+`libopus` library — `brew install opus` on macOS,
+`sudo apt-get install libopus0` on Debian/Ubuntu (this is the same
+prerequisite as the `[tts]` extra).
+
+#### Configure (optional)
+
+| Environment variable | Default | Notes |
+|---|---|---|
+| `STACKCHAN_FASTER_WHISPER_MODEL` | `base` | Model identifier — `tiny` / `base` / `small` / `medium` / `large-v3`. Larger models are more accurate but slower and use more memory. |
+| `STACKCHAN_FASTER_WHISPER_DEVICE` | `cpu` | `cpu` / `cuda` / `auto`. |
+| `STACKCHAN_FASTER_WHISPER_COMPUTE_TYPE` | `int8` | `int8` / `float16` / `float32`. |
+| `STACKCHAN_OPENAI_WHISPER_MODEL` | `whisper-1` | OpenAI Whisper model identifier (only `whisper-1` is currently exposed by the API). |
+
+#### Try it
+
+From an MCP client:
+
+```
+listen(duration_ms=5000, language="ja")
+```
+
+The gateway sends `{"type":"listen","state":"start","mode":"manual"}`
+to the device, buffers the Opus frames the device streams up for the
+capture window, then sends `{"type":"listen","state":"stop"}` and
+hands the buffered audio to the registered STT engine. The first call
+to the `faster-whisper` engine downloads the chosen model (~140 MB
+for `base`) into the Hugging Face cache; subsequent calls reuse it.
+The STT framework is engine-agnostic — additional engines (Vosk,
+whisper.cpp, cloud providers) can be added without changing the
+`listen` API.
 
 ## About the avatar images
 

@@ -314,6 +314,84 @@ async def test_manager_send_tts_state_no_device():
         await mgr.send_tts_state("start")
 
 
+# ---------------------------------------------------------------------------
+# send_listen_state (STT pipeline, Issue #91)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connection_send_listen_state_start_includes_mode():
+    """listen.start carries a mode field on the wire."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-listen")  # type: ignore[arg-type]
+
+    await conn.send_listen_state("start", mode="manual")
+
+    assert len(ws.sent) == 1
+    payload = json.loads(ws.sent[0])
+    assert payload == {
+        "session_id": "session-listen",
+        "type": "listen",
+        "state": "start",
+        "mode": "manual",
+    }
+
+
+@pytest.mark.asyncio
+async def test_connection_send_listen_state_stop_omits_mode():
+    """listen.stop has no mode field — the wire shape mirrors the firmware.
+
+    The firmware's ``OnIncomingJson`` listen handler only consults
+    ``mode`` on ``state="start"``; sending it on stop would be noise.
+    """
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-listen")  # type: ignore[arg-type]
+
+    await conn.send_listen_state("stop")
+
+    assert len(ws.sent) == 1
+    payload = json.loads(ws.sent[0])
+    assert payload == {
+        "session_id": "session-listen",
+        "type": "listen",
+        "state": "stop",
+    }
+
+
+@pytest.mark.asyncio
+async def test_connection_send_listen_state_raises_after_disconnect():
+    """A disconnected connection refuses to send listen notifications."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-listen")  # type: ignore[arg-type]
+
+    conn.disconnect()
+
+    with pytest.raises(ConnectionError):
+        await conn.send_listen_state("start", mode="manual")
+    assert ws.sent == []
+
+
+@pytest.mark.asyncio
+async def test_manager_send_listen_state_no_device():
+    """ESP32Manager.send_listen_state raises when no device is attached."""
+    mgr = ESP32Manager()
+
+    with pytest.raises(ConnectionError):
+        await mgr.send_listen_state("start")
+
+
+def test_manager_exposes_listen_lock_distinct_from_tts_lock():
+    """The listen and TTS lifecycles each have their own per-device lock.
+
+    A single shared lock would force TTS and STT to serialise against
+    each other (e.g. a long faster-whisper run would block say()
+    callers and vice versa) even though they touch disjoint state on
+    the wire.
+    """
+    mgr = ESP32Manager()
+    assert mgr.tts_lock is not mgr.listen_lock
+
+
 class _FailingWebSocket:
     """WebSocket that raises a websockets-specific error on send()."""
 

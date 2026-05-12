@@ -1,10 +1,16 @@
-"""Tests for the gateway audio_stream helpers (Issue #70 PR2)."""
+"""Tests for the gateway audio_stream helpers (Issue #70 PR2 / Issue #91)."""
 
 from __future__ import annotations
 
 import pytest
 
-from stackchan_mcp.audio_stream import handle_audio_frame, push_opus_frames
+from stackchan_mcp.audio_stream import (
+    handle_audio_frame,
+    is_recording,
+    push_opus_frames,
+    start_recording,
+    stop_recording,
+)
 
 
 class _FakeESP32:
@@ -18,10 +24,65 @@ class _FakeESP32:
         self.frames.append(frame)
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_recording_slot():
+    """Always release the module-level recording slot between tests."""
+    yield
+    if is_recording():
+        stop_recording()
+
+
 @pytest.mark.asyncio
-async def test_handle_audio_frame_is_a_silent_stub():
-    """The inbound stub does not raise — STT is wired separately."""
+async def test_handle_audio_frame_discards_when_no_recording():
+    """Frames are discarded when no recording slot is open (Issue #91)."""
+    assert not is_recording()
+    # Should not raise; no buffer to grow.
     await handle_audio_frame(b"\x00\x01\x02", session_id="session-1")
+    assert not is_recording()
+
+
+@pytest.mark.asyncio
+async def test_recording_lifecycle_buffers_frames_between_start_and_stop():
+    """start_recording -> handle_audio_frame -> stop_recording returns the bytes.
+
+    Outside the start/stop window, frames are silently discarded as
+    before; inside it, the orchestrator collects them for the STT
+    pipeline.
+    """
+    assert not is_recording()
+    start_recording("session-listen")
+    assert is_recording()
+
+    await handle_audio_frame(b"frame-1", session_id="session-listen")
+    await handle_audio_frame(b"frame-2", session_id="session-listen")
+    await handle_audio_frame(b"frame-3", session_id="session-listen")
+
+    frames = stop_recording()
+
+    assert frames == [b"frame-1", b"frame-2", b"frame-3"]
+    assert not is_recording()
+    # A second stop returns an empty list rather than raising.
+    assert stop_recording() == []
+
+
+@pytest.mark.asyncio
+async def test_start_recording_resets_previous_buffer():
+    """Re-opening the slot drops any frames buffered from a leaked prior run.
+
+    The listen_lock should prevent this in practice, but the audio
+    pipeline should still be defensive — leaking frames from one
+    capture into the next would mix transcriptions silently.
+    """
+    start_recording("session-a")
+    await handle_audio_frame(b"leftover", session_id="session-a")
+
+    # Without an intervening stop_recording (simulating a crashed
+    # prior call), opening the slot afresh discards the leftover.
+    start_recording("session-b")
+    await handle_audio_frame(b"new-1", session_id="session-b")
+
+    frames = stop_recording()
+    assert frames == [b"new-1"]
 
 
 @pytest.mark.asyncio

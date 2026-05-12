@@ -555,6 +555,37 @@ void Application::InitializeProtocol() {
                     });
                 }
             }
+        } else if (strcmp(type->valuestring, "listen") == 0) {
+            // Server-driven listening trigger (Issue #91,
+            // kisaragi-mochi/stackchan-mcp). Mirrors the existing
+            // device->gateway ``Protocol::SendStartListening()`` wire format in
+            // the reverse direction so the gateway can request the device to
+            // enter / leave listening state without a physical button press or
+            // wake-word. Used by the gateway-side ``listen()`` MCP tool to
+            // perform STT capture on demand.
+            //
+            // Phase 1 honours only ``state: "start" | "stop"``; the ``mode``
+            // field is parsed but currently ignored because
+            // ``HandleStartListeningEvent()`` unconditionally calls
+            // ``SetListeningMode(kListeningModeManualStop)``. Manual-stop is
+            // also the right default for gateway-driven capture: the gateway
+            // controls the exact stop boundary by issuing
+            // ``{"type":"listen","state":"stop"}`` after its capture window.
+            // Threading ``auto`` / ``realtime`` mode through is a follow-up.
+            auto state = cJSON_GetObjectItem(root, "state");
+            if (!cJSON_IsString(state)) {
+                ESP_LOGW(TAG, "listen message missing state");
+            } else if (strcmp(state->valuestring, "start") == 0) {
+                Schedule([this]() {
+                    StartListening();
+                });
+            } else if (strcmp(state->valuestring, "stop") == 0) {
+                Schedule([this]() {
+                    StopListening();
+                });
+            } else {
+                ESP_LOGW(TAG, "Unknown listen state: %s", state->valuestring);
+            }
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {

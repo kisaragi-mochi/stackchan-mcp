@@ -17,6 +17,7 @@ import websockets
 import websockets.exceptions
 from websockets.asyncio.server import ServerConnection
 
+from .audio_stream import handle_audio_frame
 from .protocol import HelloResponse, make_mcp_message, parse_jsonrpc_response
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,33 @@ class ESP32Connection:
         }
         await self._ws_send(json.dumps(message))
 
+    async def send_listen_state(self, state: str, mode: str = "manual") -> None:
+        """Send a listen state notification (``start`` / ``stop``).
+
+        Server-driven counterpart to the device's existing
+        :func:`Protocol::SendStartListening` (Issue #91). The
+        firmware's :func:`Application::OnIncomingJson` dispatches
+        ``state: "start"`` to :func:`Application::StartListening` and
+        ``state: "stop"`` to :func:`Application::StopListening`.
+
+        ``mode`` is currently accepted only for ``state="start"`` and is
+        carried on the wire for forward-compatibility — the firmware
+        accepts but ignores it in Phase 1 because
+        :func:`HandleStartListeningEvent` unconditionally enters
+        ``kListeningModeManualStop`` (the gateway controls the stop
+        boundary explicitly).
+        """
+        if not self._connected:
+            raise ConnectionError("ESP32 not connected")
+        message: dict[str, Any] = {
+            "session_id": self.session_id,
+            "type": "listen",
+            "state": state,
+        }
+        if state == "start":
+            message["mode"] = mode
+        await self._ws_send(json.dumps(message))
+
     def disconnect(self) -> None:
         """Mark connection as disconnected."""
         self._connected = False
@@ -242,6 +270,13 @@ class ESP32Manager:
         # if multi-device support lands later, the lock should move
         # onto :class:`ESP32Connection` instead.
         self._tts_lock = asyncio.Lock()
+        # Same-shaped lock for the inbound STT capture path (Issue
+        # #91). Two concurrent ``listen()`` invocations would otherwise
+        # both buffer inbound Opus frames into the single recording
+        # slot in :mod:`stackchan_mcp.audio_stream` and produce a
+        # mixed transcription, so the orchestrator wraps its entire
+        # start → wait → stop block in ``async with`` on this lock.
+        self._listen_lock = asyncio.Lock()
 
     @property
     def device_connected(self) -> bool:
@@ -259,6 +294,17 @@ class ESP32Manager:
         the start → frames → stop block in ``async with`` on this lock.
         """
         return self._tts_lock
+
+    @property
+    def listen_lock(self) -> asyncio.Lock:
+        """Per-device lock guarding the STT capture sequence.
+
+        See :attr:`_listen_lock` for the rationale; the orchestrator
+        wraps the entire ``listen.start`` → wait → ``listen.stop``
+        block in ``async with`` on this lock so two concurrent
+        ``listen()`` calls cannot share the inbound recording slot.
+        """
+        return self._listen_lock
 
     async def start(
         self,
@@ -330,7 +376,14 @@ class ESP32Manager:
         try:
             async for message in ws:
                 if isinstance(message, bytes):
-                    # Binary = audio frame, ignore for now
+                    # Binary = audio frame. Forward to the audio_stream
+                    # module which buffers it for STT capture (Issue
+                    # #91) when a recording slot is open, or discards
+                    # it otherwise. Only protocol v1 is supported on
+                    # the inbound side today; the orchestrator gates
+                    # listen() on protocol_version=1 so v2/v3 frames
+                    # cannot reach this point with recording active.
+                    await handle_audio_frame(message, session_id)
                     continue
 
                 try:
@@ -450,6 +503,17 @@ class ESP32Manager:
         if not self._connection or not self._connection.connected:
             raise ConnectionError("No ESP32 device connected")
         await self._connection.send_tts_state(state)
+
+    async def send_listen_state(self, state: str, mode: str = "manual") -> None:
+        """Send a listen state notification to put the device into /
+        out of listening mode (Issue #91).
+
+        See :meth:`ESP32Connection.send_listen_state` for the wire
+        format and the firmware-side dispatch.
+        """
+        if not self._connection or not self._connection.connected:
+            raise ConnectionError("No ESP32 device connected")
+        await self._connection.send_listen_state(state, mode=mode)
 
     def get_status(self) -> dict[str, Any]:
         """Get current connection status."""

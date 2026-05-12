@@ -48,6 +48,24 @@ tts-voicevox = [
     "stackchan-mcp[tts]",
 ]
 
+# Phase 4 STT — see Issue #91.
+# The base `stt` extra carries `opuslib` for decoding the device's
+# inbound Opus frames. Concrete engines live behind their own extras
+# so users only pull in the heavy ML dependencies they actually need.
+#   * faster-whisper — local Whisper via CTranslate2 (default, MIT)
+#   * openai         — OpenAI Whisper API client (cloud)
+stt = [
+    "opuslib>=3",
+]
+stt-faster-whisper = [
+    "stackchan-mcp[stt]",
+    "faster-whisper>=1.0",
+]
+stt-openai = [
+    "stackchan-mcp[stt]",
+    "openai>=1.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/kisaragi-mochi/stackchan-mcp"
 Repository = "https://github.com/kisaragi-mochi/stackchan-mcp"

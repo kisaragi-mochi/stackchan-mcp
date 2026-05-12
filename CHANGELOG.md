@@ -15,8 +15,45 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Added
+
+- Phase 4 STT — gateway-side `listen(duration_ms?, engine?, language?,
+  model?)` MCP tool. The gateway puts the device firmware into
+  listening mode over the existing WebSocket, buffers the Opus frames
+  the device streams up during the capture window, then decodes and
+  transcribes them through a registered STT engine. The default
+  engine is **faster-whisper** (local, MIT-licensed, runs on CPU);
+  the **OpenAI Whisper API** is available as an alternative for
+  setups without local compute. Install with
+  `pip install stackchan-mcp[stt-faster-whisper]` (or `[stt-openai]`)
+  — the `[stt]` base extra pulls in `opuslib` for inbound frame
+  decoding. The framework is engine-agnostic (`stt.STTEngine` ABC +
+  `stt.EngineRegistry`, symmetric to the existing `tts` package), so
+  additional engines can be added in follow-up PRs without touching
+  the orchestration pipeline. Configure faster-whisper with
+  `STACKCHAN_FASTER_WHISPER_MODEL` (default `base`), `_DEVICE`
+  (default `cpu`), and `_COMPUTE_TYPE` (default `int8`); the OpenAI
+  engine reads `OPENAI_API_KEY` plus the optional
+  `STACKCHAN_OPENAI_WHISPER_MODEL` (default `whisper-1`). Requires a
+  paired firmware update — see the Firmware section below. Refs #91.
+
 ### Firmware
 
+- **Server-driven listening trigger** (paired with the new
+  `listen()` MCP tool above, Issue #91). The firmware's
+  `Application::OnIncomingJson` handler now accepts inbound
+  `{"type":"listen","state":"start"|"stop"}` messages from the
+  gateway and dispatches them to `Application::StartListening` /
+  `StopListening`. The wire format mirrors the existing device→gateway
+  `Protocol::SendStartListening` notification in the reverse
+  direction; the upstream 78/xiaozhi-esp32 protocol has no inbound
+  listen type today, so this extension is additive and does not
+  collide with anything upstream. The `mode` field is parsed on
+  `state="start"` but currently ignored — `HandleStartListeningEvent`
+  unconditionally enters `kListeningModeManualStop`, which is also
+  the right behaviour for gateway-driven capture (the gateway
+  controls the stop boundary explicitly). Threading `auto` /
+  `realtime` mode through is a follow-up. Refs #91.
 - **TTS lip-sync (state-driven)**: drive avatar mouth animation while
   the gateway is speaking. The firmware now reacts to the
   `tts.start` / `tts.stop` JSON notifications introduced in #75 (Issue
