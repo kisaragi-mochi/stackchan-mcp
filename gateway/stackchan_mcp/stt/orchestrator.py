@@ -192,9 +192,11 @@ async def listen_and_transcribe(
         # sending listen.start so we don't drop the first frame the
         # device emits the moment it lands in kDeviceStateListening.
         start_recording(session_id)
+        listen_start_sent = False
         try:
             try:
                 await gateway.esp32.send_listen_state("start", mode="manual")
+                listen_start_sent = True
             except ConnectionError as exc:
                 raise RuntimeError(
                     f"Device disconnected before listen.start: {exc}"
@@ -207,18 +209,41 @@ async def listen_and_transcribe(
             await asyncio.sleep(LISTEN_START_TRANSITION_DELAY_S)
 
             await asyncio.sleep(duration_ms / 1000.0)
-
-            try:
-                await gateway.esp32.send_listen_state("stop")
-            except ConnectionError:
-                # The device dropped mid-capture; we still want to
-                # transcribe whatever made it onto the wire before the
-                # disconnect.
-                logger.warning(
-                    "Device disconnected before listen.stop; transcribing "
-                    "partial buffer"
-                )
         finally:
+            # Cancellation-safe listen.stop. If the request is
+            # cancelled mid-capture (or any exception unwinds here)
+            # after listen.start has been delivered, the device is
+            # still in ``kDeviceStateListening`` with the microphone
+            # open — without a best-effort stop the firmware would
+            # stay there until an unrelated user action (button /
+            # wake-word) eventually pulled it back to idle.
+            # ``asyncio.shield`` protects the stop send from the
+            # cancellation that's already propagating through the
+            # outer await, so the device receives the stop even
+            # though the orchestrator coroutine itself is being torn
+            # down. The shielded send still completes synchronously
+            # before this ``finally`` block returns.
+            if listen_start_sent:
+                try:
+                    await asyncio.shield(
+                        gateway.esp32.send_listen_state("stop")
+                    )
+                except (ConnectionError, asyncio.CancelledError):
+                    # Device dropped, or our awaiter was cancelled
+                    # after shield released the send back to us. In
+                    # both cases the partial buffer is still worth
+                    # transcribing, but the operator should know the
+                    # firmware may need a manual nudge.
+                    logger.warning(
+                        "listen.stop did not reach device cleanly "
+                        "(cancellation or disconnect); firmware may "
+                        "stay in listening mode until a button press "
+                        "or wake-word"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "best-effort listen.stop failed: %s", exc
+                    )
             frames = stop_recording()
 
         frame_count = len(frames)

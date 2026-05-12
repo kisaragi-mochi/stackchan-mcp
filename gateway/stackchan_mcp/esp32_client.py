@@ -270,13 +270,21 @@ class ESP32Manager:
         # if multi-device support lands later, the lock should move
         # onto :class:`ESP32Connection` instead.
         self._tts_lock = asyncio.Lock()
-        # Same-shaped lock for the inbound STT capture path (Issue
-        # #91). Two concurrent ``listen()`` invocations would otherwise
-        # both buffer inbound Opus frames into the single recording
-        # slot in :mod:`stackchan_mcp.audio_stream` and produce a
-        # mixed transcription, so the orchestrator wraps its entire
-        # start → wait → stop block in ``async with`` on this lock.
-        self._listen_lock = asyncio.Lock()
+        # Inbound STT capture (Issue #91) shares the TTS lock rather
+        # than running on a separate one. The firmware's
+        # ``HandleStartListeningEvent`` aborts any in-flight TTS when
+        # a listen.start arrives mid-speaking (state ==
+        # ``kDeviceStateSpeaking`` → ``AbortSpeaking`` →
+        # ``SetListeningMode(kListeningModeManualStop)``), so two
+        # operations on the same device's audio path would
+        # otherwise step on each other: a ``listen()`` could yank a
+        # ``say()`` out of speaking mid-utterance, or a ``say()``
+        # could start streaming TTS frames into the buffer a
+        # concurrent ``listen()`` is capturing. Treating the audio
+        # path as a single resource makes the device's state machine
+        # observable from gateway code; if a full-duplex contract
+        # ever lands later the lock can split again.
+        self._listen_lock = self._tts_lock
 
     @property
     def device_connected(self) -> bool:

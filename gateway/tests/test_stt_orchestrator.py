@@ -347,6 +347,54 @@ async def test_pipeline_value_error_propagates_as_value_error(fake_decode, monke
 
 
 @pytest.mark.asyncio
+async def test_pipeline_sends_listen_stop_on_cancellation(fake_decode):
+    """A cancelled listen() call still tells the device to stop.
+
+    Without ``asyncio.shield`` around the listen.stop send, the
+    cancellation would propagate before the stop reached the wire and
+    the firmware would stay in ``kDeviceStateListening`` with the
+    microphone open until an unrelated button press / wake-word
+    eventually pulled it back to idle. The shielded stop guarantees
+    the device receives the cleanup notification even when the
+    orchestrator coroutine itself is being torn down.
+    """
+    engine = _CapturingEngine()
+    esp32 = _FakeESP32()  # no frame injection; the sleep will be cancelled
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    task = asyncio.create_task(
+        listen_and_transcribe(
+            {"duration_ms": 30000},  # long window; we will cancel mid-flight
+            gateway=gateway,
+            registry=reg,
+        )
+    )
+    # Yield once so the task starts, lands in listen.start, then
+    # enters the capture sleep.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Despite the cancellation, the orchestrator must have delivered
+    # both listen.start and listen.stop to the device so the firmware
+    # leaves listening mode cleanly.
+    state_seq = [s for s, _ in esp32.listen_states]
+    assert "start" in state_seq
+    assert "stop" in state_seq
+    # The recording slot must also be released — leaving it open
+    # would corrupt the next listen() call's buffer.
+    assert not is_recording()
+    # Engine is not invoked because the cancellation prevents the
+    # post-capture transcribe step.
+    assert engine.calls == []
+
+
+@pytest.mark.asyncio
 async def test_pipeline_serialises_concurrent_listen_calls(fake_decode, monkeypatch):
     """Concurrent listen() calls don't share the recording slot.
 

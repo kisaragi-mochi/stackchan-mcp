@@ -380,16 +380,19 @@ async def test_manager_send_listen_state_no_device():
         await mgr.send_listen_state("start")
 
 
-def test_manager_exposes_listen_lock_distinct_from_tts_lock():
-    """The listen and TTS lifecycles each have their own per-device lock.
+def test_manager_listen_lock_is_same_as_tts_lock():
+    """listen() and say() share a single audio-path lock per device.
 
-    A single shared lock would force TTS and STT to serialise against
-    each other (e.g. a long faster-whisper run would block say()
-    callers and vice versa) even though they touch disjoint state on
-    the wire.
+    Without sharing, the firmware's ``HandleStartListeningEvent`` could
+    abort an in-flight ``say()`` mid-utterance the moment a concurrent
+    ``listen()`` arrived (state == kDeviceStateSpeaking →
+    AbortSpeaking + SetListeningMode), and conversely TTS frames in
+    flight would leak into a concurrent capture's buffer. Treating
+    the audio path as a single serialised resource keeps the device's
+    state machine observable from the gateway side.
     """
     mgr = ESP32Manager()
-    assert mgr.tts_lock is not mgr.listen_lock
+    assert mgr.tts_lock is mgr.listen_lock
 
 
 class _FailingWebSocket:
