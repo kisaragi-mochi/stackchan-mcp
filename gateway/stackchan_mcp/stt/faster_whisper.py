@@ -21,6 +21,17 @@ import wave
 from io import BytesIO
 from typing import Any
 
+# Probe the optional dependency at module import time so a missing
+# extra produces ImportError here, which :mod:`stackchan_mcp.stt`'s
+# ``_try_register`` swallows cleanly. Without this probe the engine
+# would register successfully (we import faster_whisper lazily inside
+# :meth:`FasterWhisperEngine._load_model`), and a ``listen()`` call
+# would put the device into recording mode + wait for the entire
+# capture window before failing at decode time — surfacing a stale
+# "install [stt-faster-whisper]" error to the agent only after the
+# user had already spoken into the dead capture.
+import faster_whisper as _faster_whisper  # noqa: F401  (probe-only import)
+
 from .audio_utils import DEVICE_SAMPLE_RATE
 from .base import STTEngine
 
@@ -117,14 +128,10 @@ class FasterWhisperEngine(STTEngine):
         async with self._load_lock:
             if self._model is not None:
                 return self._model
-            try:
-                from faster_whisper import WhisperModel  # type: ignore[import-not-found]
-            except ImportError as exc:  # pragma: no cover - exercised via integration
-                raise RuntimeError(
-                    "faster-whisper is not installed. Install with "
-                    "'pip install stackchan-mcp[stt-faster-whisper]' to "
-                    "enable local Whisper transcription."
-                ) from exc
+            # Top-of-module probe import already guarantees the extra
+            # is present; pull the concrete class out here at first
+            # use so model construction stays lazy.
+            from faster_whisper import WhisperModel  # type: ignore[import-not-found]
 
             logger.info(
                 "Loading faster-whisper model=%s device=%s compute_type=%s",

@@ -20,6 +20,15 @@ import wave
 from io import BytesIO
 from typing import Any
 
+# Probe the optional dependency at module import time so a missing
+# extra produces ImportError here, which :mod:`stackchan_mcp.stt`'s
+# ``_try_register`` swallows cleanly. See the matching comment in
+# :mod:`stackchan_mcp.stt.faster_whisper` for why this matters: a
+# late ImportError at transcribe() time would surface only *after*
+# the device had been driven into recording mode for the full
+# capture window.
+import openai as _openai  # noqa: F401  (probe-only import)
+
 from .audio_utils import DEVICE_SAMPLE_RATE
 from .base import STTEngine
 
@@ -92,14 +101,11 @@ class OpenAIWhisperEngine(STTEngine):
             raise ValueError("openai-whisper transcribe: empty PCM buffer")
 
         if self._injected_client is None:
-            try:
-                from openai import AsyncOpenAI  # type: ignore[import-not-found]
-            except ImportError as exc:  # pragma: no cover - exercised via integration
-                raise RuntimeError(
-                    "openai is not installed. Install with "
-                    "'pip install stackchan-mcp[stt-openai]' to enable "
-                    "OpenAI Whisper API transcription."
-                ) from exc
+            # Top-of-module probe import already guarantees the extra
+            # is present; defer the concrete class binding to first
+            # use so API client construction stays lazy.
+            from openai import AsyncOpenAI  # type: ignore[import-not-found]
+
             if not os.getenv("OPENAI_API_KEY"):
                 raise RuntimeError(
                     "OPENAI_API_KEY is not set. The OpenAI Whisper engine "
