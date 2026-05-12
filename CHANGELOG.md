@@ -15,6 +15,8 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-12
+
 ### Added
 
 - Phase 4 STT — gateway-side `listen(duration_ms?, engine?, language?,
@@ -38,6 +40,20 @@ change is called out under a `Firmware` subsection of the release entry.
   paired firmware update — see the Firmware section below. Refs #91.
 
 ### Firmware
+
+> The firmware changes below were released through the dedicated firmware
+> release stream as `firmware-v1.0.0` (2026-05-10), `firmware-v1.1.0`
+> (2026-05-10), `firmware-v1.2.0` (2026-05-11), and `firmware-v1.3.0`
+> (paired with this gateway release — contains the server-driven
+> listening trigger that the new `listen()` MCP tool depends on).
+> Prebuilt binaries (`merged-binary.bin` / `xiaozhi.bin` /
+> `v*_stackchan.zip`) for each tag are attached to the corresponding
+> GitHub release:
+> https://github.com/kisaragi-mochi/stackchan-mcp/releases.
+> PyPI users running pre-v1.3.0 firmware can still upgrade to
+> `stackchan-mcp` 0.6.0 — only the new `listen()` MCP tool requires the
+> paired firmware update; the existing `say()` and other tools continue
+> to work against older firmware.
 
 - **Server-driven listening trigger** (paired with the new
   `listen()` MCP tool above, Issue #91). The firmware's
@@ -389,7 +405,8 @@ uv tool install stackchan-mcp
   releases only and does not maintain a moving `@v8` major-version
   alias, so the previous floating pin no longer resolved. ([#47])
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.6.0
 [0.5.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.3.0
