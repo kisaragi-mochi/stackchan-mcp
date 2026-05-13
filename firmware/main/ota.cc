@@ -26,6 +26,16 @@
 
 
 Ota::Ota() {
+    // Populate current_version_ from the ESP-IDF app description so
+    // GetCurrentVersion() returns a usable value even when CheckVersion()
+    // is intentionally skipped (e.g. forks/builds that bypass the xiaozhi
+    // OTA cloud). CheckVersion() also sets this field, so this just makes
+    // the version string available before — or without — the OTA round-trip.
+    auto app_desc = esp_app_get_description();
+    if (app_desc != nullptr) {
+        current_version_ = app_desc->version;
+    }
+
 #ifdef ESP_EFUSE_BLOCK_USR_DATA
     // Read Serial Number from efuse user_data
     uint8_t serial_number[33] = {0};
