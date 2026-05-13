@@ -108,6 +108,24 @@ class Gateway:
             or ""
         )
 
+    @property
+    def pcm_token(self) -> str:
+        """Bearer token expected by the /pcm HTTP endpoint.
+
+        Separate token from the ESP32 WebSocket / capture upload because
+        the /pcm endpoint authorises external PCM producers (e.g. the
+        SAIVerse voice-tts addon) — a different trust boundary from the
+        device-to-gateway authentication. Falls back to STACKCHAN_TOKEN
+        / BEARER_TOKEN when STACKCHAN_PCM_TOKEN is not configured so
+        single-token local development keeps working.
+        """
+        return (
+            os.getenv("STACKCHAN_PCM_TOKEN")
+            or os.getenv("STACKCHAN_TOKEN")
+            or os.getenv("BEARER_TOKEN")
+            or ""
+        )
+
     async def start(self, *, advertise_mdns: bool = True) -> None:
         """Start the ESP32 WebSocket server and HTTP capture server."""
         host = os.getenv("HOST", "0.0.0.0")
@@ -124,9 +142,16 @@ class Gateway:
             audio_hook_token=self.audio_hook_token,
         )
 
-        # Start HTTP capture server. Same web.Application also serves
-        # the Phase 4.5 avatar /avatar_set/{short_id} endpoint.
-        app = create_capture_app(capture_token=self.vision_token)
+        # Start HTTP capture server. Hosts /capture, /pcm, and the
+        # Phase 4.5 avatar /avatar_set/{short_id} endpoint on the same
+        # web.Application. The PCM endpoint forwards into
+        # send_pcm_stream, so we hand it the active Gateway instance so
+        # it can reach esp32 + tts_lock.
+        app = create_capture_app(
+            capture_token=self.vision_token,
+            pcm_token=self.pcm_token,
+            gateway=self,
+        )
         self._capture_app = app
         self._http_runner = web.AppRunner(app)
         await self._http_runner.setup()
