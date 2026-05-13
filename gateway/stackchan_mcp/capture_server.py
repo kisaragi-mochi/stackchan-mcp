@@ -277,7 +277,19 @@ def create_capture_app(
     dispatches to. May be ``None`` for tests of /capture alone; /pcm
     will return 503 in that case.
     """
-    app = web.Application()
+    # ``client_max_size=0`` disables aiohttp's per-request body size
+    # cap (default 1 MiB). The /pcm endpoint legitimately streams
+    # arbitrarily long PCM utterances (multi-minute TTS, live audio
+    # mixes); a 1 MiB cap would silently cut a chunked-transfer
+    # producer off mid-stream once its cumulative body exceeded that
+    # limit — observed in practice with a 200-second TTS push, which
+    # aborted around 36 s in (~2 MiB of source-rate PCM through the
+    # transfer-encoding pipe). The handler itself enforces no separate
+    # cap; back-pressure comes from the device-side Opus push rate
+    # inside ``send_pcm_stream``, which is the right place for it.
+    # /capture only receives JPEG snapshots from the ESP32 (well under
+    # 1 MiB each) so removing the cap costs it nothing.
+    app = web.Application(client_max_size=0)
     app[CAPTURE_TOKEN_KEY] = capture_token
     app[PCM_TOKEN_KEY] = pcm_token
     app[GATEWAY_KEY] = gateway
