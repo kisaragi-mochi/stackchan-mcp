@@ -384,6 +384,7 @@ async def listen_and_transcribe(
         connection = gateway.esp32.connection
         session_id = getattr(connection, "session_id", "") if connection else ""
 
+        primary_exc: BaseException | None = None
         try:
             motion_saved_angles = await _begin_listen_motion(
                 gateway, motion, look_up_pitch
@@ -489,13 +490,41 @@ async def listen_and_transcribe(
                     ),
                 }
             succeeded = True
+        except BaseException as exc:
+            # Capture the listen-body failure so the cleanup helper
+            # can chain a rollback failure onto it below if cleanup
+            # also raises. Without this, a rollback failure on top
+            # of an already-failed listen would vanish into a
+            # ``logger.warning`` and the caller would only see the
+            # listen failure with no signal that physical state may
+            # be off-baseline.
+            primary_exc = exc
+            raise
         finally:
-            await _shield_listen_motion_cleanup(
+            cleanup_error = await _shield_listen_motion_cleanup(
                 gateway,
                 motion,
                 motion_saved_angles,
                 succeeded=succeeded,
             )
+            if cleanup_error is not None:
+                if primary_exc is not None:
+                    # Listen body already failed AND rollback also
+                    # failed — chain via ``__cause__`` so the
+                    # caller sees both physical-state concerns. The
+                    # listen failure stays primary (it triggered the
+                    # rollback attempt); the rollback failure is
+                    # exposed via ``__cause__`` for inspection. Any
+                    # pre-existing ``__cause__`` on the listen
+                    # failure (e.g. engine's TimeoutError chained
+                    # to a RuntimeError) is preserved on
+                    # ``__context__`` automatically.
+                    raise primary_exc from cleanup_error
+                # Cleanup itself failed on an otherwise-successful
+                # listen — surface it so the failure doesn't vanish
+                # into a logger.warning while the device may be
+                # off-baseline.
+                raise cleanup_error
 
     logger.info(
         "listen(): engine=%s frames=%d duration_ms=%d text=%r",

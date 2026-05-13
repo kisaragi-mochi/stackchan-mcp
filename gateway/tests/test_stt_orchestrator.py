@@ -462,6 +462,88 @@ async def test_listen_motion_cleanup_completes_under_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_listen_motion_look_up_engine_failure_with_rollback_failure_chains(
+    fake_decode,
+    fast_sleep,
+):
+    """When the STT engine fails mid-capture AND the rollback also
+    fails for motion='look-up', the caller must see both errors.
+
+    The engine failure is the primary cause (it triggered the
+    rollback attempt). The rollback failure is chained via
+    ``__cause__`` from the outer listen() finally so the caller
+    can detect that physical state may be off-baseline even though
+    the original primary cause references the engine timeout.
+    Without this chaining the rollback failure would vanish into
+    ``logger.warning`` and the caller would only see the engine
+    error with no signal about the device pose.
+    """
+    engine = _RaisingEngine(TimeoutError("model timed out"))
+    esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
+    gateway = _FakeGateway(esp32)
+
+    original_call_tool = esp32.call_tool
+
+    async def rollback_only_failure(name, arguments):
+        # Forward set_head_angles uses pitch=50.0 (look_up_pitch),
+        # forward set_avatar uses face='thinking'. Both stay on the
+        # original fake path. Only the rollback set_head_angles
+        # (saved pitch=24.0) fails here.
+        if (
+            name == "self.robot.set_head_angles"
+            and arguments.get("pitch") == 24.0
+        ):
+            esp32.tool_calls.append((name, dict(arguments)))
+            return {}, {"message": "simulated rollback pitch failure"}
+        return await original_call_tool(name, arguments)
+
+    esp32.call_tool = rollback_only_failure
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await listen_and_transcribe(
+            {"duration_ms": 500, "motion": "look-up"},
+            gateway=gateway,
+            registry=reg,
+        )
+
+    # The engine failure is wrapped into a RuntimeError stating
+    # which engine failed; it remains the primary exception so the
+    # caller's first signal is still "what triggered the failure".
+    primary = exc_info.value
+    assert "STT engine" in str(primary) or "engine" in str(primary).lower(), (
+        f"primary error should reference the engine failure; got {primary!r}"
+    )
+
+    # The rollback failure is chained via ``__cause__`` so the
+    # caller can inspect it programmatically without it disappearing
+    # into a logger.warning. (The engine's original TimeoutError is
+    # still reachable through ``__context__`` thanks to Python's
+    # automatic exception-context tracking.)
+    chained = primary.__cause__
+    assert chained is not None, (
+        "rollback failure must be chained onto the listen failure, "
+        "not silently swallowed"
+    )
+    assert "set_head_angles" in str(chained), (
+        f"chained error should reference the rollback head-angles failure; "
+        f"got {chained!r}"
+    )
+
+    # Sanity: forward motion ran (pitch=50, thinking) and rollback
+    # was attempted (pitch=24 — that's the call we made fail).
+    pitches_attempted = [
+        args.get("pitch")
+        for name, args in esp32.tool_calls
+        if name == "self.robot.set_head_angles"
+    ]
+    assert 50.0 in pitches_attempted
+    assert 24.0 in pitches_attempted
+
+
+@pytest.mark.asyncio
 async def test_listen_motion_look_up_nested_partial_failure_surfaces_rollback_error(
     fake_decode,
     fast_sleep,
