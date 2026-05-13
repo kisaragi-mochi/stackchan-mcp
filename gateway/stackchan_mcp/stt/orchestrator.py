@@ -112,7 +112,7 @@ async def _shield_listen_motion_cleanup(
     saved_angles: tuple[float, float] | None,
     *,
     succeeded: bool,
-) -> None:
+) -> BaseException | None:
     """Wait for motion cleanup to complete even under cancellation.
 
     A bare ``await asyncio.shield(coro())`` protects the inner
@@ -124,6 +124,12 @@ async def _shield_listen_motion_cleanup(
     re-await it under shield through repeated cancellations, then
     surface the cancellation once cleanup has finished so the
     caller still sees ``CancelledError``.
+
+    Non-cancellation cleanup failures are both logged at warning
+    level and returned to the caller, so partial-failure paths
+    (e.g. setup-time motion failure followed by a rollback failure)
+    can chain the cleanup error onto the primary error rather than
+    silently swallow a physical-state mismatch.
     """
     cleanup_task = asyncio.create_task(
         _finish_listen_motion(
@@ -135,6 +141,7 @@ async def _shield_listen_motion_cleanup(
     )
 
     outer_cancelled = False
+    cleanup_error: BaseException | None = None
     while True:
         try:
             await asyncio.shield(cleanup_task)
@@ -142,6 +149,7 @@ async def _shield_listen_motion_cleanup(
             outer_cancelled = True
             continue
         except Exception as exc:
+            cleanup_error = exc
             logger.warning(
                 "best-effort listen motion cleanup failed: %s", exc
             )
@@ -149,6 +157,7 @@ async def _shield_listen_motion_cleanup(
 
     if outer_cancelled:
         raise asyncio.CancelledError()
+    return cleanup_error
 
 
 async def _call_device_tool(
@@ -210,13 +219,20 @@ async def _begin_listen_motion(
     try:
         await _set_head_angles(gateway, yaw=yaw, pitch=look_up_pitch)
         await _set_avatar(gateway, LISTENING_FACE)
-    except Exception:
-        await _shield_listen_motion_cleanup(
+    except Exception as forward_exc:
+        cleanup_error = await _shield_listen_motion_cleanup(
             gateway,
             motion,
             (yaw, pitch),
             succeeded=False,
         )
+        if cleanup_error is not None:
+            # Forward setup failed AND rollback also failed — the
+            # device may still be in the look-up pose. Chain the
+            # cleanup error onto the forward exception so the caller
+            # sees both physical-state concerns instead of just the
+            # forward avatar / motion error.
+            raise forward_exc from cleanup_error
         raise
     return yaw, pitch
 

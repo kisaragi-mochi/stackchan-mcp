@@ -462,6 +462,97 @@ async def test_listen_motion_cleanup_completes_under_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_listen_motion_look_up_nested_partial_failure_surfaces_rollback_error(
+    fake_decode,
+    fast_sleep,
+):
+    """Nested partial failure during look-up setup must surface BOTH
+    errors to the caller.
+
+    Setup sequence: ``set_head_angles(look_up_pitch)`` succeeds, then
+    ``set_avatar('thinking')`` fails. The orchestrator's setup-failure
+    branch attempts a rollback ``set_head_angles(saved)`` which here
+    is configured to fail as well. Without chaining, the caller only
+    sees the forward avatar error while the device remains in the
+    look-up pose with no signal that physical state was altered.
+    The fix chains the cleanup error onto the forward exception via
+    ``raise ... from`` so the caller can observe both.
+    """
+    engine = _CapturingEngine(text="ok")
+    esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
+    gateway = _FakeGateway(esp32)
+
+    original_call_tool = esp32.call_tool
+
+    async def double_failure(name, arguments):
+        # Forward set_avatar('thinking') fails — record attempt.
+        if (
+            name == "self.display.set_avatar"
+            and arguments.get("face") == "thinking"
+        ):
+            esp32.tool_calls.append((name, dict(arguments)))
+            return {}, {"message": "simulated forward avatar failure"}
+        # Rollback set_head_angles(saved pitch=24.0) fails — record attempt.
+        if (
+            name == "self.robot.set_head_angles"
+            and arguments.get("pitch") == 24.0
+        ):
+            esp32.tool_calls.append((name, dict(arguments)))
+            return {}, {"message": "simulated rollback pitch failure"}
+        # Forward set_head_angles(50.0), forward get_head_angles, and
+        # any other tool call uses the normal fake-call path which
+        # records into tool_calls on its own.
+        return await original_call_tool(name, arguments)
+
+    esp32.call_tool = double_failure
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await listen_and_transcribe(
+            {"duration_ms": 500, "motion": "look-up"},
+            gateway=gateway,
+            registry=reg,
+        )
+
+    # The primary exception is the forward avatar failure.
+    primary = exc_info.value
+    assert "set_avatar" in str(primary) or "avatar" in str(primary), (
+        f"primary error should reference the forward avatar failure; got {primary!r}"
+    )
+
+    # The rollback failure is chained via ``__cause__`` so the caller
+    # can inspect both. Without chaining the rollback failure would
+    # vanish into a logger.warning and the device would be left in
+    # the look-up pose with no programmatic signal.
+    chained = primary.__cause__
+    assert chained is not None, (
+        "rollback failure must be chained onto the forward failure, "
+        "not silently swallowed"
+    )
+    assert "set_head_angles" in str(chained), (
+        f"chained error should reference the rollback head-angles failure; got {chained!r}"
+    )
+
+    # Both the forward attempt and the rollback attempt were actually
+    # made (the fake recorded both).
+    avatars_attempted = [
+        args.get("face")
+        for name, args in esp32.tool_calls
+        if name == "self.display.set_avatar"
+    ]
+    assert "thinking" in avatars_attempted, "forward thinking avatar was attempted"
+    pitches_attempted = [
+        args.get("pitch")
+        for name, args in esp32.tool_calls
+        if name == "self.robot.set_head_angles"
+    ]
+    assert 50.0 in pitches_attempted, "forward look_up pitch was attempted"
+    assert 24.0 in pitches_attempted, "rollback saved pitch was attempted"
+
+
+@pytest.mark.asyncio
 async def test_listen_motion_look_up_partial_rollback_still_restores_avatar(
     fake_decode,
     fast_sleep,
