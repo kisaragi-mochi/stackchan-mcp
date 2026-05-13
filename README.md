@@ -92,7 +92,8 @@ No ESP-IDF or Docker setup needed.
 
 ```bash
 cd firmware
-docker run --rm -v $PWD:/project -w /project espressif/idf:v5.5.2 \
+docker run --rm --ulimit nofile=65536:65536 \
+  -v $PWD:/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 # → releases/v2.2.6_stackchan.zip
 
@@ -100,6 +101,12 @@ docker run --rm -v $PWD:/project -w /project espressif/idf:v5.5.2 \
 esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 build/merged-binary.bin
 ```
+
+The `--ulimit nofile=65536:65536` flag avoids a `Too many open files`
+failure during the LVGL emoji compile step under the default macOS
+Docker (OrbStack / Docker Desktop) file-descriptor limit. Linux hosts
+with a higher default `nofile` are unaffected, but passing the flag
+unconditionally is safe and matches CI.
 
 After flashing, WiFi configuration happens on first boot — connect from a smartphone to the setup UI (the xiaozhi-esp32 standard flow).
 

@@ -93,7 +93,8 @@ Resolve conflicts in the fork. Pay special attention to:
 After conflict resolution, build the StackChan board from the fork:
 
 ```bash
-docker run --rm -v "$PWD":/project -w /project espressif/idf:v5.5.2 \
+docker run --rm --ulimit nofile=65536:65536 \
+  -v "$PWD":/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 ```
 
@@ -157,9 +158,14 @@ Run the board-aware firmware build from the monorepo:
 
 ```bash
 cd firmware
-docker run --rm -v "$PWD":/project -w /project espressif/idf:v5.5.2 \
+docker run --rm --ulimit nofile=65536:65536 \
+  -v "$PWD":/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 ```
+
+The `--ulimit nofile=65536:65536` flag avoids a `Too many open files`
+failure during the LVGL emoji compile step on macOS Docker defaults. See
+`README.md` Option B for context.
 
 For firmware changes, hardware verification is expected before merge when a
 maintainer has the device available. If hardware is not available, open the PR

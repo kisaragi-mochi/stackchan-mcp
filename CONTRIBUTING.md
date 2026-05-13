@@ -89,12 +89,19 @@ Build the StackChan firmware through the board-aware release script:
 
 ```bash
 cd firmware
-docker run --rm -v "$PWD":/project -w /project espressif/idf:v5.5.2 \
+docker run --rm --ulimit nofile=65536:65536 \
+  -v "$PWD":/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 ```
 
 This produces `build/merged-binary.bin` and
 `releases/v2.2.6_stackchan.zip`.
+
+The `--ulimit nofile=65536:65536` flag prevents a `Too many open files`
+failure during the LVGL emoji compile step under macOS Docker
+(OrbStack / Docker Desktop) defaults. Linux hosts with a higher default
+`nofile` are unaffected, but passing it unconditionally is safe and matches
+the project's CI invocation.
 
 Avoid using a plain `idf.py build` as proof that the StackChan target works; it
 may build a different board configuration.
