@@ -462,6 +462,90 @@ async def test_listen_motion_cleanup_completes_under_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_listen_motion_look_up_re_cancel_during_cleanup_chains_rollback_failure(
+    fake_decode,
+):
+    """Cancellation re-arriving during the motion-cleanup await
+    combined with a rollback failure must still surface the
+    rollback error.
+
+    The first cancel propagates through the capture sleep and lands
+    the orchestrator in the motion-cleanup await. A second
+    ``listen_task.cancel()`` from a sibling task fires while
+    ``_shield_listen_motion_cleanup`` is waiting on the slow
+    rollback ``set_head_angles``, exercising the cancellation
+    branch of the wrapper. Without explicit chaining the wrapper
+    would raise a fresh ``CancelledError`` and discard the
+    ``cleanup_error``, hiding the physical-state mismatch from the
+    caller. The fix chains via ``raise CancelledError() from
+    cleanup_error`` so the caller can inspect both.
+    """
+    engine = _CapturingEngine(text="ok")
+    esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
+    gateway = _FakeGateway(esp32)
+
+    original_call_tool = esp32.call_tool
+
+    async def slow_failing_rollback(name, arguments):
+        # Slow the rollback so the re-cancel lands while the
+        # cleanup_task is still in flight.
+        if (
+            name == "self.robot.set_head_angles"
+            and arguments.get("pitch") == 24.0
+        ):
+            await asyncio.sleep(0.03)
+            esp32.tool_calls.append((name, dict(arguments)))
+            return {}, {"message": "simulated rollback pitch failure"}
+        return await original_call_tool(name, arguments)
+
+    esp32.call_tool = slow_failing_rollback
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    listen_task = asyncio.create_task(
+        listen_and_transcribe(
+            {"duration_ms": 200, "motion": "look-up"},
+            gateway=gateway,
+            registry=reg,
+        )
+    )
+
+    # Let the orchestrator enter the capture window.
+    await asyncio.sleep(0.02)
+
+    async def re_cancel() -> None:
+        # Re-cancel after the first cancel has propagated past the
+        # capture sleep and the orchestrator is inside
+        # ``_shield_listen_motion_cleanup``'s shield-await loop.
+        await asyncio.sleep(0.005)
+        if not listen_task.done():
+            listen_task.cancel()
+
+    re_cancel_task = asyncio.create_task(re_cancel())
+    listen_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await listen_task
+    await re_cancel_task
+
+    # Cleanup failure must be chained onto the cancellation —
+    # otherwise the cancellation branch silently swallows the
+    # rollback failure and the caller has no programmatic signal
+    # about a potentially off-baseline pose.
+    primary = exc_info.value
+    chained = primary.__cause__
+    assert chained is not None, (
+        "rollback failure must be chained onto the cancellation even "
+        "when _shield_listen_motion_cleanup raises a fresh CancelledError"
+    )
+    assert "set_head_angles" in str(chained), (
+        f"chained error should reference the rollback head-angles failure; "
+        f"got {chained!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_listen_motion_look_up_engine_failure_with_rollback_failure_chains(
     fake_decode,
     fast_sleep,

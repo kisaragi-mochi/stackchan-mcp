@@ -156,6 +156,14 @@ async def _shield_listen_motion_cleanup(
         break
 
     if outer_cancelled:
+        if cleanup_error is not None:
+            # The outer task was cancelled WHILE rollback itself
+            # also failed. Chain the cleanup failure via
+            # ``__cause__`` so the caller still gets a programmatic
+            # signal that the device may be off-baseline, instead
+            # of seeing only a fresh ``CancelledError`` and silently
+            # losing the rollback error.
+            raise asyncio.CancelledError() from cleanup_error
         raise asyncio.CancelledError()
     return cleanup_error
 
