@@ -92,7 +92,8 @@ ESP-IDF や Docker のセットアップは不要。
 
 ```bash
 cd firmware
-docker run --rm -v $PWD:/project -w /project espressif/idf:v5.5.2 \
+docker run --rm --ulimit nofile=65536:65536 \
+  -v $PWD:/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 # → releases/v2.2.6_stackchan.zip
 
@@ -100,6 +101,12 @@ docker run --rm -v $PWD:/project -w /project espressif/idf:v5.5.2 \
 esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 build/merged-binary.bin
 ```
+
+`--ulimit nofile=65536:65536` フラグは、macOS Docker（OrbStack /
+Docker Desktop）のデフォルトのファイルディスクリプタ上限下で LVGL の
+emoji コンパイル時に発生する `Too many open files` エラーを回避するため
+に付けています。Linux ホストではデフォルトの `nofile` が十分高いため
+影響ありませんが、無条件に付けて問題なく、CI とも揃います。
 
 書き込み後、WiFi 設定は ESP32 が起動してから行う — スマホで設定 UI に接続（xiaozhi-esp32 標準フロー）。
 
