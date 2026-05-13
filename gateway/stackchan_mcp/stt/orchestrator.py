@@ -237,8 +237,14 @@ async def _finish_listen_motion(
         return
 
     yaw, pitch = saved_angles
-    await _set_head_angles(gateway, yaw=yaw, pitch=pitch)
-    await _set_avatar(gateway, IDLE_FACE)
+    try:
+        await _set_head_angles(gateway, yaw=yaw, pitch=pitch)
+    finally:
+        # Restore the avatar regardless of whether the pitch rollback
+        # succeeded — otherwise a failed ``set_head_angles`` would
+        # leave the device visibly stuck on the ``thinking`` face
+        # even though the listen itself already failed.
+        await _set_avatar(gateway, IDLE_FACE)
 
 
 async def listen_and_transcribe(

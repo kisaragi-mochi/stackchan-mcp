@@ -462,6 +462,69 @@ async def test_listen_motion_cleanup_completes_under_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_listen_motion_look_up_partial_rollback_still_restores_avatar(
+    fake_decode,
+    fast_sleep,
+):
+    """If the pitch rollback fails during look-up cleanup, the avatar
+    restore must still run.
+
+    Otherwise a failed rollback (e.g. servo bus dropped, device
+    error) would leave the device visibly stuck on the ``thinking``
+    face even though the listen itself already failed.
+    """
+    engine = _RaisingEngine(TimeoutError("model timed out"))
+    esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
+    gateway = _FakeGateway(esp32)
+
+    original_call_tool = esp32.call_tool
+    avatar_idle_observed = asyncio.Event()
+
+    async def selective_rollback_failure(name, arguments):
+        # Fail only on the rollback set_head_angles call (saved
+        # pitch=24.0); the forward set_head_angles for look-up uses
+        # pitch=50.0 and stays on the original fake path. Record the
+        # failing call into tool_calls explicitly so the assertion
+        # below can verify the rollback was actually attempted.
+        if (
+            name == "self.robot.set_head_angles"
+            and arguments.get("pitch") == 24.0
+        ):
+            esp32.tool_calls.append((name, dict(arguments)))
+            return {}, {"message": "simulated rollback failure"}
+        result_pair = await original_call_tool(name, arguments)
+        if name == "self.display.set_avatar" and arguments.get("face") == "idle":
+            avatar_idle_observed.set()
+        return result_pair
+
+    esp32.call_tool = selective_rollback_failure
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(RuntimeError):
+        await listen_and_transcribe(
+            {"duration_ms": 500, "motion": "look-up"},
+            gateway=gateway,
+            registry=reg,
+        )
+
+    # The rollback ``set_head_angles`` was actually attempted (and
+    # rejected by the fake).
+    assert any(
+        name == "self.robot.set_head_angles" and args.get("pitch") == 24.0
+        for name, args in esp32.tool_calls
+    ), "pitch rollback should be attempted before the avatar restore"
+
+    # The avatar restore must run regardless of the pitch failure —
+    # this is the user-visible UX contract: failed listen leaves the
+    # device on the idle face, never stuck on the listening face.
+    assert avatar_idle_observed.is_set(), (
+        "set_avatar('idle') must run even when the pitch rollback raises"
+    )
+
+
+@pytest.mark.asyncio
 async def test_pipeline_returns_empty_text_on_no_frames(fake_decode, monkeypatch):
     """An empty capture (no frames) returns text='' rather than erroring.
 
