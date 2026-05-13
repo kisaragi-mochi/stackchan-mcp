@@ -546,6 +546,104 @@ async def test_listen_motion_look_up_re_cancel_during_cleanup_chains_rollback_fa
 
 
 @pytest.mark.asyncio
+async def test_listen_motion_look_up_double_cleanup_failure_preserves_both_errors(
+    fake_decode,
+    fast_sleep,
+):
+    """Both pitch-rollback and avatar-restore failures must remain
+    inspectable to the caller.
+
+    In ``_finish_listen_motion`` the pitch rollback runs in a ``try``
+    and the avatar restore in the matching ``finally`` so the avatar
+    always runs. When both raise, the avatar failure overrides as
+    the primary cleanup error (Python finally semantics) and the
+    pitch failure is preserved on ``__context__`` via automatic
+    exception-context tracking. The outer ``finally`` then chains
+    the avatar failure onto the listen failure via ``__cause__``,
+    so the caller can navigate the chain as
+
+        primary  ⟶ __cause__ (avatar)  ⟶ __context__ (pitch)
+
+    and see both physical-state concerns without losing either.
+    """
+    engine = _RaisingEngine(TimeoutError("engine fail"))
+    esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
+    gateway = _FakeGateway(esp32)
+
+    original_call_tool = esp32.call_tool
+
+    async def double_cleanup_failure(name, arguments):
+        # Rollback set_head_angles(saved pitch=24.0) fails.
+        if (
+            name == "self.robot.set_head_angles"
+            and arguments.get("pitch") == 24.0
+        ):
+            esp32.tool_calls.append((name, dict(arguments)))
+            return {}, {"message": "rollback pitch failure"}
+        # Cleanup-path set_avatar('idle') also fails.
+        if (
+            name == "self.display.set_avatar"
+            and arguments.get("face") == "idle"
+        ):
+            esp32.tool_calls.append((name, dict(arguments)))
+            return {}, {"message": "rollback avatar failure"}
+        return await original_call_tool(name, arguments)
+
+    esp32.call_tool = double_cleanup_failure
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await listen_and_transcribe(
+            {"duration_ms": 500, "motion": "look-up"},
+            gateway=gateway,
+            registry=reg,
+        )
+
+    primary = exc_info.value
+    assert "engine" in str(primary).lower(), (
+        f"primary should reference the engine failure; got {primary!r}"
+    )
+
+    # The avatar-restore failure became the cleanup primary (it
+    # overrode the pitch failure via the try/finally raise sequence
+    # in _finish_listen_motion) and is chained via __cause__.
+    chained = primary.__cause__
+    assert chained is not None, "cleanup chain must reach the caller"
+    assert "set_avatar" in str(chained), (
+        f"primary cleanup error should be the avatar restore failure; "
+        f"got {chained!r}"
+    )
+
+    # The pitch failure is preserved on the avatar failure's
+    # __context__ via Python's automatic exception-context tracking,
+    # so the caller can navigate to it programmatically.
+    pitch_failure = chained.__context__
+    assert pitch_failure is not None, (
+        "pitch rollback failure must remain inspectable via "
+        "__cause__.__context__"
+    )
+    assert "set_head_angles" in str(pitch_failure), (
+        f"pitch failure should appear on __context__; got {pitch_failure!r}"
+    )
+
+    # Both cleanup attempts were made on the device.
+    pitches = [
+        args.get("pitch")
+        for name, args in esp32.tool_calls
+        if name == "self.robot.set_head_angles"
+    ]
+    faces = [
+        args.get("face")
+        for name, args in esp32.tool_calls
+        if name == "self.display.set_avatar"
+    ]
+    assert 24.0 in pitches, "pitch rollback was attempted"
+    assert "idle" in faces, "idle avatar restore was attempted"
+
+
+@pytest.mark.asyncio
 async def test_listen_motion_look_up_engine_failure_with_rollback_failure_chains(
     fake_decode,
     fast_sleep,
