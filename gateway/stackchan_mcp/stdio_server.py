@@ -422,6 +422,9 @@ def create_server() -> Server:
                     "minimal firmware change to handle the inbound 'listen' "
                     "wire type (paired with this gateway release). Engine is "
                     "selectable via 'engine' (default 'faster-whisper', local). "
+                    "Optional 'motion' feedback can switch the avatar to "
+                    "'thinking' during capture ('face-only') or tilt the head "
+                    "up while preserving yaw ('look-up'). "
                     "Install the relevant extra "
                     "('pip install stackchan-mcp[stt-faster-whisper]' or "
                     "'stt-openai'); calling this tool before an engine is "
@@ -464,6 +467,29 @@ def create_server() -> Server:
                                 "whisper, 'whisper-1' for OpenAI). Engines "
                                 "fall back to their default when omitted."
                             ),
+                        },
+                        "motion": {
+                            "type": "string",
+                            "enum": ["none", "face-only", "look-up"],
+                            "description": (
+                                "Optional visible feedback during capture. "
+                                "'none' preserves the previous behaviour. "
+                                "'face-only' shows the thinking avatar during "
+                                "capture and restores idle at the end. "
+                                "'look-up' preserves yaw, tilts pitch to "
+                                "look_up_pitch, and holds the pose on success."
+                            ),
+                            "default": "none",
+                        },
+                        "look_up_pitch": {
+                            "type": "number",
+                            "description": (
+                                "Pitch angle for motion='look-up'. Must be "
+                                "between 5 and 85 degrees."
+                            ),
+                            "default": 50.0,
+                            "minimum": 5,
+                            "maximum": 85,
                         },
                     },
                 },

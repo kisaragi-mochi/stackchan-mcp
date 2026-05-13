@@ -15,6 +15,16 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Gateway
+
+- `listen()` now accepts optional visual/motion feedback arguments:
+  `motion="face-only"` shows the `thinking` avatar during capture and
+  restores `idle` at the end, while `motion="look-up"` preserves yaw,
+  tilts pitch to `look_up_pitch` (validated to 5..85 degrees), shows
+  `thinking`, and holds the pose on success so the caller's response
+  can continue from the attentive posture. The default
+  `motion="none"` preserves the existing behavior. Refs #96.
+
 ## [0.6.0] - 2026-05-12
 
 ### Added

@@ -62,7 +62,7 @@
 | `set_leds(colors)` | `[[r,g,b], ...]` 配列で先頭 N 個を一括設定（I2C 1 回のバースト送信、アニメーション等向け）。指定外の LED は前の色を保持 | ✅ |
 | `clear_leds` | ベース部の RGB LED 12 個すべて消灯 | ✅ |
 | `say(text, voice?, speaker_id?, reference_audio?)` | gateway 側 TTS でデバイススピーカーから喋らせる。デフォルトエンジンは **VOICEVOX**（別 HTTP サービスとして起動 — [TTS セットアップ](#4-オプション-tts-セットアップ-voicevox) 参照）。`[tts]` extras が必要 | ✅ |
-| `listen(duration_ms?, engine?, language?, model?)` | デバイスマイクから短い発話をキャプチャし、gateway 側 STT で文字起こし。デフォルトエンジンは **faster-whisper**（ローカル動作・MIT — [STT セットアップ](#5-オプション-stt-セットアップ-faster-whisper) 参照）。`[stt-faster-whisper]`（または `[stt-openai]`）extras と、`listen` ワイヤタイプを受け付けるファームウェアが必要 | ✅ |
+| `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | デバイスマイクから短い発話をキャプチャし、gateway 側 STT で文字起こし。デフォルトエンジンは **faster-whisper**（ローカル動作・MIT — [STT セットアップ](#5-オプション-stt-セットアップ-faster-whisper) 参照）。任意の `motion` feedback で、キャプチャ中に `thinking` face を出したり、頭を上向きに傾けたりできます。`[stt-faster-whisper]`（または `[stt-openai]`）extras と、`listen` ワイヤタイプを受け付けるファームウェアが必要 | ✅ |
 
 詳細スキーマは `gateway/README.md` 参照。
 
@@ -384,8 +384,13 @@ gateway がデバイスに `{"type":"listen","state":"start","mode":"manual"}`
 STT エンジンに渡して文字起こし、という流れです。`faster-whisper`
 エンジンの初回呼び出しではモデル（`base` で約 140 MB）が Hugging
 Face キャッシュにダウンロードされ、以降は再利用されます。
-STT フレームワークもエンジン非依存なので、Vosk・whisper.cpp・他の
-クラウドサービス等を `listen` API を変えずに後から追加できます。
+見た目でキャプチャ中であることを示したい場合は、`motion="face-only"`
+でキャプチャ中に `thinking` アバターを表示して終了時に `idle` へ戻すか、
+`motion="look-up"` で yaw を保ったまま pitch を `look_up_pitch`
+（デフォルト 50°、有効範囲 5..85°）へ傾け、`thinking` を表示し、
+成功時はその姿勢を保持できます。STT フレームワークもエンジン非依存なので、
+Vosk・whisper.cpp・他のクラウドサービス等を `listen` API を変えずに
+後から追加できます。
 
 ## アバター画像について
 

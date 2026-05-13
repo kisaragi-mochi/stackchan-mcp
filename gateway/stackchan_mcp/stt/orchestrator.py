@@ -32,9 +32,10 @@ same protocol-v1 gate.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..audio_stream import start_recording, stop_recording
 from .audio_utils import DEVICE_FRAME_DURATION_MS, DEVICE_SAMPLE_RATE, decode_opus_frames
@@ -68,6 +69,151 @@ MAX_DURATION_MS = 30000
 #: the first inbound frame can race the ``kDeviceStateListening``
 #: transition; 50 ms is well above typical scheduling latency.
 LISTEN_START_TRANSITION_DELAY_S = 0.05
+
+LISTENING_FACE = "thinking"
+IDLE_FACE = "idle"
+LISTEN_MOTIONS = {"none", "face-only", "look-up"}
+MIN_LOOK_UP_PITCH = 5.0
+MAX_LOOK_UP_PITCH = 85.0
+
+
+def _validate_motion_args(
+    arguments: dict[str, Any],
+) -> tuple[Literal["none", "face-only", "look-up"], float]:
+    motion = arguments.get("motion", "none")
+    if not isinstance(motion, str) or motion not in LISTEN_MOTIONS:
+        raise ValueError(
+            "'motion' must be one of 'none', 'face-only', or 'look-up'; "
+            f"got {motion!r}"
+        )
+
+    look_up_pitch_raw = arguments.get("look_up_pitch", 50.0)
+    if isinstance(look_up_pitch_raw, bool) or not isinstance(
+        look_up_pitch_raw, int | float
+    ):
+        raise ValueError(
+            "'look_up_pitch' must be a number between 5 and 85; got "
+            + repr(look_up_pitch_raw)
+        )
+
+    look_up_pitch = float(look_up_pitch_raw)
+    if look_up_pitch < MIN_LOOK_UP_PITCH or look_up_pitch > MAX_LOOK_UP_PITCH:
+        raise ValueError(
+            "'look_up_pitch' must be between 5 and 85; got "
+            f"{look_up_pitch_raw!r}"
+        )
+
+    return motion, look_up_pitch
+
+
+async def _shield_listen_motion_cleanup(
+    gateway: "Gateway",
+    motion: Literal["none", "face-only", "look-up"],
+    saved_angles: tuple[float, float] | None,
+    *,
+    succeeded: bool,
+) -> None:
+    try:
+        await asyncio.shield(
+            _finish_listen_motion(
+                gateway,
+                motion,
+                saved_angles,
+                succeeded=succeeded,
+            )
+        )
+    except Exception as exc:
+        logger.warning("best-effort listen motion cleanup failed: %s", exc)
+
+
+async def _call_device_tool(
+    gateway: "Gateway",
+    name: str,
+    arguments: dict[str, Any],
+) -> Any:
+    result, error = await gateway.esp32.call_tool(name, arguments)
+    if error:
+        message = error.get("message", error) if isinstance(error, dict) else error
+        raise RuntimeError(f"Device tool '{name}' failed: {message}")
+    return result
+
+
+def _extract_head_angles(result: Any) -> tuple[float, float]:
+    payload = result
+    if isinstance(result, dict) and "content" in result:
+        content = result.get("content") or []
+        if content:
+            text = content[0].get("text") if isinstance(content[0], dict) else None
+            if isinstance(text, str):
+                payload = json.loads(text)
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("Device tool 'self.robot.get_head_angles' returned no angles")
+
+    yaw = payload.get("yaw")
+    pitch = payload.get("pitch")
+    if not isinstance(yaw, int | float) or not isinstance(pitch, int | float):
+        raise RuntimeError("Device tool 'self.robot.get_head_angles' returned invalid angles")
+    return float(yaw), float(pitch)
+
+
+async def _set_avatar(gateway: "Gateway", face: str) -> None:
+    await _call_device_tool(gateway, "self.display.set_avatar", {"face": face})
+
+
+async def _set_head_angles(gateway: "Gateway", *, yaw: float, pitch: float) -> None:
+    await _call_device_tool(
+        gateway,
+        "self.robot.set_head_angles",
+        {"yaw": yaw, "pitch": pitch},
+    )
+
+
+async def _begin_listen_motion(
+    gateway: "Gateway",
+    motion: Literal["none", "face-only", "look-up"],
+    look_up_pitch: float,
+) -> tuple[float, float] | None:
+    if motion == "none":
+        return None
+    if motion == "face-only":
+        await _set_avatar(gateway, LISTENING_FACE)
+        return None
+
+    result = await _call_device_tool(gateway, "self.robot.get_head_angles", {})
+    yaw, pitch = _extract_head_angles(result)
+    try:
+        await _set_head_angles(gateway, yaw=yaw, pitch=look_up_pitch)
+        await _set_avatar(gateway, LISTENING_FACE)
+    except Exception:
+        await _shield_listen_motion_cleanup(
+            gateway,
+            motion,
+            (yaw, pitch),
+            succeeded=False,
+        )
+        raise
+    return yaw, pitch
+
+
+async def _finish_listen_motion(
+    gateway: "Gateway",
+    motion: Literal["none", "face-only", "look-up"],
+    saved_angles: tuple[float, float] | None,
+    *,
+    succeeded: bool,
+) -> None:
+    if motion == "none":
+        return
+    if motion == "face-only":
+        await _set_avatar(gateway, IDLE_FACE)
+        return
+    if succeeded or saved_angles is None:
+        return
+
+    yaw, pitch = saved_angles
+    await _set_head_angles(gateway, yaw=yaw, pitch=pitch)
+    await _set_avatar(gateway, IDLE_FACE)
 
 
 async def listen_and_transcribe(
@@ -121,6 +267,7 @@ async def listen_and_transcribe(
             f"'duration_ms' must be between {MIN_DURATION_MS} and "
             f"{MAX_DURATION_MS}; got {duration_raw}"
         )
+    motion, look_up_pitch = _validate_motion_args(arguments)
 
     engine_raw = arguments.get("engine", DEFAULT_ENGINE)
     engine_name = (
@@ -183,110 +330,125 @@ async def listen_and_transcribe(
     frame_count = 0
     pcm = b""
     actual_duration_ms = 0
+    motion_saved_angles: tuple[float, float] | None = None
+    succeeded = False
 
     async with lock_ctx:
         connection = gateway.esp32.connection
         session_id = getattr(connection, "session_id", "") if connection else ""
 
-        # Switch the audio_stream module into recording mode BEFORE
-        # sending listen.start so we don't drop the first frame the
-        # device emits the moment it lands in kDeviceStateListening.
-        start_recording(session_id)
-        listen_start_sent = False
         try:
-            try:
-                await gateway.esp32.send_listen_state("start", mode="manual")
-                listen_start_sent = True
-            except ConnectionError as exc:
-                raise RuntimeError(
-                    f"Device disconnected before listen.start: {exc}"
-                ) from exc
-
-            # Wait for the firmware's state machine to land in
-            # kDeviceStateListening before we start counting the
-            # capture window (same rationale as the TTS pipeline's
-            # ``TTS_START_TRANSITION_DELAY_S``).
-            await asyncio.sleep(LISTEN_START_TRANSITION_DELAY_S)
-
-            await asyncio.sleep(duration_ms / 1000.0)
-        finally:
-            # Cancellation-safe listen.stop. If the request is
-            # cancelled mid-capture (or any exception unwinds here)
-            # after listen.start has been delivered, the device is
-            # still in ``kDeviceStateListening`` with the microphone
-            # open — without a best-effort stop the firmware would
-            # stay there until an unrelated user action (button /
-            # wake-word) eventually pulled it back to idle.
-            # ``asyncio.shield`` protects the stop send from the
-            # cancellation that's already propagating through the
-            # outer await, so the device receives the stop even
-            # though the orchestrator coroutine itself is being torn
-            # down. The shielded send still completes synchronously
-            # before this ``finally`` block returns.
-            if listen_start_sent:
-                try:
-                    await asyncio.shield(
-                        gateway.esp32.send_listen_state("stop")
-                    )
-                except (ConnectionError, asyncio.CancelledError):
-                    # Device dropped, or our awaiter was cancelled
-                    # after shield released the send back to us. In
-                    # both cases the partial buffer is still worth
-                    # transcribing, but the operator should know the
-                    # firmware may need a manual nudge.
-                    logger.warning(
-                        "listen.stop did not reach device cleanly "
-                        "(cancellation or disconnect); firmware may "
-                        "stay in listening mode until a button press "
-                        "or wake-word"
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "best-effort listen.stop failed: %s", exc
-                    )
-            frames = stop_recording()
-
-        frame_count = len(frames)
-        if frame_count == 0:
-            # Distinguish "device disconnected with no frames" (likely
-            # protocol mismatch / firmware not yet supporting listen)
-            # from "spoken nothing". The latter is a legitimate empty
-            # transcription and not surfaced as an error.
-            logger.info(
-                "listen(): no Opus frames received during %d ms window",
-                duration_ms,
+            motion_saved_angles = await _begin_listen_motion(
+                gateway, motion, look_up_pitch
             )
 
-        try:
-            pcm = decode_opus_frames(frames)
-        except Exception as exc:
-            raise RuntimeError(f"Opus decode failed: {exc}") from exc
-
-        actual_duration_ms = frame_count * DEVICE_FRAME_DURATION_MS
-
-        if pcm:
+            # Switch the audio_stream module into recording mode BEFORE
+            # sending listen.start so we don't drop the first frame the
+            # device emits the moment it lands in kDeviceStateListening.
+            start_recording(session_id)
+            listen_start_sent = False
             try:
-                result = await engine.transcribe(
-                    pcm,
-                    language=language,
-                    model=model,
+                try:
+                    await gateway.esp32.send_listen_state("start", mode="manual")
+                    listen_start_sent = True
+                except ConnectionError as exc:
+                    raise RuntimeError(
+                        f"Device disconnected before listen.start: {exc}"
+                    ) from exc
+
+                # Wait for the firmware's state machine to land in
+                # kDeviceStateListening before we start counting the
+                # capture window (same rationale as the TTS pipeline's
+                # ``TTS_START_TRANSITION_DELAY_S``).
+                await asyncio.sleep(LISTEN_START_TRANSITION_DELAY_S)
+
+                await asyncio.sleep(duration_ms / 1000.0)
+            finally:
+                # Cancellation-safe listen.stop. If the request is
+                # cancelled mid-capture (or any exception unwinds here)
+                # after listen.start has been delivered, the device is
+                # still in ``kDeviceStateListening`` with the microphone
+                # open — without a best-effort stop the firmware would
+                # stay there until an unrelated user action (button /
+                # wake-word) eventually pulled it back to idle.
+                # ``asyncio.shield`` protects the stop send from the
+                # cancellation that's already propagating through the
+                # outer await, so the device receives the stop even
+                # though the orchestrator coroutine itself is being torn
+                # down. The shielded send still completes synchronously
+                # before this ``finally`` block returns.
+                if listen_start_sent:
+                    try:
+                        await asyncio.shield(
+                            gateway.esp32.send_listen_state("stop")
+                        )
+                    except (ConnectionError, asyncio.CancelledError):
+                        # Device dropped, or our awaiter was cancelled
+                        # after shield released the send back to us. In
+                        # both cases the partial buffer is still worth
+                        # transcribing, but the operator should know the
+                        # firmware may need a manual nudge.
+                        logger.warning(
+                            "listen.stop did not reach device cleanly "
+                            "(cancellation or disconnect); firmware may "
+                            "stay in listening mode until a button press "
+                            "or wake-word"
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "best-effort listen.stop failed: %s", exc
+                        )
+                frames = stop_recording()
+
+            frame_count = len(frames)
+            if frame_count == 0:
+                # Distinguish "device disconnected with no frames" (likely
+                # protocol mismatch / firmware not yet supporting listen)
+                # from "spoken nothing". The latter is a legitimate empty
+                # transcription and not surfaced as an error.
+                logger.info(
+                    "listen(): no Opus frames received during %d ms window",
+                    duration_ms,
                 )
-            except ValueError:
-                raise
+
+            try:
+                pcm = decode_opus_frames(frames)
             except Exception as exc:
-                raise RuntimeError(
-                    f"STT engine '{engine_name}' failed: {exc}"
-                ) from exc
-        else:
-            # Empty capture — return an empty transcription rather
-            # than failing the call. ``language`` falls back to the
-            # caller's hint (or empty string).
-            result = {
-                "text": "",
-                "language": (
-                    language if isinstance(language, str) and language else ""
-                ),
-            }
+                raise RuntimeError(f"Opus decode failed: {exc}") from exc
+
+            actual_duration_ms = frame_count * DEVICE_FRAME_DURATION_MS
+
+            if pcm:
+                try:
+                    result = await engine.transcribe(
+                        pcm,
+                        language=language,
+                        model=model,
+                    )
+                except ValueError:
+                    raise
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"STT engine '{engine_name}' failed: {exc}"
+                    ) from exc
+            else:
+                # Empty capture — return an empty transcription rather
+                # than failing the call. ``language`` falls back to the
+                # caller's hint (or empty string).
+                result = {
+                    "text": "",
+                    "language": (
+                        language if isinstance(language, str) and language else ""
+                    ),
+                }
+            succeeded = True
+        finally:
+            await _shield_listen_motion_cleanup(
+                gateway,
+                motion,
+                motion_saved_angles,
+                succeeded=succeeded,
+            )
 
     logger.info(
         "listen(): engine=%s frames=%d duration_ms=%d text=%r",

@@ -62,7 +62,7 @@ This repository is a monorepo.
 | `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array in a single I2C burst (use this for animations / multi-color patterns); trailing LEDs keep their previous color | ✅ |
 | `clear_leds` | Turn all 12 base RGB LEDs off | ✅ |
 | `say(text, voice?, speaker_id?, reference_audio?)` | Speak text on the device speaker via gateway-side TTS. Default engine: **VOICEVOX** (runs as a separate HTTP service — see [TTS setup](#optional-tts-setup-voicevox)). Requires the `[tts]` extra. | ✅ |
-| `listen(duration_ms?, engine?, language?, model?)` | Capture a short utterance from the device microphone and transcribe it via gateway-side STT. Default engine: **faster-whisper** (local, MIT) — see [STT setup](#optional-stt-setup-faster-whisper). Requires the `[stt-faster-whisper]` (or `[stt-openai]`) extra and a firmware update with the inbound `listen` wire type. | ✅ |
+| `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | Capture a short utterance from the device microphone and transcribe it via gateway-side STT. Default engine: **faster-whisper** (local, MIT) — see [STT setup](#optional-stt-setup-faster-whisper). Optional `motion` feedback can show the `thinking` face or tilt the head up during capture. Requires the `[stt-faster-whisper]` (or `[stt-openai]`) extra and a firmware update with the inbound `listen` wire type. | ✅ |
 
 See `gateway/README.md` for full schemas.
 
@@ -434,9 +434,13 @@ capture window, then sends `{"type":"listen","state":"stop"}` and
 hands the buffered audio to the registered STT engine. The first call
 to the `faster-whisper` engine downloads the chosen model (~140 MB
 for `base`) into the Hugging Face cache; subsequent calls reuse it.
-The STT framework is engine-agnostic — additional engines (Vosk,
-whisper.cpp, cloud providers) can be added without changing the
-`listen` API.
+For visible capture feedback, pass `motion="face-only"` to show the
+`thinking` avatar during capture and restore `idle` at the end, or
+`motion="look-up"` to preserve yaw, tilt pitch to `look_up_pitch`
+(default 50°, valid 5..85°), show `thinking`, and hold that pose on
+success. The STT framework is engine-agnostic — additional engines
+(Vosk, whisper.cpp, cloud providers) can be added without changing
+the `listen` API.
 
 ## About the avatar images
 

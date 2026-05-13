@@ -60,8 +60,11 @@ class _FakeESP32:
             session_id="session-test",
         )
         self.listen_states: list[tuple[str, str | None]] = []
+        self.tool_calls: list[tuple[str, dict[str, Any]]] = []
         self.events: list[tuple[str, Any]] = []
         self.listen_lock = asyncio.Lock()
+        self.head_yaw = 12.0
+        self.head_pitch = 24.0
         self._frames_to_inject = list(frames_to_inject or [])
         self._injection_delay_s = injection_delay_s
 
@@ -86,6 +89,21 @@ class _FakeESP32:
         for frame in self._frames_to_inject:
             await handle_audio_frame(frame, "session-test")
 
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any], None]:
+        self.tool_calls.append((name, dict(arguments)))
+        self.events.append(("tool", name))
+        if name == "self.robot.get_head_angles":
+            return {"yaw": self.head_yaw, "pitch": self.head_pitch}, None
+        if name == "self.robot.set_head_angles":
+            self.head_yaw = float(arguments["yaw"])
+            self.head_pitch = float(arguments["pitch"])
+            return {"ok": True}, None
+        if name == "self.display.set_avatar":
+            return {"ok": True}, None
+        raise AssertionError(f"unexpected tool call: {name}")
+
 
 class _FakeGateway:
     def __init__(self, esp32: _FakeESP32) -> None:
@@ -106,6 +124,17 @@ def fake_decode(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "decode_opus_frames", fake)
     return fake
+
+
+@pytest.fixture
+def fast_sleep(monkeypatch):
+    real_sleep = asyncio.sleep
+
+    async def fast(delay):
+        await real_sleep(0)
+
+    monkeypatch.setattr(orchestrator.asyncio, "sleep", fast)
+    return fast
 
 
 @pytest.fixture(autouse=True)
@@ -167,6 +196,156 @@ async def test_pipeline_drives_listen_state_and_returns_text(fake_decode, monkey
     assert opts["language"] == "ja"
 
     # Recording slot was closed cleanly.
+    assert not is_recording()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("motion", "expected_tool_calls"),
+    [
+        ("none", []),
+        (
+            "face-only",
+            [
+                ("self.display.set_avatar", {"face": "thinking"}),
+                ("self.display.set_avatar", {"face": "idle"}),
+            ],
+        ),
+        (
+            "look-up",
+            [
+                ("self.robot.get_head_angles", {}),
+                ("self.robot.set_head_angles", {"yaw": 12.0, "pitch": 50.0}),
+                ("self.display.set_avatar", {"face": "thinking"}),
+            ],
+        ),
+    ],
+)
+async def test_listen_motion_success_paths(
+    fake_decode,
+    fast_sleep,
+    motion,
+    expected_tool_calls,
+):
+    """Each motion mode preserves its success cleanup/hold contract."""
+    engine = _CapturingEngine(text="ok")
+    esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await listen_and_transcribe(
+        {"duration_ms": 500, "motion": motion},
+        gateway=gateway,
+        registry=reg,
+    )
+
+    assert result["text"] == "ok"
+    assert [s[0] for s in esp32.listen_states] == ["start", "stop"]
+    assert esp32.tool_calls == expected_tool_calls
+    if motion == "look-up":
+        assert esp32.head_pitch == 50.0
+    else:
+        assert esp32.head_pitch == 24.0
+    assert not is_recording()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("motion", "expected_tool_calls"),
+    [
+        ("none", []),
+        (
+            "face-only",
+            [
+                ("self.display.set_avatar", {"face": "thinking"}),
+                ("self.display.set_avatar", {"face": "idle"}),
+            ],
+        ),
+        (
+            "look-up",
+            [
+                ("self.robot.get_head_angles", {}),
+                ("self.robot.set_head_angles", {"yaw": 12.0, "pitch": 50.0}),
+                ("self.display.set_avatar", {"face": "thinking"}),
+                ("self.robot.set_head_angles", {"yaw": 12.0, "pitch": 24.0}),
+                ("self.display.set_avatar", {"face": "idle"}),
+            ],
+        ),
+    ],
+)
+async def test_listen_motion_failure_paths(
+    fake_decode,
+    fast_sleep,
+    motion,
+    expected_tool_calls,
+):
+    """Failures clean up avatar state and roll back look-up pitch."""
+    engine = _RaisingEngine(TimeoutError("model timed out"))
+    esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(RuntimeError, match="failed"):
+        await listen_and_transcribe(
+            {"duration_ms": 500, "motion": motion},
+            gateway=gateway,
+            registry=reg,
+        )
+
+    assert [s[0] for s in esp32.listen_states] == ["start", "stop"]
+    assert esp32.tool_calls == expected_tool_calls
+    assert esp32.head_pitch == 24.0
+    assert not is_recording()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("motion", ["none", "face-only", "look-up"])
+async def test_listen_motion_validation_error_paths(motion):
+    """look_up_pitch is validated before any device-side call."""
+    engine = _CapturingEngine()
+    esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(ValueError, match="look_up_pitch"):
+        await listen_and_transcribe(
+            {"duration_ms": 500, "motion": motion, "look_up_pitch": 4.0},
+            gateway=gateway,
+            registry=reg,
+        )
+
+    assert esp32.listen_states == []
+    assert esp32.tool_calls == []
+    assert engine.calls == []
+    assert not is_recording()
+
+
+@pytest.mark.asyncio
+async def test_listen_motion_rejects_unknown_mode():
+    """Unknown motion values fail before any device-side call."""
+    engine = _CapturingEngine()
+    esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(ValueError, match="motion"):
+        await listen_and_transcribe(
+            {"duration_ms": 500, "motion": "nod"},
+            gateway=gateway,
+            registry=reg,
+        )
+
+    assert esp32.listen_states == []
+    assert esp32.tool_calls == []
+    assert engine.calls == []
     assert not is_recording()
 
 
