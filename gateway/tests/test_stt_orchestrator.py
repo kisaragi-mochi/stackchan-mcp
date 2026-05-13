@@ -350,6 +350,77 @@ async def test_listen_motion_rejects_unknown_mode():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("motion", ["face-only", "look-up"])
+async def test_listen_motion_cleanup_completes_under_cancellation(
+    fake_decode,
+    motion,
+):
+    """Cancellation during capture must not bypass motion cleanup.
+
+    The avatar / head rollback driven by ``_finish_listen_motion``
+    must complete before the orchestrator's ``listen_lock`` is
+    released; otherwise a follow-up listen() can race with an
+    in-flight cleanup and observe a partially-restored device state.
+    Without proper handling of ``asyncio.CancelledError`` inside the
+    cleanup wrapper, ``await asyncio.shield(...)`` re-raises the
+    cancellation immediately and the cleanup runs as an orphan task
+    after the lock is already free.
+    """
+    engine = _CapturingEngine(text="ok")
+    esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
+    gateway = _FakeGateway(esp32)
+
+    cleanup_idle_observed = asyncio.Event()
+    cleanup_pitch_restored = asyncio.Event()
+    original_call_tool = esp32.call_tool
+
+    async def slow_cleanup(name, arguments):
+        result_pair = await original_call_tool(name, arguments)
+        # Add a small delay specifically on the cleanup-path calls
+        # so we can observe whether the orchestrator waits for them.
+        if name == "self.display.set_avatar" and arguments.get("face") == "idle":
+            await asyncio.sleep(0.02)
+            cleanup_idle_observed.set()
+        if name == "self.robot.set_head_angles" and arguments.get("pitch") == 24.0:
+            await asyncio.sleep(0.02)
+            cleanup_pitch_restored.set()
+        return result_pair
+
+    esp32.call_tool = slow_cleanup
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    task = asyncio.create_task(
+        listen_and_transcribe(
+            {"duration_ms": 200, "motion": motion},
+            gateway=gateway,
+            registry=reg,
+        )
+    )
+
+    # Let the orchestrator enter the capture window before cancelling.
+    await asyncio.sleep(0.02)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cleanup_idle_observed.is_set(), (
+        "set_avatar('idle') must complete during cleanup under cancellation"
+    )
+    if motion == "look-up":
+        assert cleanup_pitch_restored.is_set(), (
+            "saved pitch must be restored during cleanup under cancellation"
+        )
+    # listen_lock must be free only AFTER cleanup completed — the
+    # orchestrator exits ``async with lock_ctx`` after cleanup
+    # finishes when handled correctly.
+    assert not esp32.listen_lock.locked()
+    assert not is_recording()
+
+
+@pytest.mark.asyncio
 async def test_pipeline_returns_empty_text_on_no_frames(fake_decode, monkeypatch):
     """An empty capture (no frames) returns text='' rather than erroring.
 

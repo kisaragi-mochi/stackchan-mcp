@@ -113,17 +113,42 @@ async def _shield_listen_motion_cleanup(
     *,
     succeeded: bool,
 ) -> None:
-    try:
-        await asyncio.shield(
-            _finish_listen_motion(
-                gateway,
-                motion,
-                saved_angles,
-                succeeded=succeeded,
-            )
+    """Wait for motion cleanup to complete even under cancellation.
+
+    A bare ``await asyncio.shield(coro())`` protects the inner
+    coroutine from cancellation, but a cancellation propagating
+    through the awaiter is re-raised immediately — which would
+    release ``listen_lock`` while the device-side cleanup is still
+    in flight, and leave the cleanup as an orphan task whose
+    failure nobody observes. Hold the cleanup task in scope,
+    re-await it under shield through repeated cancellations, then
+    surface the cancellation once cleanup has finished so the
+    caller still sees ``CancelledError``.
+    """
+    cleanup_task = asyncio.create_task(
+        _finish_listen_motion(
+            gateway,
+            motion,
+            saved_angles,
+            succeeded=succeeded,
         )
-    except Exception as exc:
-        logger.warning("best-effort listen motion cleanup failed: %s", exc)
+    )
+
+    outer_cancelled = False
+    while True:
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            outer_cancelled = True
+            continue
+        except Exception as exc:
+            logger.warning(
+                "best-effort listen motion cleanup failed: %s", exc
+            )
+        break
+
+    if outer_cancelled:
+        raise asyncio.CancelledError()
 
 
 async def _call_device_tool(
