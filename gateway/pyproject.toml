@@ -84,3 +84,18 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# Bundle the native libopus binary into the Windows wheel so that
+# `pip install stackchan-mcp[tts]` (or `[stt]`) works out-of-the-box on
+# Windows, where `libopus.dll` is not provided by any default install
+# path. The DLL is loaded at import time via `os.add_dll_directory()` in
+# `stackchan_mcp/__init__.py`. See `stackchan_mcp/_libs/SOURCES.md` for
+# provenance, license, and the planned switch to a CI-built binary.
+#
+# Hatchling does not pick up arbitrary non-Python files inside the
+# package automatically — `force-include` makes the intent explicit
+# and ensures the DLL lands at the same path in the wheel as in the
+# source tree.
+[tool.hatch.build.targets.wheel.force-include]
+"stackchan_mcp/_libs/opus.dll" = "stackchan_mcp/_libs/opus.dll"
+"stackchan_mcp/_libs/SOURCES.md" = "stackchan_mcp/_libs/SOURCES.md"
