@@ -361,10 +361,17 @@ async def test_listen_motion_cleanup_completes_under_cancellation(
     must complete before the orchestrator's ``listen_lock`` is
     released; otherwise a follow-up listen() can race with an
     in-flight cleanup and observe a partially-restored device state.
-    Without proper handling of ``asyncio.CancelledError`` inside the
-    cleanup wrapper, ``await asyncio.shield(...)`` re-raises the
-    cancellation immediately and the cleanup runs as an orphan task
-    after the lock is already free.
+
+    The lock-ordering invariant is verified directly: a competing
+    waiter races for ``listen_lock`` while ``listen_and_transcribe``
+    is cancelled, and records cleanup observability at the exact
+    moment it acquires the lock. With proper cancellation handling
+    in ``_shield_listen_motion_cleanup`` the orchestrator only exits
+    its ``async with lock_ctx`` block after cleanup completes, so
+    the waiter sees the cleanup events already set. With a naïve
+    ``except Exception`` wrapper around ``asyncio.shield(...)`` the
+    cleanup runs as an orphan task after the lock is released, and
+    the waiter would acquire the lock with the events still unset.
     """
     engine = _CapturingEngine(text="ok")
     esp32 = _FakeESP32(frames_to_inject=[b"opus_a"])
@@ -391,7 +398,7 @@ async def test_listen_motion_cleanup_completes_under_cancellation(
     reg = EngineRegistry()
     reg.register(engine)
 
-    task = asyncio.create_task(
+    listen_task = asyncio.create_task(
         listen_and_transcribe(
             {"duration_ms": 200, "motion": motion},
             gateway=gateway,
@@ -399,24 +406,58 @@ async def test_listen_motion_cleanup_completes_under_cancellation(
         )
     )
 
-    # Let the orchestrator enter the capture window before cancelling.
+    # Let the orchestrator enter the capture window and acquire
+    # listen_lock before launching the waiter / cancelling.
     await asyncio.sleep(0.02)
-    task.cancel()
+
+    waiter_snapshot: dict[str, bool] = {}
+
+    async def waiter() -> None:
+        async with esp32.listen_lock:
+            # Snapshot at the exact moment the lock is acquired —
+            # this is the moment the buggy implementation would let
+            # the waiter through while cleanup is still in flight.
+            waiter_snapshot["idle"] = cleanup_idle_observed.is_set()
+            waiter_snapshot["pitch"] = cleanup_pitch_restored.is_set()
+
+    waiter_task = asyncio.create_task(waiter())
+    # Yield once so the waiter registers its lock request before the
+    # orchestrator releases the lock.
+    await asyncio.sleep(0)
+
+    async def re_cancel() -> None:
+        # Re-cancel while the orchestrator is already inside the
+        # motion-cleanup await. With a naïve
+        # ``try / await asyncio.shield(coro()) / except Exception``
+        # wrapper this second cancellation raises CancelledError at
+        # the cleanup await, propagates past the ``except Exception``,
+        # and orphans the in-flight cleanup before the listen_lock is
+        # released — which is the precise regression this test
+        # protects against. The fixed wrapper holds the cleanup task
+        # in scope and re-awaits it under shield, so cleanup still
+        # completes before the function returns.
+        await asyncio.sleep(0.005)
+        if not listen_task.done():
+            listen_task.cancel()
+
+    re_cancel_task = asyncio.create_task(re_cancel())
+
+    listen_task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await listen_task
+    await waiter_task
+    await re_cancel_task
 
-    assert cleanup_idle_observed.is_set(), (
-        "set_avatar('idle') must complete during cleanup under cancellation"
+    assert waiter_snapshot["idle"], (
+        "set_avatar('idle') must complete BEFORE listen_lock is released "
+        "to the competing waiter — orphan cleanup race detected"
     )
     if motion == "look-up":
-        assert cleanup_pitch_restored.is_set(), (
-            "saved pitch must be restored during cleanup under cancellation"
+        assert waiter_snapshot["pitch"], (
+            "saved pitch must be restored BEFORE listen_lock is released "
+            "to the competing waiter"
         )
-    # listen_lock must be free only AFTER cleanup completed — the
-    # orchestrator exits ``async with lock_ctx`` after cleanup
-    # finishes when handled correctly.
-    assert not esp32.listen_lock.locked()
     assert not is_recording()
 
 
