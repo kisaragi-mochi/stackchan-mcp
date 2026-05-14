@@ -17,6 +17,22 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Replaced the single-bound pitch clamp (`0..30°`) on `set_head_angles`
+  with a two-tier guard: a hard mechanical clamp at `0..88°` (Tier 1,
+  always enforced with `ESP_LOGW` on clip) and an `ESP_LOGI` advisory
+  for requests outside the M5Stack-documented operating range `5..85°`
+  (Tier 2). This matches the gateway-side `move_head` policy
+  introduced in [0.7.0] (gateway tool enforces the restrictive `5..85`
+  range as the authoritative Tier 1 boundary at the MCP layer, while
+  the firmware retains the permissive `0..88` hardware-safety clamp so
+  `set_head_angles` callers that genuinely need the wider range are
+  still served). README EN/JP "Hardware safety notes" rewritten as a
+  two-tier table. Validated on M5Stack CoreS3 + SCS0009 ×2. Closes
+  [#98](https://github.com/kisaragi-mochi/stackchan-mcp/issues/98).
+  Refs
+  [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80),
+  [#81](https://github.com/kisaragi-mochi/stackchan-mcp/issues/81).
+
 - Fixed user-configured WebSocket gateway URLs (e.g.
   `ws://192.168.x.y:8765`) being silently overwritten on every boot by
   the upstream xiaozhi OTA-config response. `Ota::CheckVersion()` still
