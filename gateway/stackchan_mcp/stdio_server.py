@@ -103,8 +103,14 @@ def create_server() -> Server:
             Tool(
                 name="move_head",
                 description=(
-                    "Move the robot's head to the specified angles. "
-                    "yaw: horizontal (-90 to 90), pitch: vertical (-30 to 30)."
+                    "Move the robot's head to safe, recommended angles. "
+                    "yaw: horizontal (-90 to 90), pitch: vertical (5 to 85, "
+                    "the M5Stack-recommended operating range). Out-of-range "
+                    "requests are rejected at this MCP layer; for advanced "
+                    "callers that need the firmware hard clamp (pitch 0..88), "
+                    "use the firmware-side `set_head_angles` device tool, "
+                    "which exposes a permissive schema and the authoritative "
+                    "two-tier guard described in the README."
                 ),
                 inputSchema={
                     "type": "object",
@@ -112,10 +118,19 @@ def create_server() -> Server:
                         "yaw": {
                             "type": "integer",
                             "description": "Horizontal angle in degrees (-90 to 90)",
+                            "minimum": -90,
+                            "maximum": 90,
                         },
                         "pitch": {
                             "type": "integer",
-                            "description": "Vertical angle in degrees (-30 to 30)",
+                            "description": (
+                                "Vertical angle in degrees (5 to 85, "
+                                "M5Stack-recommended operating range). For the "
+                                "wider firmware hard clamp (0..88), use the "
+                                "`set_head_angles` device tool instead."
+                            ),
+                            "minimum": 5,
+                            "maximum": 85,
                         },
                     },
                     "required": ["yaw", "pitch"],
@@ -551,6 +566,59 @@ def create_server() -> Server:
                     text=json.dumps({"error": "No ESP32 device connected. Please check the device."}),
                 )
             ]
+
+        if name == "move_head":
+            # Belt-and-suspenders validation for the recommended pitch range.
+            # The Tool inputSchema already declares minimum/maximum for both
+            # yaw and pitch, but mcp Python SDK server-side enforcement of
+            # JSON Schema bounds is not guaranteed across versions and
+            # clients. Reject out-of-recommended values here as a clean
+            # MCP error JSON before any motion command reaches the device.
+            # Callers that genuinely need the firmware hard clamp 0..88
+            # should use the firmware-side `set_head_angles` device tool,
+            # which exposes the authoritative two-tier guard described in
+            # the README "Y-axis (pitch) safe range" section.
+            yaw_val = arguments.get("yaw")
+            pitch_val = arguments.get("pitch")
+            if (
+                not isinstance(yaw_val, int)
+                or isinstance(yaw_val, bool)
+                or not (-90 <= yaw_val <= 90)
+            ):
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "error": (
+                                    "yaw must be an integer in -90..90 "
+                                    f"(got {yaw_val!r})"
+                                )
+                            }
+                        ),
+                    )
+                ]
+            if (
+                not isinstance(pitch_val, int)
+                or isinstance(pitch_val, bool)
+                or not (5 <= pitch_val <= 85)
+            ):
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "error": (
+                                    "pitch must be an integer in 5..85 "
+                                    "(M5Stack-recommended operating range; "
+                                    "for the wider firmware hard clamp "
+                                    "0..88 use `set_head_angles`). got "
+                                    f"{pitch_val!r}"
+                                )
+                            }
+                        ),
+                    )
+                ]
 
         # Map MCP client tool names to ESP32 MCP tool names (self.* prefix)
         tool_map: dict[str, tuple[str, dict[str, Any]]] = {
