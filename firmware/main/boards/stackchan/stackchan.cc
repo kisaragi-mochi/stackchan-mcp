@@ -1164,7 +1164,18 @@ private:
             // continue to apply unchanged.
             constexpr int BOOT_INIT_YAW_DEG = 0;
             constexpr int BOOT_INIT_PITCH_DEG = 45;
-            constexpr uint32_t BOOT_INIT_MOVE_MS = 1000;
+            // Issue #121: at the original 1000 ms duration the
+            // post-power-on climb to 45° produced ~45°/s angular speed,
+            // perceived on-device as startling ("ブルンっ" + audible
+            // stress). Bumping the interpolated move to 4000 ms drops
+            // the effective rate to ~11°/s while keeping the motion
+            // monotonic through the existing `WriteHeadAngles` ->
+            // `servo_motion` task path. The 100 ms post-settle margin
+            // is unchanged. This is the cheap fix for #121 Problem 2;
+            // the separate "unintended downward drop on power-on"
+            // (#121 Problem 1 / hypotheses 1-3) still requires a
+            // root-cause investigation tracked separately.
+            constexpr uint32_t BOOT_INIT_MOVE_MS = 4000;
             TickType_t boot_init_start_tick = xTaskGetTickCount();
             WriteHeadAngles(BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG, BOOT_INIT_MOVE_MS);
             vTaskDelay(pdMS_TO_TICKS(BOOT_INIT_MOVE_MS + 100));

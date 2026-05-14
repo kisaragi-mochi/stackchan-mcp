@@ -76,6 +76,23 @@ change is called out under a `Firmware` subsection of the release entry.
   data-driven via the serial log. Refs
   [#123](https://github.com/kisaragi-mochi/stackchan-mcp/issues/123).
 
+- The boot-time `WriteHeadAngles` interpolated move added in #115 /
+  PR #117 now runs over 4 seconds instead of 1, dropping the
+  effective angular speed for the post-power-on climb to the
+  fall-safe neutral pose from approximately 45°/s to approximately
+  11°/s. On-device feedback identified the original 1-second
+  duration as startling ("ブルンっ" / audible servo stress) on the
+  CoreS3 + SCS0009 hardware. The move is otherwise unchanged — same
+  target (`yaw=0°`, `pitch=45°`), same path through
+  `WriteHeadAngles` / the `servo_motion` task, same 100 ms
+  post-settle vTaskDelay margin (so total boot-init now takes about
+  4.1 seconds instead of 1.1 seconds before the first MCP command
+  can arrive). Refs
+  [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 2 (climb speed); the separate "unintended downward drop on
+  power-on" (#121 Problem 1 / hypotheses 1–3) remains under
+  investigation and is unaffected by this change.
+
 ## [0.7.0] - 2026-05-14
 
 ### Gateway
