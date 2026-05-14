@@ -628,6 +628,12 @@ void Application::InitializeProtocol() {
             } else {
                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
             }
+        } else if (strcmp(type->valuestring, "avatar_set_fetch") == 0) {
+            // Phase 4.5 avatar (saiverse-stackchan-addon): dispatch to the
+            // current board for HTTP fetch + SHA256 verify + AvatarSet::Load.
+            // Non-stackchan boards default to a no-op (Board::OnAvatarSetFetch).
+            // See docs/intent/stackchan_avatar_pipeline.md §C-3 (SAIVerse).
+            board.OnAvatarSetFetch(root);
 #if CONFIG_RECEIVE_CUSTOM_MESSAGE
         } else if (strcmp(type->valuestring, "custom") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
@@ -1119,6 +1125,17 @@ void Application::SendMcpMessage(const std::string& payload) {
     Schedule([this, payload = std::move(payload)]() {
         if (protocol_) {
             protocol_->SendMcpMessage(payload);
+        }
+    });
+}
+
+void Application::SendJsonString(const std::string& json_str) {
+    // Thread-safe generic WS text frame send. Used by board-initiated
+    // notifications such as avatar_set_loaded (Phase 4.5 avatar). Mirrors
+    // SendMcpMessage's main-task Schedule pattern for protocol safety.
+    Schedule([this, json_str]() {
+        if (protocol_) {
+            protocol_->SendText(json_str);
         }
     });
 }
