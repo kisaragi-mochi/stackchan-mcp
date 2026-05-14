@@ -15,6 +15,28 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Firmware
+
+- The firmware now actively positions the head at a fall-safe neutral
+  pose (`yaw=0°`, `pitch=45°`) at the end of `InitializeServo()`, before
+  any MCP command can arrive. Previously the head retained whatever
+  angle it was left at on power-down, which could include end-stop
+  positions (e.g. `pitch=0°`) that triggered the SCS0009 bus hang
+  documented in
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
+  on the first user-driven motion. The new boot-time positioning uses
+  the existing interpolating `WriteHeadAngles` path with a 1-second
+  move duration plus a 100 ms settle delay, mirroring the `goHome()`
+  pattern in `m5stack/StackChan` and the timing established in
+  `mongonta0716/stackchan-arduino`. Existing pitch guards (`0..88`
+  hard clamp / `5..85` recommended range) continue to apply
+  unchanged. Implements
+  [#99](https://github.com/kisaragi-mochi/stackchan-mcp/issues/99)
+  Option C and the boot-init aspect of
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
+  direction E. Refs
+  [#115](https://github.com/kisaragi-mochi/stackchan-mcp/issues/115).
+
 ## [0.7.0] - 2026-05-14
 
 ### Gateway

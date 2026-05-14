@@ -1132,6 +1132,35 @@ private:
                 servo_ok_ = false;
                 return;
             }
+
+            // Issue #115: boot-time initialization to a fall-safe neutral
+            // pose. Without this, the head retains whatever angle it was
+            // left at on power-down — including end-stop positions (e.g.
+            // pitch=0) that trigger the SCS0009 bus-hang documented in
+            // #100 on the very first user-driven motion. By the time any
+            // MCP command can arrive, we want the head already moved to
+            // the center of the M5Stack-recommended 5..85° pitch range,
+            // well clear of both mechanical end-stops.
+            //
+            // Design follows the goHome() pattern in m5stack/StackChan
+            // (apps/app_setup/workers/servo.cpp:144) where the setup
+            // app calls motion.goHome(speed) at boot, and the 1-second
+            // positioning timing established in mongonta0716/stackchan-
+            // arduino attachServos(). 1000ms move via the existing
+            // interpolating WriteHeadAngles path keeps frame-rate stall
+            // currents low; the extra 100ms vTaskDelay covers servo
+            // settling before any subsequent motion can arrive.
+            //
+            // Implements #99 Option C and the boot-init aspect of #100
+            // direction E. Existing pitch guards (#80 / #98 / #109)
+            // continue to apply unchanged.
+            constexpr int BOOT_INIT_YAW_DEG = 0;
+            constexpr int BOOT_INIT_PITCH_DEG = 45;
+            constexpr uint32_t BOOT_INIT_MOVE_MS = 1000;
+            WriteHeadAngles(BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG, BOOT_INIT_MOVE_MS);
+            vTaskDelay(pdMS_TO_TICKS(BOOT_INIT_MOVE_MS + 100));
+            ESP_LOGI(TAG, "Boot-time servo init complete: yaw=%d pitch=%d",
+                     BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG);
         }
     }
 
