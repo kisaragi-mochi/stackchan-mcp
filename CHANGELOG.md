@@ -51,6 +51,31 @@ change is called out under a `Firmware` subsection of the release entry.
   direction E. Refs
   [#115](https://github.com/kisaragi-mochi/stackchan-mcp/issues/115).
 
+- Improved `get_head_angles` MCP-tool diagnostics so that transient
+  `ReadPos` failures can be distinguished from a genuine SCS0009 bus
+  hang. The handler now retries `ReadPos` up to three times (50 ms
+  inter-attempt delay) per servo ID while holding `scs_bus_mutex_`
+  across the whole sequence. The success-path JSON output
+  (`{"yaw":N,"pitch":N}`) is unchanged; on persistent failure the tool
+  now returns
+  `{"yaw":null,"pitch":null,"error":"ReadPos failed ...","servo_ok":bool,"yaw_attempts":N,"pitch_attempts":N}`
+  instead of the previous sentinel `{"yaw":-144,"pitch":-194}` (the
+  `-1` return from `ReadPos` run through the same
+  `(pos-zero) * 5 / 16` degree-conversion math as a valid raw position,
+  which was indistinguishable from a hang at the MCP layer and
+  contributed to the hang judgments recorded in
+  [#1](https://github.com/kisaragi-mochi/stackchan-mcp/issues/1) /
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100) /
+  [#118](https://github.com/kisaragi-mochi/stackchan-mcp/issues/118)).
+  The serial-log line is also expanded to include `servo_ok`, raw
+  `ReadPos` values, and attempt counts. As a further investigation
+  aid, `InitializeServo()` now logs pre- and post-init `ReadPos` raw
+  values and tick timestamps around the boot-init `WriteHeadAngles`
+  call, making the "unintended downward drop on power-on" investigation
+  ([#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121))
+  data-driven via the serial log. Refs
+  [#123](https://github.com/kisaragi-mochi/stackchan-mcp/issues/123).
+
 ## [0.7.0] - 2026-05-14
 
 ### Gateway

@@ -1090,8 +1090,16 @@ private:
                 return;
             }
 
+            // Issue #123: log boot-init pre-WritePos position with tick so
+            // the "unintended downward drop on power-on" (#121 hypothesis 1/2)
+            // becomes data-driven. ServoTask has not been created yet, so no
+            // scs_bus_mutex_ contention is possible at this point.
             int yaw_pos_actual = scs_bus_.ReadPos(SERVO_YAW_ID);
             int pitch_pos_actual = scs_bus_.ReadPos(SERVO_PITCH_ID);
+            ESP_LOGI(TAG,
+                     "Boot pre-init ReadPos: yaw_raw=%d pitch_raw=%d tick=%u",
+                     yaw_pos_actual, pitch_pos_actual,
+                     (unsigned)xTaskGetTickCount());
             if (yaw_pos_actual >= 0) {
                 yaw_motion_.current_deg = (yaw_pos_actual - 460) * 5 / 16;
                 ESP_LOGI(TAG, "Restored yaw_motion_.current_deg=%d from ReadPos=%d",
@@ -1157,10 +1165,29 @@ private:
             constexpr int BOOT_INIT_YAW_DEG = 0;
             constexpr int BOOT_INIT_PITCH_DEG = 45;
             constexpr uint32_t BOOT_INIT_MOVE_MS = 1000;
+            TickType_t boot_init_start_tick = xTaskGetTickCount();
             WriteHeadAngles(BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG, BOOT_INIT_MOVE_MS);
             vTaskDelay(pdMS_TO_TICKS(BOOT_INIT_MOVE_MS + 100));
-            ESP_LOGI(TAG, "Boot-time servo init complete: yaw=%d pitch=%d",
-                     BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG);
+
+            // Issue #123: capture post-init ReadPos so the boot-init effect
+            // is observable in the serial log. ServoTask is now running, so
+            // hold scs_bus_mutex_ across the ReadPos pair.
+            int post_yaw_pos = -1;
+            int post_pitch_pos = -1;
+            xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
+            post_yaw_pos = scs_bus_.ReadPos(SERVO_YAW_ID);
+            post_pitch_pos = scs_bus_.ReadPos(SERVO_PITCH_ID);
+            xSemaphoreGive(scs_bus_mutex_);
+            TickType_t boot_init_end_tick = xTaskGetTickCount();
+            ESP_LOGI(TAG,
+                     "Boot-time servo init complete: target yaw=%d pitch=%d "
+                     "(move=%ums), post-ReadPos: yaw_raw=%d pitch_raw=%d, "
+                     "elapsed_ms=%u",
+                     BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG,
+                     (unsigned)BOOT_INIT_MOVE_MS,
+                     post_yaw_pos, post_pitch_pos,
+                     (unsigned)((boot_init_end_tick - boot_init_start_tick) *
+                                portTICK_PERIOD_MS));
         }
     }
 
@@ -2375,27 +2402,84 @@ private:
         // Get current head angles
         mcp_server.AddTool(
             "self.robot.get_head_angles",
-            "Get the current head angles (yaw, pitch) of the robot in degrees.",
+            "Get the current head angles (yaw, pitch) of the robot in degrees. "
+            "Returns {\"yaw\":N,\"pitch\":N} on success; "
+            "on persistent ReadPos failure returns "
+            "{\"yaw\":null,\"pitch\":null,\"error\":...,\"servo_ok\":bool,"
+            "\"yaw_attempts\":N,\"pitch_attempts\":N}.",
             PropertyList(),
             [this](const PropertyList& properties) -> ReturnValue {
+                // Issue #123: retry ReadPos a few times before falling back
+                // to an explicit error reply. Single-call ReadPos failures
+                // (e.g. servo mid-motion, transient bus contention) are a
+                // known transient mode that InitializeServo() already treats
+                // as warning-and-continue; the previous behaviour of running
+                // `ReadPos==-1` through the same `(pos-zero)*5/16` math as a
+                // valid position produced sentinel `{-144,-194}` that was
+                // indistinguishable from a genuine bus hang at the MCP layer
+                // (see #1 / #100 / #118 hang judgments).
+                constexpr int kReadPosRetryMax = 3;
+                constexpr uint32_t kReadPosRetryDelayMs = 50;
+
                 int yaw_pos = -1;
                 int pitch_pos = -1;
+                int yaw_attempts = 0;
+                int pitch_attempts = 0;
                 if (servo_ok_) {
                     xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
-                    yaw_pos = scs_bus_.ReadPos(SERVO_YAW_ID);
-                    pitch_pos = scs_bus_.ReadPos(SERVO_PITCH_ID);
+                    for (int i = 0; i < kReadPosRetryMax; i++) {
+                        yaw_attempts = i + 1;
+                        yaw_pos = scs_bus_.ReadPos(SERVO_YAW_ID);
+                        if (yaw_pos >= 0) break;
+                        if (i + 1 < kReadPosRetryMax) {
+                            vTaskDelay(pdMS_TO_TICKS(kReadPosRetryDelayMs));
+                        }
+                    }
+                    for (int i = 0; i < kReadPosRetryMax; i++) {
+                        pitch_attempts = i + 1;
+                        pitch_pos = scs_bus_.ReadPos(SERVO_PITCH_ID);
+                        if (pitch_pos >= 0) break;
+                        if (i + 1 < kReadPosRetryMax) {
+                            vTaskDelay(pdMS_TO_TICKS(kReadPosRetryDelayMs));
+                        }
+                    }
                     xSemaphoreGive(scs_bus_mutex_);
                 }
-                int yaw = (yaw_pos - 460) * 5 / 16;
-                int pitch = (pitch_pos - 620) * 5 / 16;
+
                 cJSON* root = cJSON_CreateObject();
-                cJSON_AddNumberToObject(root, "yaw", yaw);
-                cJSON_AddNumberToObject(root, "pitch", pitch);
+                const bool yaw_ok = yaw_pos >= 0;
+                const bool pitch_ok = pitch_pos >= 0;
+                if (yaw_ok && pitch_ok) {
+                    int yaw = (yaw_pos - 460) * 5 / 16;
+                    int pitch = (pitch_pos - 620) * 5 / 16;
+                    cJSON_AddNumberToObject(root, "yaw", yaw);
+                    cJSON_AddNumberToObject(root, "pitch", pitch);
+                } else {
+                    cJSON_AddNullToObject(root, "yaw");
+                    cJSON_AddNullToObject(root, "pitch");
+                    char err[160];
+                    snprintf(err, sizeof(err),
+                             "ReadPos failed: yaw_raw=%d (attempts=%d) "
+                             "pitch_raw=%d (attempts=%d) servo_ok=%d",
+                             yaw_pos, yaw_attempts,
+                             pitch_pos, pitch_attempts,
+                             servo_ok_ ? 1 : 0);
+                    cJSON_AddStringToObject(root, "error", err);
+                    cJSON_AddBoolToObject(root, "servo_ok", servo_ok_);
+                    cJSON_AddNumberToObject(root, "yaw_attempts", yaw_attempts);
+                    cJSON_AddNumberToObject(root, "pitch_attempts", pitch_attempts);
+                }
                 char* str = cJSON_PrintUnformatted(root);
                 std::string result(str);
                 cJSON_free(str);
                 cJSON_Delete(root);
-                ESP_LOGI(TAG, "get_head_angles: %s", result.c_str());
+                ESP_LOGI(TAG,
+                         "get_head_angles: servo_ok=%d yaw_raw=%d (attempts=%d) "
+                         "pitch_raw=%d (attempts=%d) result=%s",
+                         servo_ok_ ? 1 : 0,
+                         yaw_pos, yaw_attempts,
+                         pitch_pos, pitch_attempts,
+                         result.c_str());
                 return result;
             });
 
