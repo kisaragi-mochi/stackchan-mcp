@@ -62,8 +62,9 @@ void AvatarSetFetcher::Fetch(
 
     const size_t content_length = http->GetBodyLength();
     if (content_length != expected_size) {
-        ESP_LOGW(TAG, "Fetch: Content-Length mismatch (got=%zu, expected=%zu)",
-                 content_length, expected_size);
+        ESP_LOGW(TAG, "Fetch: Content-Length mismatch (got=%u, expected=%u)",
+                 static_cast<unsigned int>(content_length),
+                 static_cast<unsigned int>(expected_size));
         http->Close();
         on_complete(false, "", "content_length_mismatch");
         return;
@@ -81,7 +82,8 @@ void AvatarSetFetcher::Fetch(
     uint8_t* buffer = static_cast<uint8_t*>(
         heap_caps_malloc(expected_size, MALLOC_CAP_SPIRAM));
     if (buffer == nullptr) {
-        ESP_LOGE(TAG, "Fetch: PSRAM staging allocation failed (size=%zu)", expected_size);
+        ESP_LOGE(TAG, "Fetch: PSRAM staging allocation failed (size=%u)",
+                 static_cast<unsigned int>(expected_size));
         http->Close();
         on_complete(false, "", "psram_oom");
         return;
@@ -93,7 +95,8 @@ void AvatarSetFetcher::Fetch(
         int n = http->Read(reinterpret_cast<char*>(buffer + total_read),
                            static_cast<int>(to_read));
         if (n <= 0) {
-            ESP_LOGE(TAG, "Fetch: Read failed at offset %zu (n=%d)", total_read, n);
+            ESP_LOGE(TAG, "Fetch: Read failed at offset %u (n=%d)",
+                     static_cast<unsigned int>(total_read), n);
             heap_caps_free(buffer);
             http->Close();
             on_complete(false, "", "read_failed");
@@ -121,7 +124,14 @@ void AvatarSetFetcher::Fetch(
         return;
     }
 
-    ESP_LOGI(TAG, "Fetch: avatar set loaded (mode=%d, bytes=%zu, sha256=%s)",
-             static_cast<int>(mode), expected_size, actual_sha256.c_str());
+    // ESP-IDF defaults to newlib-nano printf which does NOT support %zu;
+    // a stray %zu is silently skipped, shifting downstream arguments — in
+    // particular the next %s reads a size_t value as a const char* and
+    // dereferences it, blowing up with LoadProhibited @ <that size>.
+    // Cast size_t to unsigned int and use %u to stay nano-printf-safe.
+    ESP_LOGI(TAG, "Fetch: avatar set loaded (mode=%d, bytes=%u, sha256=%s)",
+             static_cast<int>(mode),
+             static_cast<unsigned int>(expected_size),
+             actual_sha256.c_str());
     on_complete(true, actual_sha256, "");
 }
