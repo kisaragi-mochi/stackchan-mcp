@@ -581,135 +581,49 @@ def create_server() -> Server:
                 },
             ),
             Tool(
-                name="i2c_scan",
+                name="load_avatar_set",
                 description=(
-                    "Scan the external I2C bus on Grove Port A and return "
-                    "all 7-bit addresses (probe range 0x08..0x77, "
-                    "excluding I2C reserved ranges) that ACK a probe. Use "
-                    "this to discover attached M5Stack Unit modules "
-                    "(ENV III, ToF, gas sensor, PaHub, etc.). On-board ICs "
-                    "on the internal bus are NOT included (this tool "
-                    "operates on a physically separate bus). Returns "
-                    "{\"ok\": true, \"addresses\": [...]}."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {},
-                },
-            ),
-            Tool(
-                name="i2c_read",
-                description=(
-                    "Read n_bytes from an I2C device at 7-bit address "
-                    "`addr` on Grove Port A. Use this for protocols that "
-                    "read the device's current register / output without "
-                    "a preceding write. For typical 'write register "
-                    "address, then read' patterns, use `i2c_write_read` "
-                    "instead. Returns "
-                    "{\"ok\": true, \"bytes\": [...]} or "
-                    "{\"ok\": false, \"error\": \"ESP_ERR_TIMEOUT\"} on NACK."
+                    "Load a dynamic avatar set onto the connected ESP32 "
+                    "(Phase 4.5 avatar pipeline). The gateway stages the "
+                    "payload on its HTTP server, notifies the device via "
+                    "WebSocket, and the device fetches + SHA256-verifies + "
+                    "loads it into PSRAM. ``archive_path`` must point to a "
+                    "raw RGB565 file on the gateway host: layered mode = "
+                    "14 frames (face 6 + eyes 3 + mouth 5) totalling "
+                    "537,600 bytes; matrix mode = 90 frames (6 × 3 × 5) "
+                    "totalling 3,456,000 bytes. Returns ok / checksum / "
+                    "bytes_transferred / error."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "addr": {
-                            "type": "integer",
+                        "archive_path": {
+                            "type": "string",
                             "description": (
-                                "7-bit I2C address; range 0x08..0x77 "
-                                "(I2C reserved ranges excluded — matches "
-                                "the i2c_scan probe range)."
+                                "Filesystem path on the gateway host to "
+                                "the raw RGB565 payload."
                             ),
-                            "minimum": 8,
-                            "maximum": 119,
                         },
-                        "n_bytes": {
-                            "type": "integer",
-                            "description": "Bytes to read (1..256).",
-                            "minimum": 1,
-                            "maximum": 256,
+                        "mode": {
+                            "type": "string",
+                            "enum": ["layered", "matrix"],
+                            "description": (
+                                "'layered' (14 frames, ~525 KB) or "
+                                "'matrix' (90 frames, ~3.3 MB)."
+                            ),
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": (
+                                "Max seconds to wait for the device's "
+                                "avatar_set_loaded reply."
+                            ),
+                            "default": 60.0,
+                            "minimum": 5.0,
+                            "maximum": 300.0,
                         },
                     },
-                    "required": ["addr", "n_bytes"],
-                },
-            ),
-            Tool(
-                name="i2c_write",
-                description=(
-                    "Write bytes to an I2C device at 7-bit address `addr` "
-                    "on Grove Port A. `bytes` is an array of integers "
-                    "(0..255). This tool operates on the external Port A "
-                    "bus only; on-board ICs (PMIC, AW9523, touch, etc.) "
-                    "on the internal bus are not reachable."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "addr": {
-                            "type": "integer",
-                            "description": (
-                                "7-bit I2C address; range 0x08..0x77 "
-                                "(I2C reserved ranges excluded — matches "
-                                "the i2c_scan probe range)."
-                            ),
-                            "minimum": 8,
-                            "maximum": 119,
-                        },
-                        "bytes": {
-                            "type": "array",
-                            "description": "Bytes to write (each 0..255).",
-                            "items": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": 255,
-                            },
-                        },
-                    },
-                    "required": ["addr", "bytes"],
-                },
-            ),
-            Tool(
-                name="i2c_write_read",
-                description=(
-                    "Write `write_bytes` to an I2C device at 7-bit address "
-                    "`addr` on Grove Port A, then read `n_bytes` back in a "
-                    "single Repeated Start transaction. Common 'set "
-                    "register pointer, then read' idiom: pass "
-                    "write_bytes=[reg_addr] to read from a specific "
-                    "register."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "addr": {
-                            "type": "integer",
-                            "description": (
-                                "7-bit I2C address; range 0x08..0x77 "
-                                "(I2C reserved ranges excluded — matches "
-                                "the i2c_scan probe range)."
-                            ),
-                            "minimum": 8,
-                            "maximum": 119,
-                        },
-                        "write_bytes": {
-                            "type": "array",
-                            "description": (
-                                "Bytes to write before reading "
-                                "(each 0..255)."
-                            ),
-                            "items": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": 255,
-                            },
-                        },
-                        "n_bytes": {
-                            "type": "integer",
-                            "description": "Bytes to read (1..256).",
-                            "minimum": 1,
-                            "maximum": 256,
-                        },
-                    },
-                    "required": ["addr", "write_bytes", "n_bytes"],
+                    "required": ["archive_path", "mode"],
                 },
             ),
         ]
@@ -760,6 +674,32 @@ def create_server() -> Server:
                         text=json.dumps({"error": str(exc)}),
                     )
                 ]
+            return [TextContent(type="text", text=json.dumps(result))]
+
+        if name == "load_avatar_set":
+            # Phase 4.5 avatar: stage the raw RGB565 payload and notify
+            # the device via WS avatar_set_fetch; the device performs the
+            # HTTP fetch + SHA256 verify + AvatarSet::Load and replies
+            # with avatar_set_loaded. All orchestration lives in
+            # Gateway.load_avatar_set; this branch is a thin wrapper that
+            # parses arguments and returns the dict-result as MCP JSON.
+            archive_path = arguments.get("archive_path", "")
+            mode = arguments.get("mode", "")
+            try:
+                timeout = float(arguments.get("timeout", 60.0))
+            except (TypeError, ValueError):
+                timeout = 60.0
+            if not archive_path or not isinstance(archive_path, str):
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"ok": False, "error": "archive_path is required"}),
+                )]
+            if mode not in ("layered", "matrix"):
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"ok": False, "error": f"unknown mode: {mode}"}),
+                )]
+            result = await gw.load_avatar_set(archive_path, mode, timeout)
             return [TextContent(type="text", text=json.dumps(result))]
 
         if not gw.esp32.device_connected:
