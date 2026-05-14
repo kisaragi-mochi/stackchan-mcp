@@ -15,6 +15,8 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-14
+
 ### Gateway
 
 - `listen()` now accepts optional visual/motion feedback arguments:
