@@ -50,7 +50,7 @@
 | `take_photo(question?)` | カメラ撮影 → JPEG 保存 → パス返す | ✅ |
 | `set_volume(volume)` | スピーカー音量 (0-100) | ✅ |
 | `set_brightness(brightness)` | 画面明るさ (0-100) | ✅ |
-| `move_head(yaw, pitch, speed?)` | 首を動かす (サーボ) | ✅ |
+| `move_head(yaw, pitch, speed?)` | 首を動かす (サーボ)。`pitch` は M5Stack 推奨運用レンジ `5..85` に制限される。ファームウェア側のハードクランプ (`0..88`) を使いたい場合は、firmware-side の `set_head_angles` デバイスツールを利用する | ✅ |
 | `get_touch_state` | タッチセンサ状態 (press/release/stroke 等) | ✅ |
 | `set_avatar(face)` | アバター表情切替 (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`)、または `off` でアバターを隠し blink も停止して下層の WiFi 設定 / OTA / 設定画面を露出。他 face を指定するとアバター + blink が復帰 | ✅ |
 | `set_blink(state)` | 瞬き ON/OFF | ✅ |
@@ -451,6 +451,8 @@ M5Stack 公式ドキュメントには以下の警告があります:
 > (StackChan の Y 軸サーボの可動角度は 5°〜85° の範囲内に制御することを推奨します。極端な角度で動作させると **サーボストール や 永久故障** を引き起こす可能性があります。)
 
 `set_head_angles` MCP ツールは pitch を完全に **permissive** な schema range として宣言しています — `int` 型の全範囲 (`std::numeric_limits<int>::min()` から `std::numeric_limits<int>::max()` まで、境界値含む)。Tier 1 の権威ある enforcement は firmware ハンドラ側にあります — schema range を狭めると `McpServer::Property` が十分に極端な out-of-range リクエスト (例: `pitch=200` や `pitch=INT_MIN`) をハンドラ呼び出し前に reject してしまい、ドキュメントに書かれた Tier 1 挙動が到達不能になります（詳しくは #98 を参照）。`0°` 未満のリクエストは `0°` に引き上げられ (`ESP_LOGW`)、`88°` 超のリクエストは `88°` に引き下げられ (`ESP_LOGW`)、`[0, 88]` 内かつ `[5, 85]` 外のリクエストはそのまま受け入れた上で `ESP_LOGI` のソフトシグナルを出力します。過去に `-30..+30°` を target にしていた caller はそのまま動作します（負側は `0°` にクランプされます）。
+
+対照的に、**gateway 側の `move_head` MCP ツール** — 上記のツール一覧で LLM クライアントが見るのはこちら — は `pitch=5..85` / `yaw=-90..90` の restrictive な schema を宣言し、gateway `call_tool` ハンドラでも同じ境界を二重に enforce しています（belt-and-suspenders）。これにより、推奨範囲外のリクエストを MCP 境界で reject して、エージェントが `move_head(yaw=0, pitch=0)` のような姿勢リセット呼び出しで [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100) で track されているバスハング状態を誤って誘発しないようにしています。診断やリカバリ等で firmware Tier 1 ハードクランプそのものを使いたい上級用途では、`move_head` を経由せず firmware-side の `set_head_angles` デバイスツールを直接呼んでください — [#109](https://github.com/kisaragi-mochi/stackchan-mcp/issues/109) 参照。
 
 X 軸 (yaw、`-90..+90°`) には同等のハードウェア制限はなく — M5Stack 公式が「X 軸には角度制限は不要」と明記しています — 宣言範囲全体を使えます。
 

@@ -25,6 +25,25 @@ change is called out under a `Firmware` subsection of the release entry.
   can continue from the attentive posture. The default
   `motion="none"` preserves the existing behavior. Refs #96.
 
+- `move_head` MCP tool now constrains `pitch` to `5..85` — the
+  M5Stack-recommended operating range. Both the `inputSchema`
+  (`minimum: 5`, `maximum: 85` for `pitch`; `minimum: -90`, `maximum: 90`
+  for `yaw`) and the gateway `call_tool` handler enforce the bound as
+  belt-and-suspenders. The tool description now references
+  `set_head_angles` for callers that genuinely need the wider firmware
+  hard clamp (`0..88`). This also refuses `move_head(yaw=0, pitch=0)`
+  and other below-`5°` pitch requests at the MCP boundary, so an
+  LLM-driven agent cannot trigger the SCS0009 servo bus hang state
+  tracked in
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
+  from a default pose-reset call. See README "Y-axis (pitch) safe
+  range — two-tier guard" for the gateway-side restrictive vs
+  firmware-side permissive policy contrast, and the comment thread on
+  [#99](https://github.com/kisaragi-mochi/stackchan-mcp/issues/99) /
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
+  for the on-device reproduction (2026-05-14). Closes
+  [#109](https://github.com/kisaragi-mochi/stackchan-mcp/issues/109).
+
 ## [0.6.0] - 2026-05-12
 
 ### Added

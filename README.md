@@ -50,7 +50,7 @@ This repository is a monorepo.
 | `take_photo(question?)` | Capture a frame, save as JPEG, return the path | ✅ |
 | `set_volume(volume)` | Speaker volume (0-100) | ✅ |
 | `set_brightness(brightness)` | Screen brightness (0-100) | ✅ |
-| `move_head(yaw, pitch, speed?)` | Move the neck (servos) | ✅ |
+| `move_head(yaw, pitch, speed?)` | Move the neck (servos). `pitch` is constrained to `5..85` — the M5Stack-recommended operating range. For the wider firmware hard clamp (`0..88`), use the firmware-side `set_head_angles` device tool instead. | ✅ |
 | `get_touch_state` | Touch sensor state (press / release / stroke / etc.) | ✅ |
 | `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`), or `off` to hide the avatar and disable blink so the underlying WiFi config / OTA / settings screens are visible. Any other face brings the avatar back and restores blink. | ✅ |
 | `set_blink(state)` | Blink on/off | ✅ |
@@ -494,6 +494,8 @@ M5Stack's official documentation states:
 > — https://docs.m5stack.com/en/StackChan ("Motion Angle Notice")
 
 The `set_head_angles` MCP tool declares pitch with a fully permissive schema range — the entire `int` value range, `std::numeric_limits<int>::min()` to `std::numeric_limits<int>::max()`, corner values included; the firmware-side handler is the authoritative Tier 1 enforcement layer. Any narrower schema range would cause `McpServer::Property` to reject sufficiently-extreme out-of-range requests (e.g. `pitch=200` or `pitch=INT_MIN`) before the handler could clamp / log them, leaving the documented Tier 1 behavior unreachable for those callers — see #98. Requests below `0°` are silently raised to `0°` (with `ESP_LOGW`), requests above `88°` are silently lowered to `88°` (with `ESP_LOGW`), and requests inside `[0, 88]` but outside `[5, 85]` are accepted with an `ESP_LOGI` soft signal. Older callers that targeted `-30..+30°` continue to work without modification (the negative half clamps to `0°`).
+
+Conversely, the **gateway-side `move_head` MCP tool** — the one LLM-driven clients see in the tool list above — declares a restrictive `pitch=5..85` / `yaw=-90..90` schema and re-enforces the same bounds in the gateway `call_tool` handler as belt-and-suspenders. This rejects out-of-recommended requests at the MCP boundary so an agent cannot accidentally trigger the bus-hang risk tracked in [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100) from a pose-reset call like `move_head(yaw=0, pitch=0)`. Callers that need explicit access to the firmware Tier 1 hard clamp (for diagnostics, recovery sequences, or other expert use cases) should bypass `move_head` and call the firmware-side `set_head_angles` device tool directly — see [#109](https://github.com/kisaragi-mochi/stackchan-mcp/issues/109).
 
 The X-axis (yaw, `-90..+90°`) is not subject to a comparable hardware restriction — M5Stack's documentation explicitly notes "No angle restriction is required for the X-axis" — and remains usable across its full declared range.
 

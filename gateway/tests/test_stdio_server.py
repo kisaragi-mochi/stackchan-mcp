@@ -375,3 +375,197 @@ async def test_set_mouth_sequence_relays_steps_as_json_string(monkeypatch):
     assert name == "self.display.set_mouth_sequence"
     assert set(arguments.keys()) == {"steps_json"}
     assert json.loads(arguments["steps_json"]) == steps
+
+
+# ---------------------------------------------------------------------------
+# move_head — Issue #109: schema + handler enforce the M5Stack-recommended
+# pitch operating range (5..85). pitch=0 motion-starts have been observed on
+# device to trigger the SCS0009 bus hang tracked in Issue #100, and the
+# firmware-side `set_head_angles` tool remains the documented escape hatch
+# for callers that need the wider firmware hard clamp (0..88).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_tools_move_head_declares_recommended_pitch_range():
+    """move_head schema mirrors M5Stack-recommended 5..85 / yaw -90..90."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tool = next((t for t in result.root.tools if t.name == "move_head"), None)
+    assert tool is not None, "move_head tool should be registered"
+
+    pitch_schema = tool.inputSchema["properties"]["pitch"]
+    assert pitch_schema["minimum"] == 5
+    assert pitch_schema["maximum"] == 85
+
+    yaw_schema = tool.inputSchema["properties"]["yaw"]
+    assert yaw_schema["minimum"] == -90
+    assert yaw_schema["maximum"] == 90
+
+    # The description should mention the escape-hatch tool name so an LLM
+    # reading it can pick the right alternative for permissive use cases.
+    assert "set_head_angles" in tool.description
+
+
+def _make_fake_gateway(monkeypatch):
+    """Helper: wire a FakeESP32/FakeGateway into the stdio_server module.
+
+    Returns the ``calls`` list that records each ESP32 call. The handler
+    treats this device as connected. Used by the move_head handler tests.
+    """
+    calls: list[tuple[str, dict]] = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, tool_name, arguments):
+            calls.append((tool_name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {"yaw": arguments.get("yaw", 0), "pitch": arguments.get("pitch", 0)}
+                        ),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    return calls
+
+
+def _move_head_request(yaw, pitch):
+    return CallToolRequest(
+        method="tools/call",
+        params={"name": "move_head", "arguments": {"yaw": yaw, "pitch": pitch}},
+    )
+
+
+def _assert_rejected_without_dispatch(result, calls):
+    """Common shape: out-of-range request is refused and no ESP32 call fires.
+
+    Two refusal paths coexist:
+    - mcp SDK server-side JSON Schema validation rejects the request before
+      the handler runs (current behaviour observed with mcp>=1.0). The
+      response text is a human-readable validation message rather than the
+      handler's structured JSON error.
+    - The handler's belt-and-suspenders validation in stdio_server.py
+      returns a clean ``{"error": "..."}`` JSON for SDK versions or future
+      configurations that may not enforce the schema bounds.
+
+    Either path is acceptable. What matters for hardware safety is that
+    ``self.robot.set_head_angles`` is never called.
+    """
+    assert calls == [], (
+        "Out-of-range move_head must not dispatch a motion call. "
+        f"Got calls={calls}, response text={result.root.content[0].text!r}"
+    )
+    response_text = result.root.content[0].text
+    # The response should signal an error in some shape. Either the handler
+    # JSON ({"error": "..."}) or the SDK validation prose mentions one of
+    # these keywords.
+    lower = response_text.lower()
+    assert any(
+        keyword in lower
+        for keyword in ("error", "invalid", "minimum", "maximum", "type")
+    ), f"Expected an error signal in {response_text!r}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pitch", [0, 4, -1, -30])
+async def test_move_head_rejects_pitch_below_recommended(monkeypatch, pitch):
+    """pitch values below the M5Stack-recommended 5° floor are refused."""
+    calls = _make_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _move_head_request(yaw=0, pitch=pitch)
+    )
+
+    _assert_rejected_without_dispatch(result, calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pitch", [86, 90, 88, 200])
+async def test_move_head_rejects_pitch_above_recommended(monkeypatch, pitch):
+    """pitch values above the M5Stack-recommended 85° ceiling are refused."""
+    calls = _make_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _move_head_request(yaw=0, pitch=pitch)
+    )
+
+    _assert_rejected_without_dispatch(result, calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("yaw", [-91, 91, 200, -1000])
+async def test_move_head_rejects_yaw_out_of_range(monkeypatch, yaw):
+    """yaw values outside -90..+90 are refused."""
+    calls = _make_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _move_head_request(yaw=yaw, pitch=45)
+    )
+
+    _assert_rejected_without_dispatch(result, calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pitch", [5, 45, 85])
+async def test_move_head_accepts_pitch_inside_recommended(monkeypatch, pitch):
+    """Boundary and mid-range pitch values are accepted and relayed."""
+    calls = _make_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _move_head_request(yaw=0, pitch=pitch)
+    )
+
+    assert len(calls) == 1
+    name, arguments = calls[0]
+    assert name == "self.robot.set_head_angles"
+    assert arguments == {"yaw": 0, "pitch": pitch}
+
+    payload = json.loads(result.root.content[0].text)
+    assert "error" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pitch", [None, "45", 5.5])
+async def test_move_head_rejects_non_integer_pitch(monkeypatch, pitch):
+    """Non-int pitch values are refused before reaching the device."""
+    calls = _make_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _move_head_request(yaw=0, pitch=pitch)
+    )
+
+    _assert_rejected_without_dispatch(result, calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pitch", [True, False])
+async def test_move_head_rejects_boolean_pitch(monkeypatch, pitch):
+    """bool is an int subclass in Python; must still be refused for pitch."""
+    calls = _make_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _move_head_request(yaw=0, pitch=pitch)
+    )
+
+    _assert_rejected_without_dispatch(result, calls)
