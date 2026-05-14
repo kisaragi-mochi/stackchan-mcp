@@ -29,6 +29,7 @@ using ScsBus = SCSCL;
 static inline bool ServoWritePosOk(int r) { return r > 0; }
 #endif
 #include "avatar_images.h"
+#include "avatar_set.h"
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
@@ -533,6 +534,12 @@ private:
     lv_obj_t* avatar_img_ = nullptr;
     esp_timer_handle_t avatar_init_timer_ = nullptr;
     std::string current_avatar_face_ = "idle";
+
+    // Dynamic avatar set loaded via the load_avatar_set MCP tool. Stays
+    // unloaded by default — AvatarImageFor() then falls back to the static
+    // const tables in avatar_images.h (placeholder or local override). See
+    // docs/intent/stackchan_avatar_pipeline.md in the SAIVerse repository.
+    AvatarSet avatar_set_;
 
     // Phase 2: blinking + lip-sync overlay state.
     // Blink works as a four-step state machine driven by blink_step_timer_:
@@ -3668,10 +3675,42 @@ private:
         ESP_LOGI(TAG, "Si12T touch poll started (%d ms interval)", TOUCH_POLL_MS);
     }
 
+    // Map a face name to AvatarSet's 0-indexed slot, or -1 if unknown.
+    static int FaceNameToIndex(const char* face) {
+        if (face == nullptr) return -1;
+        if (strcmp(face, "idle") == 0)        return 0;
+        if (strcmp(face, "happy") == 0)       return 1;
+        if (strcmp(face, "thinking") == 0)    return 2;
+        if (strcmp(face, "sad") == 0)         return 3;
+        if (strcmp(face, "surprised") == 0)   return 4;
+        if (strcmp(face, "embarrassed") == 0) return 5;
+        return -1;
+    }
+
     // Map a face name (idle/happy/...) to the embedded RGB565 image.
     // Returns nullptr if the name is unknown.
-    static const lv_image_dsc_t* AvatarImageFor(const char* face) {
+    //
+    // Lookup order:
+    //   1. If a dynamic AvatarSet has been loaded via the load_avatar_set
+    //      MCP tool and its mode is layered, use AvatarSet::GetFace().
+    //   2. Otherwise fall back to the static const tables in avatar_images.h
+    //      (placeholder or avatar_images.local.cc override). This keeps
+    //      existing upstream users unaffected.
+    // Matrix-mode lookups (= face × eyes × mouth) live in a separate path
+    // and are not exposed through this function.
+    const lv_image_dsc_t* AvatarImageFor(const char* face) const {
         if (face == nullptr) return nullptr;
+
+        if (avatar_set_.is_loaded() && avatar_set_.mode() == AvatarSet::Mode::kLayered) {
+            const int idx = FaceNameToIndex(face);
+            if (idx >= 0) {
+                const lv_image_dsc_t* dsc = avatar_set_.GetFace(idx);
+                if (dsc != nullptr) {
+                    return dsc;
+                }
+            }
+        }
+
         if (strcmp(face, "idle") == 0)        return &avatar_idle;
         if (strcmp(face, "happy") == 0)       return &avatar_happy;
         if (strcmp(face, "thinking") == 0)    return &avatar_thinking;
