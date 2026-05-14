@@ -68,15 +68,18 @@ bool AvatarSet::Load(Mode mode, const uint8_t* image_data, size_t image_data_siz
         (mode == Mode::kLayered) ? kLayeredPayloadBytes : kMatrixPayloadBytes;
     if (image_data_size != expected) {
         ESP_LOGW(TAG,
-                 "Load: size mismatch (got %zu, expected %zu for mode=%d)",
-                 image_data_size, expected, static_cast<int>(mode));
+                 "Load: size mismatch (got %u, expected %u for mode=%d)",
+                 static_cast<unsigned int>(image_data_size),
+                 static_cast<unsigned int>(expected),
+                 static_cast<int>(mode));
         return false;
     }
 
     uint8_t* new_buffer = static_cast<uint8_t*>(
         heap_caps_malloc(image_data_size, MALLOC_CAP_SPIRAM));
     if (new_buffer == nullptr) {
-        ESP_LOGE(TAG, "Load: PSRAM allocation failed (size=%zu)", image_data_size);
+        ESP_LOGE(TAG, "Load: PSRAM allocation failed (size=%u)",
+                 static_cast<unsigned int>(image_data_size));
         return false;
     }
 
@@ -114,8 +117,9 @@ bool AvatarSet::Load(Mode mode, const uint8_t* image_data, size_t image_data_siz
     }
 
     loaded_ = true;
-    ESP_LOGI(TAG, "Avatar set loaded: mode=%d, bytes=%zu",
-             static_cast<int>(mode), image_data_size);
+    ESP_LOGI(TAG, "Avatar set loaded: mode=%d, bytes=%u",
+             static_cast<int>(mode),
+             static_cast<unsigned int>(image_data_size));
     return true;
 }
 
