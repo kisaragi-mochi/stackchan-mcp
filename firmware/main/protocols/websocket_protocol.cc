@@ -183,9 +183,11 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
 
     Settings settings("websocket", false);
     // Read the gateway URL from NVS (set via the WiFi config UI's "websocket
-    // url" field on first boot, e.g. "ws://<your-gateway-lan-ip>:8765"). The
-    // legacy OTA-config code path is disabled in application.cc by design —
-    // this firmware always speaks to a stackchan-mcp gateway directly.
+    // url" field on first boot, e.g. "ws://<your-gateway-lan-ip>:8765").
+    // application.cc forces WebsocketProtocol regardless of the upstream OTA
+    // response, and CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG (default y) prevents
+    // the upstream OTA server from overwriting the NVS values read below.
+    // This firmware always speaks to a stackchan-mcp gateway directly.
     std::string url = settings.GetString("url");
 #ifdef CONFIG_DEFAULT_WEBSOCKET_URL
 #ifdef CONFIG_FORCE_DEFAULT_WEBSOCKET_URL

@@ -6,6 +6,29 @@ config OTA_URL
     help
         The application will access this URL to check for new firmwares and server address.
 
+config DISABLE_OTA_WEBSOCKET_CONFIG
+    bool "Ignore the websocket section of the OTA response"
+    default y
+    help
+        When enabled (default for this fork), the firmware parses the OTA
+        response normally but skips the NVS write-back for the optional
+        `websocket` section. The stackchan-mcp build always speaks to a
+        stackchan-mcp gateway directly — the WebSocket URL, token, and
+        fallback URL are owned by the user via the WiFi config UI or
+        CONFIG_DEFAULT_WEBSOCKET_URL / CONFIG_DEFAULT_WEBSOCKET_TOKEN /
+        CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL Kconfig values, not the
+        upstream OTA server.
+
+        Disable this option to restore the original xiaozhi-esp32
+        behavior, where the OTA server may overwrite NVS
+        websocket.{url,token,fallback_url} on every boot. That behavior
+        is what caused user-configured LAN gateway URLs (e.g.
+        ws://192.168.x.y:8765) to be silently replaced by the upstream
+        server's value (see GitHub issue #110).
+
+        The MQTT / firmware-version / activation / server-time sections
+        of the OTA response are unaffected by this option.
+
 config DEFAULT_WEBSOCKET_URL
     string "Default WebSocket gateway URL (fallback when NVS is empty)"
     default ""

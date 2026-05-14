@@ -165,6 +165,19 @@ esp_err_t Ota::CheckVersion() {
     }
 
     has_websocket_config_ = false;
+#if CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG
+    // The stackchan-mcp build owns the WebSocket URL/token/fallback_url
+    // via the WiFi config UI and the CONFIG_DEFAULT_WEBSOCKET_* Kconfig
+    // values. The upstream xiaozhi OTA server returns its own websocket
+    // section pointing at api.tenclass.net, which used to overwrite the
+    // user's NVS values on every boot (GitHub issue #110). We skip the
+    // write-back entirely; the section, if present, is logged for
+    // diagnostics only.
+    if (cJSON_HasObjectItem(root, "websocket")) {
+        ESP_LOGI(TAG, "OTA response includes a websocket section; ignored "
+                      "(CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG=y).");
+    }
+#else
     cJSON *websocket = cJSON_GetObjectItem(root, "websocket");
     if (cJSON_IsObject(websocket)) {
         Settings settings("websocket", true);
@@ -184,6 +197,7 @@ esp_err_t Ota::CheckVersion() {
     } else {
         ESP_LOGI(TAG, "No websocket section found!");
     }
+#endif
 
     has_server_time_ = false;
     cJSON *server_time = cJSON_GetObjectItem(root, "server_time");

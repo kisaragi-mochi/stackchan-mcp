@@ -17,6 +17,20 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Fixed user-configured WebSocket gateway URLs (e.g.
+  `ws://192.168.x.y:8765`) being silently overwritten on every boot by
+  the upstream xiaozhi OTA-config response. `Ota::CheckVersion()` still
+  runs (firmware-version / activation / server-time / MQTT paths are
+  unchanged), but the `websocket` section of the response is no longer
+  written back into NVS by default. A new Kconfig option
+  `CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG` (default `y`) gates this
+  behavior; setting it to `n` restores the original
+  xiaozhi-esp32 NVS overwrite path. The misleading comment in
+  `WebsocketProtocol::OpenAudioChannelInternal()` that claimed the
+  OTA-config path was already disabled has been corrected to reflect
+  the actual gating. Closes
+  [#110](https://github.com/kisaragi-mochi/stackchan-mcp/issues/110).
+
 - The firmware now actively positions the head at a fall-safe neutral
   pose (`yaw=0°`, `pitch=45°`) at the end of `InitializeServo()`, before
   any MCP command can arrive. Previously the head retained whatever
