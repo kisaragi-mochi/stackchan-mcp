@@ -29,6 +29,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #endif
 #include "avatar_images.h"
 #include "avatar_set.h"
+#include "avatar_set_fetcher.h"
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
@@ -5465,6 +5466,129 @@ public:
     virtual void OnTtsStop() override {
         StopTtsLipSync();
     }
+
+    // Phase 4.5 avatar (saiverse-stackchan-addon): handle the gateway's
+    // `avatar_set_fetch` WS message. Parse url/token/mode/checksum/
+    // expected_size, spawn a worker task that performs HTTP GET + SHA256
+    // verify + AvatarSet::Load, then send `avatar_set_loaded` back via
+    // the protocol. Runs on the protocol receive task; the actual fetch
+    // is delegated to a FreeRTOS task to avoid blocking the receive loop
+    // while the LCD-sized payload flows in.
+    virtual void OnAvatarSetFetch(const cJSON* root) override {
+        if (root == nullptr) {
+            ESP_LOGW(TAG, "OnAvatarSetFetch: root is null");
+            return;
+        }
+        auto url      = cJSON_GetObjectItem(root, "url");
+        auto token    = cJSON_GetObjectItem(root, "token");
+        auto mode_j   = cJSON_GetObjectItem(root, "mode");
+        auto checksum = cJSON_GetObjectItem(root, "checksum");
+        auto size_j   = cJSON_GetObjectItem(root, "expected_size");
+
+        if (!cJSON_IsString(url) || !cJSON_IsString(token) ||
+            !cJSON_IsString(mode_j) || !cJSON_IsNumber(size_j)) {
+            ESP_LOGW(TAG, "OnAvatarSetFetch: missing required fields");
+            SendAvatarSetLoadedError("", "missing_fields");
+            return;
+        }
+
+        AvatarSet::Mode mode_enum;
+        if (strcmp(mode_j->valuestring, "layered") == 0) {
+            mode_enum = AvatarSet::Mode::kLayered;
+        } else if (strcmp(mode_j->valuestring, "matrix") == 0) {
+            mode_enum = AvatarSet::Mode::kMatrix;
+        } else {
+            ESP_LOGW(TAG, "OnAvatarSetFetch: unknown mode '%s'", mode_j->valuestring);
+            SendAvatarSetLoadedError("", "unknown_mode");
+            return;
+        }
+
+        auto* context = new AvatarFetchContext;
+        context->board = this;
+        context->url = url->valuestring;
+        context->token = token->valuestring;
+        context->mode = mode_enum;
+        context->expected_size = static_cast<size_t>(size_j->valuedouble);
+        context->expected_sha256 = cJSON_IsString(checksum) ? checksum->valuestring : "";
+
+        BaseType_t ok = xTaskCreate(
+            &StackChanBoard::AvatarFetchTaskTrampoline,
+            "avatar_fetch",
+            8192,
+            context,
+            tskIDLE_PRIORITY + 2,
+            nullptr);
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "OnAvatarSetFetch: failed to create avatar_fetch task");
+            delete context;
+            SendAvatarSetLoadedError("", "task_create_failed");
+        }
+    }
+
+    // ---- Phase 4.5 avatar helpers --------------------------------------
+
+    struct AvatarFetchContext {
+        StackChanBoard* board;
+        std::string url;
+        std::string token;
+        AvatarSet::Mode mode;
+        size_t expected_size;
+        std::string expected_sha256;
+    };
+
+    static void AvatarFetchTaskTrampoline(void* arg) {
+        auto* ctx = static_cast<AvatarFetchContext*>(arg);
+        ctx->board->RunAvatarFetch(ctx);
+        delete ctx;
+        vTaskDelete(nullptr);
+    }
+
+    void RunAvatarFetch(const AvatarFetchContext* ctx) {
+        AvatarSetFetcher::Fetch(
+            avatar_set_,
+            ctx->url, ctx->token,
+            ctx->mode, ctx->expected_size, ctx->expected_sha256,
+            [](bool ok,
+               const std::string& actual_checksum,
+               const std::string& error_code) {
+                SendAvatarSetLoaded(ok, actual_checksum, error_code);
+            });
+
+        // After a successful Load the previously displayed face is still
+        // pointing into the freed static-table data via avatar_img_; force a
+        // refresh so the new AvatarSet entry is picked up by AvatarImageFor.
+        // Skipped on failure (the old image is still valid).
+        if (avatar_set_.is_loaded()) {
+            SetAvatarExpressionIfActive(current_avatar_face_.c_str());
+        }
+    }
+
+    static void SendAvatarSetLoaded(
+        bool ok, const std::string& checksum, const std::string& error_code) {
+        cJSON* root = cJSON_CreateObject();
+        if (root == nullptr) return;
+        cJSON_AddStringToObject(root, "type", "avatar_set_loaded");
+        cJSON_AddStringToObject(root, "checksum", checksum.c_str());
+        cJSON_AddBoolToObject(root, "ok", ok);
+        if (ok || error_code.empty()) {
+            cJSON_AddNullToObject(root, "error");
+        } else {
+            cJSON_AddStringToObject(root, "error", error_code.c_str());
+        }
+        char* str = cJSON_PrintUnformatted(root);
+        if (str != nullptr) {
+            Application::GetInstance().SendJsonString(std::string(str));
+            cJSON_free(str);
+        }
+        cJSON_Delete(root);
+    }
+
+    static void SendAvatarSetLoadedError(
+        const std::string& checksum, const std::string& error_code) {
+        SendAvatarSetLoaded(false, checksum, error_code);
+    }
+
+    // --------------------------------------------------------------------
 
     virtual Backlight *GetBacklight() override {
         static CustomBacklight backlight(pmic_);
