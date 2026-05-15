@@ -121,6 +121,39 @@ change is called out under a `Firmware` subsection of the release entry.
   board, is unaffected. Closes
   [#113](https://github.com/kisaragi-mochi/stackchan-mcp/issues/113).
 
+- Added a boot-time snap-suppress hold to `InitializeServo()` to
+  mitigate the [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 1 "downward drop on power-on" symptom. Immediately after the
+  existing pre-init `ReadPos` diagnostic, the firmware now issues a
+  `WritePos(id, current_pos, time=0, speed=0)` per servo, which the
+  SCS0009 treats as a new target equal to its current position and uses
+  to truncate any in-progress "snap-to-last-target" motion. Background:
+  the SCS0009 retains its commanded set-point across power cycles
+  (Hypothesis 1 in #121, confirmed by the firmware-v1.4.1 clean-install
+  reproduction in which `Boot pre-init ReadPos` still matched the
+  pre-power-off pose exactly after a full NVS reset on the ESP32 side,
+  demonstrating the set-point lives in the servo itself). When `VM_EN`
+  asserts at hardware power-on the servo restores torque and snaps
+  toward that retained target before any firmware-side speed limiting
+  can apply, audible as a mechanical end-stop impact when the previous
+  session ended near `pitch=0°`. Efficacy is observable in the serial
+  log via new `Boot snap-suppress yaw/pitch hold(pos=...): r=...`
+  lines; if `ReadPos` already captured an end-stop position the hold is
+  a no-op for that boot and a deeper fix (e.g. firmware-controlled
+  `VM_EN` sequencing through the PY32 IO-expander) would be required,
+  tracked separately. The pitch hold is additionally gated on the
+  `ReadPos` raw value falling inside the same `SAFE_PITCH_MIN..
+  SAFE_PITCH_MAX` range as every other pitch servo-write boundary in
+  the firmware: out-of-range reads (e.g. the head was hand-pushed past
+  an end-stop pre-boot, or the previous session's set-point fell
+  outside the safe range) skip the hold and let the subsequent
+  interpolating boot-init climb to `(yaw=0°, pitch=45°)` drive the
+  head back into the safe range through the existing speed-limited
+  path, instead of pinning the servo against an out-of-range raw
+  position. Refs
+  [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 1.
+
 ## [0.7.0] - 2026-05-14
 
 ### Gateway

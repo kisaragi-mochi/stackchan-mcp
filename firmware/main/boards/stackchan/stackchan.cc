@@ -1090,16 +1090,111 @@ private:
                 return;
             }
 
-            // Issue #123: log boot-init pre-WritePos position with tick so
-            // the "unintended downward drop on power-on" (#121 hypothesis 1/2)
-            // becomes data-driven. ServoTask has not been created yet, so no
-            // scs_bus_mutex_ contention is possible at this point.
-            int yaw_pos_actual = scs_bus_.ReadPos(SERVO_YAW_ID);
+            // Issue #121 (Problem 1, "downward drop on power-on") + #123
+            // (boot-init diagnostics).
+            //
+            // Background: the SCS0009 retains its commanded set-point
+            // across power cycles (Hypothesis 1 in #121, confirmed by
+            // the firmware-v1.4.1 clean-install reproduction -- after a
+            // full NVS reset on the ESP32 side, the boot pre-init
+            // `ReadPos` still matched the pre-power-off pose exactly,
+            // demonstrating the set-point lives in the servo itself,
+            // not in firmware-side NVS). When VM_EN asserts at boot,
+            // the servo restores torque and snaps toward that retained
+            // target before any firmware-side speed limiting can apply
+            // -- audible as a mechanical end-stop impact when the
+            // previous session ended near pitch=0, and visible as a
+            // downward drop in general.
+            //
+            // The mitigation is a `WritePos(id, current_pos, time=0,
+            // speed=0)` per servo, which the SCS0009 treats as a new
+            // target equal to its current position. This interrupts any
+            // in-progress snap motion and leaves the servo stationary
+            // at the raw position the immediately-preceding `ReadPos`
+            // observed, until the subsequent interpolating boot-init
+            // climb begins.
+            //
+            // Efficacy depends on the `ReadPos` + `WritePos` pair
+            // completing while the servo is still mid-snap. To minimize
+            // that window, pitch (the only axis that exhibits the
+            // downward drop) is read AND held BEFORE the yaw axis is
+            // touched on the SCS0009 bus -- any yaw `ReadPos` /
+            // `WritePos` / ACK wait interposed between the pitch
+            // `ReadPos` and pitch `WritePos` would widen the window
+            // and risk the snap completing into an end-stop before the
+            // pitch hold reaches the servo. The unified "Boot pre-init
+            // ReadPos" diagnostic line (#123) is emitted after both
+            // holds because it is purely informational and not on the
+            // timing-critical path. If a `ReadPos` value lands close
+            // to a previous session's commanded target (e.g. raw pitch
+            // near 620 for pitch=0 deg), the snap was likely still in
+            // progress and the hold is expected to truncate it; if a
+            // `ReadPos` value is already at an end-stop or fails, the
+            // hold for that boot is a no-op or skipped and a deeper
+            // fix (e.g. firmware-controlled VM_EN sequencing through
+            // the PY32 IO-expander) would be required, tracked
+            // separately.
+
+            // Phase 1a: pitch first -- read and immediately hold.
             int pitch_pos_actual = scs_bus_.ReadPos(SERVO_PITCH_ID);
+            if (pitch_pos_actual >= 0) {
+                // Bound the snap-suppress hold to the SAFE_PITCH_MIN..
+                // SAFE_PITCH_MAX range applied at every other pitch
+                // servo-write boundary in this file (see PitchDegToPos
+                // and the Phase 2 restored_pitch clamp below). If the
+                // boot `ReadPos` lands outside that range -- for example
+                // because the servo bus came back online holding a
+                // previous session's out-of-range set-point, or the
+                // head was hand-pushed beyond an end-stop -- writing
+                // the raw position back would bypass that safety
+                // boundary and pin the servo against the stall current
+                // it is held there from. In that case skip the hold
+                // and let the subsequent interpolating boot-init climb
+                // to (yaw=0, pitch=45) drive the head back into the
+                // safe range through the existing speed-limited path.
+                constexpr int PITCH_SAFE_RAW_MIN =
+                    620 + SAFE_PITCH_MIN * 16 / 5;  // raw 620 at deg=0
+                constexpr int PITCH_SAFE_RAW_MAX =
+                    620 + SAFE_PITCH_MAX * 16 / 5;  // raw 901 at deg=88
+                if (pitch_pos_actual >= PITCH_SAFE_RAW_MIN &&
+                    pitch_pos_actual <= PITCH_SAFE_RAW_MAX) {
+                    int pitch_hold_r = scs_bus_.WritePos(
+                        SERVO_PITCH_ID, pitch_pos_actual, 0, 0);
+                    ESP_LOGI(TAG,
+                             "Boot snap-suppress pitch hold(pos=%d): r=%d",
+                             pitch_pos_actual, pitch_hold_r);
+                } else {
+                    ESP_LOGW(TAG,
+                             "Boot snap-suppress pitch skipped: ReadPos=%d outside safe raw range [%d, %d]; relying on boot-init climb",
+                             pitch_pos_actual,
+                             PITCH_SAFE_RAW_MIN, PITCH_SAFE_RAW_MAX);
+                }
+            }
+
+            // Phase 1b: yaw second -- no analogous snap-into-end-stop
+            // failure mode, so timing is not critical.
+            int yaw_pos_actual = scs_bus_.ReadPos(SERVO_YAW_ID);
+            if (yaw_pos_actual >= 0) {
+                int yaw_hold_r = scs_bus_.WritePos(
+                    SERVO_YAW_ID, yaw_pos_actual, 0, 0);
+                ESP_LOGI(TAG,
+                         "Boot snap-suppress yaw hold(pos=%d): r=%d",
+                         yaw_pos_actual, yaw_hold_r);
+            }
+
+            // Phase 1c (diagnostic, #123): unified pre-init ReadPos log
+            // with tick timestamp. Off the timing-critical path
+            // intentionally; ServoTask has not been created yet, so no
+            // `scs_bus_mutex_` contention is possible at this point.
             ESP_LOGI(TAG,
                      "Boot pre-init ReadPos: yaw_raw=%d pitch_raw=%d tick=%u",
                      yaw_pos_actual, pitch_pos_actual,
                      (unsigned)xTaskGetTickCount());
+
+            // Phase 2: software-side current_deg restore. Order does not
+            // affect the SCS0009 bus -- these only update firmware-side
+            // motion state for the upcoming interpolating boot-init
+            // climb.
             if (yaw_pos_actual >= 0) {
                 yaw_motion_.current_deg = (yaw_pos_actual - 460) * 5 / 16;
                 ESP_LOGI(TAG, "Restored yaw_motion_.current_deg=%d from ReadPos=%d",
