@@ -500,7 +500,7 @@ X 軸 (yaw、`-90..+90°`) には同等のハードウェア制限はなく — 
 
 ### upstream
 
-`firmware/` は [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) のフォーク ([kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32)) を git subtree で取り込んでいます。upstream 同期手順は [`docs/firmware-sync.md`](docs/firmware-sync.md) を参照してください。SCServo_lib は公式 [stack-chan](https://github.com/mongonta0716/stack-chan) (タカヲさん) から移植したファームウェアコンポーネントです。
+`firmware/` は [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) のフォーク ([kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32)) を git subtree で取り込んでいます。upstream 同期手順は [`docs/firmware-sync.md`](docs/firmware-sync.md) を参照してください。`firmware/main/boards/stackchan/` 配下の SCServo_lib ソース (`SCS.{cc,h}`, `SCSCL.{cc,h}`, `SCSerial.{cc,h}`, `INST.h`, `SCServo.h`) は [Feetech](https://www.feetechrc.com/) の SCServo SDK 由来で、同じ `kisaragi-mochi/xiaozhi-esp32` フォークの `main/boards/stackchan/` ディレクトリ経由で firmware subtree merge 時に本リポジトリに取り込まれました。これらは GPL-3.0 のままです (`firmware/main/boards/stackchan/SCServo_lib_LICENSE.txt` 参照)。
 
 ## 関連プロジェクト
 

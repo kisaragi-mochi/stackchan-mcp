@@ -548,7 +548,7 @@ The `gateway/` runs as an independent Python process and only talks to the ESP32
 
 ### upstream
 
-`firmware/` is taken in via git subtree from [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) — specifically the [kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32) fork. See [`docs/firmware-sync.md`](docs/firmware-sync.md) for the upstream sync playbook. SCServo_lib is a firmware component ported from the official [stack-chan](https://github.com/mongonta0716/stack-chan) (Takawo-san) repository.
+`firmware/` is taken in via git subtree from [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT) — specifically the [kisaragi-mochi/xiaozhi-esp32](https://github.com/kisaragi-mochi/xiaozhi-esp32) fork. See [`docs/firmware-sync.md`](docs/firmware-sync.md) for the upstream sync playbook. The SCServo_lib sources under `firmware/main/boards/stackchan/` (`SCS.{cc,h}`, `SCSCL.{cc,h}`, `SCSerial.{cc,h}`, `INST.h`, `SCServo.h`) originate from [Feetech](https://www.feetechrc.com/)'s SCServo SDK and entered this repository through the same `kisaragi-mochi/xiaozhi-esp32` fork's `main/boards/stackchan/` directory at the firmware subtree merge. They remain GPL-3.0 (see `firmware/main/boards/stackchan/SCServo_lib_LICENSE.txt`).
 
 ## Related projects
 
