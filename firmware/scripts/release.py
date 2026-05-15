@@ -327,6 +327,14 @@ def _merge_sdkconfig_overrides(*groups: list[str]) -> list[str]:
 
     return [entry for entry in result if entry is not None]
 
+
+def _mask_sdkconfig_append_for_log(entry: str) -> str:
+    """Mask sensitive Kconfig assignment values before printing them."""
+    key, sep, _value = entry.partition("=")
+    if sep and re.search(r"(TOKEN|SECRET|PASSWORD)", key, re.IGNORECASE):
+        return f'{key}="<MASKED>"'
+    return entry
+
 ################################################################################
 # Check board_type in CMakeLists
 ################################################################################
@@ -419,7 +427,7 @@ def release(board_type: str, config_filename: str = "config.json", *, filter_nam
         if local_sdkconfig_append:
             print("local_sdkconfig_defaults: sdkconfig.defaults.local")
         for item in sdkconfig_append:
-            print(f"sdkconfig_append: {item}")
+            print(f"sdkconfig_append: {_mask_sdkconfig_append_for_log(item)}")
 
         os.environ.pop("IDF_TARGET", None)
 
