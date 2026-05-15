@@ -97,7 +97,7 @@ No ESP-IDF or Docker setup needed.
 
 ```bash
 cd firmware
-docker run --rm --ulimit nofile=65536:65536 \
+docker run --rm --cpus=4 --ulimit nofile=65536:65536 \
   -v $PWD:/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 # → releases/v2.2.6_stackchan.zip
@@ -109,11 +109,17 @@ esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 build/merged-binary.bin
 ```
 
-The `--ulimit nofile=65536:65536` flag avoids a `Too many open files`
-failure during the LVGL emoji compile step under the default macOS
-Docker (OrbStack / Docker Desktop) file-descriptor limit. Linux hosts
-with a higher default `nofile` are unaffected, but passing the flag
-unconditionally is safe and matches CI.
+The `--cpus=4` flag caps Docker container parallelism so the concurrent
+LVGL / `xiaozhi-fonts/emoji_*.c` compile steps stay within the memory
+budget on macOS Docker hosts (OrbStack / Docker Desktop). Without it,
+`ninja` autodetects job count from `/proc/cpuinfo` and the resulting
+parallel `gcc` pressure can exhaust container memory mid-LVGL with
+`Cannot allocate memory` — even on hosts with ample physical RAM
+(tracked as #112). The `--ulimit nofile=65536:65536` flag separately
+avoids a `Too many open files` failure during the same LVGL compile
+step under the default file-descriptor limit. Linux hosts with higher
+defaults are unaffected, but passing both flags unconditionally is
+safe and matches CI.
 
 After flashing, WiFi configuration happens on first boot — connect from a smartphone to the setup UI (the xiaozhi-esp32 standard flow).
 

@@ -93,7 +93,7 @@ Resolve conflicts in the fork. Pay special attention to:
 After conflict resolution, build the StackChan board from the fork:
 
 ```bash
-docker run --rm --ulimit nofile=65536:65536 \
+docker run --rm --cpus=4 --ulimit nofile=65536:65536 \
   -v "$PWD":/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 ```
@@ -158,14 +158,19 @@ Run the board-aware firmware build from the monorepo:
 
 ```bash
 cd firmware
-docker run --rm --ulimit nofile=65536:65536 \
+docker run --rm --cpus=4 --ulimit nofile=65536:65536 \
   -v "$PWD":/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 ```
 
-The `--ulimit nofile=65536:65536` flag avoids a `Too many open files`
-failure during the LVGL emoji compile step on macOS Docker defaults. See
-`README.md` Option B for context.
+The `--cpus=4` flag caps Docker container parallelism to keep the
+LVGL / `xiaozhi-fonts/emoji_*.c` compile steps within the memory budget
+on macOS Docker hosts (OrbStack / Docker Desktop); without it the build
+can fail mid-LVGL with `Cannot allocate memory` even on hosts with
+ample physical RAM (tracked as #112). The `--ulimit nofile=65536:65536`
+flag separately avoids a `Too many open files` failure during the same
+LVGL emoji compile step on macOS Docker defaults. See `README.md`
+Option B for the full context.
 
 For firmware changes, hardware verification is expected before merge when a
 maintainer has the device available. If hardware is not available, open the PR

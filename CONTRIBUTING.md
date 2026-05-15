@@ -89,7 +89,7 @@ Build the StackChan firmware through the board-aware release script:
 
 ```bash
 cd firmware
-docker run --rm --ulimit nofile=65536:65536 \
+docker run --rm --cpus=4 --ulimit nofile=65536:65536 \
   -v "$PWD":/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 ```
@@ -97,11 +97,17 @@ docker run --rm --ulimit nofile=65536:65536 \
 This produces `build/merged-binary.bin` and
 `releases/v2.2.6_stackchan.zip`.
 
-The `--ulimit nofile=65536:65536` flag prevents a `Too many open files`
-failure during the LVGL emoji compile step under macOS Docker
-(OrbStack / Docker Desktop) defaults. Linux hosts with a higher default
-`nofile` are unaffected, but passing it unconditionally is safe and matches
-the project's CI invocation.
+The `--cpus=4` flag caps Docker container parallelism so concurrent
+LVGL / `xiaozhi-fonts/emoji_*.c` compile steps stay within the memory
+budget on macOS Docker hosts (OrbStack / Docker Desktop). Without it,
+`ninja` autodetects job count from `/proc/cpuinfo` and the resulting
+parallel `gcc` pressure can exhaust container memory mid-LVGL with
+`Cannot allocate memory` even on hosts with ample physical RAM
+(tracked as #112). The `--ulimit nofile=65536:65536` flag separately
+prevents a `Too many open files` failure during the same LVGL emoji
+compile step under macOS Docker (OrbStack / Docker Desktop) defaults.
+Linux hosts with higher defaults are unaffected, but passing both flags
+unconditionally is safe and matches the project's CI invocation.
 
 Avoid using a plain `idf.py build` as proof that the StackChan target works; it
 may build a different board configuration.

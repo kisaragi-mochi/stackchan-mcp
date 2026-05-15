@@ -97,7 +97,7 @@ ESP-IDF や Docker のセットアップは不要。
 
 ```bash
 cd firmware
-docker run --rm --ulimit nofile=65536:65536 \
+docker run --rm --cpus=4 --ulimit nofile=65536:65536 \
   -v $PWD:/project -w /project espressif/idf:v5.5.2 \
   python ./scripts/release.py stackchan
 # → releases/v2.2.6_stackchan.zip
@@ -109,11 +109,15 @@ esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 build/merged-binary.bin
 ```
 
-`--ulimit nofile=65536:65536` フラグは、macOS Docker（OrbStack /
-Docker Desktop）のデフォルトのファイルディスクリプタ上限下で LVGL の
-emoji コンパイル時に発生する `Too many open files` エラーを回避するため
-に付けています。Linux ホストではデフォルトの `nofile` が十分高いため
-影響ありませんが、無条件に付けて問題なく、CI とも揃います。
+`--cpus=4` フラグは Docker コンテナの並列度をキャップして、LVGL や
+`xiaozhi-fonts/emoji_*.c` のコンパイル時の同時 `gcc` 数を抑えるためのものです。これがないと `ninja` が `/proc/cpuinfo` から CPU 数を
+自動検出し、その結果並列に動く `gcc` がコンテナのメモリを使い切って、
+物理 RAM に余裕があるホストでも LVGL の途中で `Cannot allocate memory`
+で build が落ちることがあります（#112 で追跡）。`--ulimit
+nofile=65536:65536` フラグは別の問題で、同じ LVGL emoji コンパイル時に
+デフォルトのファイルディスクリプタ上限下で発生する `Too many open
+files` エラーを回避します。Linux ホストではデフォルトが十分高いため
+影響ありませんが、両フラグを無条件に付けて問題なく、CI とも揃います。
 
 書き込み後、WiFi 設定は ESP32 が起動してから行う — スマホで設定 UI に接続（xiaozhi-esp32 標準フロー）。
 
