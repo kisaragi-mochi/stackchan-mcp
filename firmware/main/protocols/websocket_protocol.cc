@@ -147,18 +147,23 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
 }
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
-    (void)send_goodbye;  // Websocket doesn't need to send goodbye message
-    // Mark the close as intentional so any reconnect job already
-    // re-posted from the timer callback aborts when it runs on the main
-    // task, then disarm the current socket's per-socket flag so the
-    // OnDisconnected lambda hits the early-return guard the moment the
-    // underlying close fires (the lambda runs on the WS task).
-    intentional_close_.store(true);
-    if (current_notify_disconnect_) {
-        current_notify_disconnect_->store(false);
+    (void)send_goodbye;
+    // Keep WebSocket alive — only notify the application that the audio
+    // channel is logically closed so it returns to idle state.
+    //
+    // The original implementation called websocket_.reset() here, which
+    // destroyed the WebSocket connection every time the device exited
+    // listening/speaking mode. This made it impossible to control the
+    // device (LEDs, avatar, head movement) outside of an active audio
+    // session, since all MCP tools rely on the same WebSocket.
+    //
+    // By skipping the teardown and directly invoking the closed callback,
+    // the app transitions back to idle while the WebSocket stays connected
+    // for continued MCP control.
+    ESP_LOGI(TAG, "CloseAudioChannel: keeping WebSocket alive for MCP");
+    if (on_audio_channel_closed_ != nullptr) {
+        on_audio_channel_closed_();
     }
-    StopReconnectTimer();
-    websocket_.reset();
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
