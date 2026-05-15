@@ -93,6 +93,19 @@ change is called out under a `Firmware` subsection of the release entry.
   power-on" (#121 Problem 1 / hypotheses 1–3) remains under
   investigation and is unaffected by this change.
 
+- Fixed a missing trailing comma in
+  `firmware/main/boards/freenove-esp32s3-display-2.8-lcd/config.json`
+  that caused `release.py` to fail to parse the file and silently skip
+  the `sdkconfig_append` entries for the
+  `freenove-esp32s3-display-2.8-lcd` board variant. The variant builds
+  now pick up `CONFIG_LANGUAGE_EN_US=y`,
+  `CONFIG_SR_WN_WN9S_HIESP=y`, and `CONFIG_SR_WN_WN9_HIESP=y` as
+  intended, and the spurious `[ERROR] Failed to parse ...` line is no
+  longer printed during any `release.py` invocation. The default
+  `release.py stackchan` build, which only targets the `stackchan`
+  board, is unaffected. Closes
+  [#113](https://github.com/kisaragi-mochi/stackchan-mcp/issues/113).
+
 ## [0.7.0] - 2026-05-14
 
 ### Gateway
