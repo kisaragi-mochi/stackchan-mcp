@@ -7,6 +7,7 @@ and as an MCP client that sends commands TO the ESP32.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 import json
 import logging
 import os
@@ -24,6 +25,34 @@ logger = logging.getLogger(__name__)
 
 # Timeout for waiting for ESP32 responses
 RESPONSE_TIMEOUT = 10.0
+
+ToolCall = tuple[str, dict[str, Any]]
+ToolCallResult = tuple[Any, dict[str, Any] | None]
+
+_TOOL_LANES = {
+    "self.robot.": "servo",
+    "self.led.": "led",
+    "self.display.": "avatar",
+    "self.screen.": "display",
+    "self.audio_speaker.": "audio",
+    "self.camera.": "camera",
+    "self.touch.": "touch",
+    "self.get_device_status": "status",
+}
+
+
+def _hardware_lane(tool_name: str) -> str:
+    """Return the hardware lane used for per-peripheral dispatch ordering."""
+    for prefix, lane in _TOOL_LANES.items():
+        if tool_name.startswith(prefix):
+            return lane
+    return "default"
+
+
+def _retrieve_future_exception(future: asyncio.Future[Any]) -> None:
+    """Mark a completed Future exception as observed, if it has one."""
+    if future.done() and not future.cancelled():
+        future.exception()
 
 
 class ESP32Connection:
@@ -75,14 +104,18 @@ class ESP32Connection:
         self._pending[req_id] = future
 
         try:
-            await self._ws.send(json.dumps(message))
+            await self._ws_send(json.dumps(message))
             response = await asyncio.wait_for(future, timeout=RESPONSE_TIMEOUT)
             return parse_jsonrpc_response(response)
+        except asyncio.CancelledError:
+            self._pending.pop(req_id, None)
+            raise
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             return None, {"code": -32000, "message": f"Timeout waiting for ESP32 response (method={method})"}
         except Exception as exc:
             self._pending.pop(req_id, None)
+            _retrieve_future_exception(future)
             return None, {"code": -32000, "message": f"ESP32 communication error: {exc}"}
 
     async def initialize(self, vision_url: str = "", vision_token: str = "") -> bool:
@@ -285,6 +318,17 @@ class ESP32Manager:
         # observable from gateway code; if a full-duplex contract
         # ever lands later the lock can split again.
         self._listen_lock = self._tts_lock
+        self._tool_lane_locks = {
+            "servo": asyncio.Lock(),
+            "led": asyncio.Lock(),
+            "avatar": asyncio.Lock(),
+            "display": asyncio.Lock(),
+            "audio": asyncio.Lock(),
+            "camera": asyncio.Lock(),
+            "touch": asyncio.Lock(),
+            "status": asyncio.Lock(),
+            "default": asyncio.Lock(),
+        }
 
     @property
     def device_connected(self) -> bool:
@@ -481,13 +525,55 @@ class ESP32Manager:
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any] | None]:
+    ) -> ToolCallResult:
         """Call a tool on the connected ESP32 device."""
+        result = await self.call_tools([(name, arguments)])
+        return result[0]
+
+    async def call_tools(self, calls: Sequence[ToolCall]) -> list[ToolCallResult]:
+        """Call multiple ESP32 tools while preserving per-hardware ordering.
+
+        Existing single-tool callers should continue to use ``call_tool``.
+        This helper is for compound gateway flows that can safely overlap
+        hardware-independent peripherals, such as servo + LEDs + avatar.
+        Calls sharing the same hardware lane are serialized; calls on
+        different lanes are dispatched concurrently.
+        """
+        if not calls:
+            return []
         if not self._connection or not self._connection.connected:
-            return None, {"code": -32000, "message": "No ESP32 device connected"}
+            return [
+                (None, {"code": -32000, "message": "No ESP32 device connected"})
+                for _ in calls
+            ]
         if not self._connection.initialized:
-            return None, {"code": -32000, "message": "ESP32 not initialized"}
-        return await self._connection.call_tool(name, arguments)
+            return [
+                (None, {"code": -32000, "message": "ESP32 not initialized"})
+                for _ in calls
+            ]
+
+        connection = self._connection
+        return list(
+            await asyncio.gather(
+                *(
+                    self._call_tool_on_connection(connection, name, arguments)
+                    for name, arguments in calls
+                )
+            )
+        )
+
+    async def _call_tool_on_connection(
+        self,
+        connection: ESP32Connection,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> ToolCallResult:
+        lane = _hardware_lane(name)
+        lock = self._tool_lane_locks[lane]
+        async with lock:
+            if connection is not self._connection or not connection.connected:
+                return None, {"code": -32000, "message": "ESP32 not connected"}
+            return await connection.call_tool(name, arguments)
 
     async def send_audio_frame(self, opus_frame: bytes) -> None:
         """Push a single Opus frame to the connected device.

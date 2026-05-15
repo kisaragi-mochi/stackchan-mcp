@@ -1,13 +1,14 @@
 """Tests for ESP32 client connection management."""
 
 import asyncio
+import gc
 import json
 
 import pytest
 import pytest_asyncio
 import websockets
 
-from stackchan_mcp.esp32_client import ESP32Connection, ESP32Manager
+from stackchan_mcp.esp32_client import ESP32Connection, ESP32Manager, _hardware_lane
 
 
 @pytest_asyncio.fixture
@@ -221,6 +222,242 @@ async def test_auth_rejection(manager):
                 await ws.recv()
     finally:
         del os.environ["STACKCHAN_TOKEN"]
+
+
+# ---------------------------------------------------------------------------
+# Parallel hardware-lane dispatch (Issue #73)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "lane"),
+    [
+        ("self.robot.set_head_angles", "servo"),
+        ("self.led.set_many", "led"),
+        ("self.display.set_avatar", "avatar"),
+        ("self.screen.set_brightness", "display"),
+        ("self.audio_speaker.set_volume", "audio"),
+        ("self.camera.take_photo", "camera"),
+        ("self.touch.get_touch_state", "touch"),
+        ("self.get_device_status", "status"),
+        ("self.unknown.experimental", "default"),
+    ],
+)
+def test_hardware_lane_covers_gateway_tool_routes(tool_name, lane):
+    """Gateway-routed ESP32 tools map to explicit hardware lanes."""
+    assert _hardware_lane(tool_name) == lane
+
+
+@pytest.mark.asyncio
+async def test_connection_pipelines_concurrent_tool_calls_before_first_response():
+    """Concurrent tools/call requests are sent before either response arrives."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-parallel")  # type: ignore[arg-type]
+
+    servo_task = asyncio.create_task(
+        conn.call_tool("self.robot.set_head_angles", {"yaw": 10, "pitch": 30})
+    )
+    led_task = asyncio.create_task(
+        conn.call_tool("self.led.set_many", {"colors": "[[255, 0, 0]]"})
+    )
+
+    await asyncio.sleep(0)
+
+    assert len(ws.sent) == 2
+    sent_messages = [json.loads(message) for message in ws.sent]
+    request_ids = [message["payload"]["id"] for message in sent_messages]
+    assert [message["payload"]["method"] for message in sent_messages] == [
+        "tools/call",
+        "tools/call",
+    ]
+    assert [message["payload"]["params"]["name"] for message in sent_messages] == [
+        "self.robot.set_head_angles",
+        "self.led.set_many",
+    ]
+
+    conn.handle_response(
+        {
+            "jsonrpc": "2.0",
+            "id": request_ids[1],
+            "result": {"content": [{"type": "text", "text": "led"}]},
+        }
+    )
+    conn.handle_response(
+        {
+            "jsonrpc": "2.0",
+            "id": request_ids[0],
+            "result": {"content": [{"type": "text", "text": "servo"}]},
+        }
+    )
+
+    servo_result, led_result = await asyncio.gather(servo_task, led_task)
+    assert servo_result[0]["content"][0]["text"] == "servo"
+    assert servo_result[1] is None
+    assert led_result[0]["content"][0]["text"] == "led"
+    assert led_result[1] is None
+
+
+@pytest.mark.asyncio
+async def test_connection_removes_pending_request_when_call_is_cancelled():
+    """Cancelling a tool call does not leave a stale pending response slot."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-cancel")  # type: ignore[arg-type]
+
+    task = asyncio.create_task(
+        conn.call_tool("self.robot.set_head_angles", {"yaw": 10, "pitch": 30})
+    )
+
+    await asyncio.sleep(0)
+    assert len(ws.sent) == 1
+    assert len(conn._pending) == 1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert conn._pending == {}
+
+
+class _GateableConnection:
+    """Fake initialized connection with per-tool release gates."""
+
+    connected = True
+    initialized = True
+
+    def __init__(self, releases: dict[str, asyncio.Event]) -> None:
+        self.releases = releases
+        self.started: list[str] = []
+        self.finished: list[str] = []
+        self.all_started = asyncio.Event()
+
+    async def call_tool(self, name, arguments):  # noqa: ARG002 - test fake
+        self.started.append(name)
+        if len(self.started) >= len(self.releases):
+            self.all_started.set()
+        await self.releases[name].wait()
+        self.finished.append(name)
+        return {"content": [{"type": "text", "text": name}]}, None
+
+
+@pytest.mark.asyncio
+async def test_manager_call_tools_dispatches_independent_lanes_in_parallel():
+    """Servo, LED, and avatar calls start together instead of waiting in line."""
+    releases = {
+        "self.robot.set_head_angles": asyncio.Event(),
+        "self.led.set_many": asyncio.Event(),
+        "self.display.set_avatar": asyncio.Event(),
+    }
+    connection = _GateableConnection(releases)
+    mgr = ESP32Manager()
+    mgr._connection = connection  # type: ignore[assignment]
+
+    task = asyncio.create_task(
+        mgr.call_tools(
+            [
+                ("self.robot.set_head_angles", {"yaw": 0, "pitch": 45}),
+                ("self.led.set_many", {"colors": "[]"}),
+                ("self.display.set_avatar", {"face": "happy"}),
+            ]
+        )
+    )
+
+    await asyncio.wait_for(connection.all_started.wait(), timeout=1.0)
+    assert connection.started == [
+        "self.robot.set_head_angles",
+        "self.led.set_many",
+        "self.display.set_avatar",
+    ]
+    assert connection.finished == []
+
+    for release in releases.values():
+        release.set()
+    results = await asyncio.wait_for(task, timeout=1.0)
+
+    assert [result[0]["content"][0]["text"] for result in results] == [
+        "self.robot.set_head_angles",
+        "self.led.set_many",
+        "self.display.set_avatar",
+    ]
+    assert [error for _, error in results] == [None, None, None]
+
+
+@pytest.mark.asyncio
+async def test_manager_call_tool_uses_lane_dispatch_for_existing_api():
+    """Existing single-tool API can still overlap independent hardware lanes."""
+    releases = {
+        "self.robot.set_head_angles": asyncio.Event(),
+        "self.led.set_many": asyncio.Event(),
+    }
+    connection = _GateableConnection(releases)
+    mgr = ESP32Manager()
+    mgr._connection = connection  # type: ignore[assignment]
+
+    servo_task = asyncio.create_task(
+        mgr.call_tool("self.robot.set_head_angles", {"yaw": 0, "pitch": 45})
+    )
+    led_task = asyncio.create_task(
+        mgr.call_tool("self.led.set_many", {"colors": "[]"})
+    )
+
+    await asyncio.wait_for(connection.all_started.wait(), timeout=1.0)
+    assert connection.started == [
+        "self.robot.set_head_angles",
+        "self.led.set_many",
+    ]
+    assert connection.finished == []
+
+    for release in releases.values():
+        release.set()
+    results = await asyncio.wait_for(
+        asyncio.gather(servo_task, led_task),
+        timeout=1.0,
+    )
+
+    assert [result[0]["content"][0]["text"] for result in results] == [
+        "self.robot.set_head_angles",
+        "self.led.set_many",
+    ]
+    assert [error for _, error in results] == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_manager_call_tools_serializes_calls_on_same_hardware_lane():
+    """Two servo calls keep their relative order on the servo lane."""
+    releases = {
+        "self.robot.set_head_angles": asyncio.Event(),
+        "self.robot.get_head_angles": asyncio.Event(),
+    }
+    connection = _GateableConnection(releases)
+    mgr = ESP32Manager()
+    mgr._connection = connection  # type: ignore[assignment]
+
+    task = asyncio.create_task(
+        mgr.call_tools(
+            [
+                ("self.robot.set_head_angles", {"yaw": 0, "pitch": 45}),
+                ("self.robot.get_head_angles", {}),
+            ]
+        )
+    )
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert connection.started == ["self.robot.set_head_angles"]
+
+    releases["self.robot.set_head_angles"].set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert connection.started == [
+        "self.robot.set_head_angles",
+        "self.robot.get_head_angles",
+    ]
+
+    releases["self.robot.get_head_angles"].set()
+    await asyncio.wait_for(task, timeout=1.0)
+    assert connection.finished == [
+        "self.robot.set_head_angles",
+        "self.robot.get_head_angles",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +678,32 @@ async def test_send_tts_state_translates_oserror_to_connection_error():
     with pytest.raises(ConnectionError, match="WebSocket send"):
         await conn.send_tts_state("start")
     assert not conn.connected
+
+
+@pytest.mark.asyncio
+async def test_send_mcp_request_translates_send_failure_and_marks_disconnected():
+    """tools/call send failures use the same connection-state handling as TTS."""
+    ws = _FailingWebSocket(OSError("broken pipe"))
+    conn = ESP32Connection(ws, session_id="session-1")  # type: ignore[arg-type]
+    loop = asyncio.get_running_loop()
+    loop_errors = []
+    previous_handler = loop.get_exception_handler()
+
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    try:
+        result, error = await conn.call_tool("self.robot.set_head_angles", {})
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert result is None
+    assert error is not None
+    assert "WebSocket send failed" in error["message"]
+    assert not conn.connected
+    assert conn._pending == {}
+    assert ws.send_calls == 1
+    assert loop_errors == []
 
 
 def test_connection_default_protocol_version_is_one():

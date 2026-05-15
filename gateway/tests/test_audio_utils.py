@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import array
+import importlib
 
 import pytest
 
@@ -206,8 +207,8 @@ def test_chunk_pcm_into_frames_rejects_non_positive_size():
 
 def test_encode_opus_frames_produces_frames_when_libopus_available():
     """When libopus is reachable, encode_opus_frames yields one frame per chunk."""
-    opuslib = pytest.importorskip("opuslib")
     try:
+        opuslib = importlib.import_module("opuslib")
         opuslib.Encoder(16000, 1, opuslib.APPLICATION_VOIP)
     except Exception as exc:  # libopus not loadable
         pytest.skip(f"libopus not available: {exc}")
