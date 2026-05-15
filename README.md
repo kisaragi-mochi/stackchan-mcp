@@ -77,6 +77,11 @@ There are two paths. **Option A** is recommended for first-time users — no too
 Download the latest firmware bundle from the [Releases page](https://github.com/kisaragi-mochi/stackchan-mcp/releases) — pick the most recent `firmware-v*` release and grab `merged-binary.bin` (and optionally `xiaozhi.bin`). Then flash with `esptool.py`:
 
 ```bash
+# Replace --port with your platform's serial device:
+#   macOS:   /dev/cu.usbmodem* (e.g. /dev/cu.usbmodem1101)
+#   Linux:   /dev/ttyUSB0 or /dev/ttyACM0
+#   Windows: COM3 (or whichever it shows up as in Device Manager)
+
 # Clean install (resets NVS — Wi-Fi settings will need to be re-entered):
 esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 merged-binary.bin
@@ -97,7 +102,9 @@ docker run --rm --ulimit nofile=65536:65536 \
   python ./scripts/release.py stackchan
 # → releases/v2.2.6_stackchan.zip
 
-# Flash (after USB-connecting the CoreS3)
+# Flash (after USB-connecting the CoreS3).
+# Replace --port with your platform's serial device — see the Option A
+# note above for the macOS/Linux/Windows mapping.
 esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 build/merged-binary.bin
 ```
