@@ -15,6 +15,21 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
+### Gateway
+
+- Added hardware-lane aware dispatch for ESP32 tool calls. Independent
+  hardware lanes (servo, LED, avatar/display, screen, audio, camera,
+  touch, status) now pipeline concurrently on the gateway side, while
+  ordering within the same lane is preserved. The existing
+  `ESP32Manager.call_tool()` API remains compatible. `tools/call`
+  send-failure handling is also hardened: WebSocket send failures now
+  mark the ESP32 connection disconnected and no longer leave
+  unobserved pending future exceptions. Refs
+  [#73](https://github.com/kisaragi-mochi/stackchan-mcp/issues/73)
+  (firmware-side `tools/call` execution remains serialized by
+  `Application::Schedule()`, so Issue #73 stays open as the
+  firmware-side follow-up).
+
 ### Firmware
 
 - Fixed user-configured WebSocket gateway URLs (e.g.
