@@ -115,6 +115,10 @@ jobs:
             ### Quick flash (clean install — resets NVS / Wi-Fi config)
 
             ```bash
+            # Replace --port with your platform's serial device:
+            #   macOS:   /dev/cu.usbmodem* (e.g. /dev/cu.usbmodem1101)
+            #   Linux:   /dev/ttyUSB0 or /dev/ttyACM0
+            #   Windows: COM3 (or whichever it shows up as in Device Manager)
             esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
               write_flash 0x0 merged-binary.bin
             ```
@@ -122,6 +126,10 @@ jobs:
             ### App-only update (preserves NVS — keeps your Wi-Fi setup)
 
             ```bash
+            # Replace --port with your platform's serial device:
+            #   macOS:   /dev/cu.usbmodem* (e.g. /dev/cu.usbmodem1101)
+            #   Linux:   /dev/ttyUSB0 or /dev/ttyACM0
+            #   Windows: COM3 (or whichever it shows up as in Device Manager)
             esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
               write_flash 0x20000 xiaozhi.bin
             ```

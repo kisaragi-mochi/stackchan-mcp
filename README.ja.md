@@ -77,6 +77,11 @@
 [Releases ページ](https://github.com/kisaragi-mochi/stackchan-mcp/releases) から最新の `firmware-v*` リリースを開き、`merged-binary.bin`（必要なら `xiaozhi.bin` も）をダウンロード。あとは `esptool.py` で焼くだけ:
 
 ```bash
+# --port は使っている OS のシリアルデバイス名に置き換えてください:
+#   macOS:   /dev/cu.usbmodem* (例: /dev/cu.usbmodem1101)
+#   Linux:   /dev/ttyUSB0 または /dev/ttyACM0
+#   Windows: COM3 (デバイスマネージャに表示されるポート名)
+
 # 新規インストール（NVS が消えるので Wi-Fi 設定はやり直し）:
 esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 merged-binary.bin
@@ -98,6 +103,8 @@ docker run --rm --ulimit nofile=65536:65536 \
 # → releases/v2.2.6_stackchan.zip
 
 # フラッシュ (CoreS3 を USB 接続後)
+# --port は使っている OS のシリアルデバイス名に置き換えてください
+# — オプション A の表（macOS/Linux/Windows）を参照
 esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x0 build/merged-binary.bin
 ```
