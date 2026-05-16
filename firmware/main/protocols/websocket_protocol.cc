@@ -383,6 +383,13 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
 
         websocket_->OnDisconnected([this, notify_disconnect]() {
             audio_channel_open_.store(false);
+            // notify_disconnect carries this socket's reconnect intent.
+            // ParseServerHello() arms it (true) once the handshake
+            // completes; intentional teardown paths (CloseAudioChannel,
+            // OpenAudioChannelInternal, destructor) disarm it (false)
+            // before resetting the socket. A false reading here means
+            // either the candidate never completed handshake or the
+            // close was intentional — neither should reconnect.
             if (!notify_disconnect->load()) {
                 ESP_LOGI(TAG, "Websocket disconnected (no reconnect: candidate failed or intentional close)");
                 return;
