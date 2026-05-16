@@ -707,15 +707,24 @@ private:
     // positioning timing established in mongonta0716/stackchan-arduino
     // attachServos().
     //
-    // Issue #121 Problem 2: BOOT_INIT_MOVE_MS=4000 (was 1000) drops the
-    // effective angular speed for the post-power-on climb from ~45°/s
-    // to ~11°/s. On-device feedback identified the original 1-second
-    // duration as startling ("ブルンっ" / audible servo stress) on the
-    // CoreS3 + SCS0009 hardware. The 100 ms post-settle vTaskDelay in
-    // InitializeServo() is unchanged. The separate "unintended downward
-    // drop on power-on" (#121 Problem 1) is addressed by the
-    // snap-suppress hold in InitializeServo() Phase 1a (PR #137) and
-    // the ReadPos retry + safe-fallback seed in this file (#138).
+    // Speed policy history (#121 Problem 2 -> #141 follow-ups):
+    // - #121 Problem 2 originally raised BOOT_INIT_MOVE_MS from 1000 ms
+    //   (the historical default that produced a startling "ブルンっ" boot
+    //   motion) to 4000 ms (~11°/s on a 45° climb).
+    // - Real-device verification then showed even 11°/s reads as
+    //   perceptibly fast for the first boot-time servo motion, so the
+    //   Phase 0 climb is pinned to an angular-speed cap of
+    //   BOOT_INIT_TARGET_DEG_PER_SEC=15 deg/s. The WriteHeadAngles call
+    //   sizes its duration from the actual yaw / pitch deltas so this
+    //   cap holds on every axis. On the PMIC OFF/ON path Phase 0 stays
+    //   a no-op of effect (the #138 safe-fallback seed makes start_deg
+    //   == target_deg), so the BOOT_INIT_MOVE_MS budget simply elapses
+    //   without WritePos movement.
+    // The 100 ms post-settle vTaskDelay in InitializeServo() is
+    // unchanged. The separate "unintended downward drop on power-on"
+    // (#121 Problem 1) is addressed by the snap-suppress hold in
+    // InitializeServo() Phase 1a (PR #137) and the ReadPos retry +
+    // safe-fallback seed in this file (#138).
     //
     // Issue #138: promoted from local block scope inside
     // InitializeServo() to class-level static constexpr so the
@@ -730,7 +739,37 @@ private:
     // mid-sequence.
     static constexpr int BOOT_INIT_YAW_DEG = 0;
     static constexpr int BOOT_INIT_PITCH_DEG = 45;
-    static constexpr uint32_t BOOT_INIT_MOVE_MS = 4000;
+    // BOOT_INIT_MOVE_MS=3000: minimum duration of the Phase 0 climb.
+    // Used as a floor so the boot-init `WriteHeadAngles(0, 45, X)`
+    // always elapses at least this long — required on the PMIC OFF/ON
+    // path where the #138 safe-fallback seed makes Phase 0 a no-op of
+    // effect, and the BOOT_INIT_MOVE_MS budget instead serves to span
+    // the SCS0009 wake-up latency window so the post-init ReadPos
+    // (Phase 0') lands well past it. The actual Phase 0 duration is
+    // computed at call time from the current_deg → BOOT_INIT_*
+    // deltas at BOOT_INIT_TARGET_DEG_PER_SEC=15 deg/s, then floored at this
+    // constant; e.g. on the ESP32-only reset path with a yaw-90° prior
+    // set-point, Phase 0 needs 6000 ms to honour the speed cap while a
+    // yaw-0 prior is rounded up to this 3000 ms floor. This is the
+    // no-stutter Smooth lower bound established under #121 Problem 2
+    // (Issue #121 / PR #125 history: 1000 -> 4000 was a partial step
+    // toward this; on-device feedback under #141 verification confirmed
+    // 15 deg/s is the speed at which the ServoTask MOTION_TICK_MS=20 ms
+    // interpolation stops being perceptible as individual position
+    // jumps without sliding into a startling regime). Boot-time budget
+    // is intentionally not optimised: operator safety and avoiding
+    // mechanical stress take precedence over shaving seconds off the
+    // initialization duration.
+    //
+    // On the PMIC OFF/ON path Phase 0 stays a no-op of effect
+    // because the #138 safe-fallback seeds current_deg to
+    // BOOT_INIT_PITCH_DEG, making start_deg == target_deg; the
+    // BOOT_INIT_MOVE_MS budget then simply elapses without WritePos
+    // movement.
+    static constexpr uint32_t BOOT_INIT_MOVE_MS = 3000;
+    // Single-source Phase 0 speed cap. 15 deg/s is the no-stutter Smooth
+    // lower bound (#121 Problem 2 + #141 verification).
+    static constexpr int BOOT_INIT_TARGET_DEG_PER_SEC = 15;
 
     static int YawDegToPos(int deg) {
         int pos = 460 + deg * 16 / 5;
@@ -1374,29 +1413,151 @@ private:
             // rationale (Issue #115 target pose, Issue #121 Problem 2
             // slower climb, Issue #138 promotion to class scope for the
             // safe-fallback seed in Phase 2 above).
+            // Compute Phase 0 duration from the current_deg → target
+            // deltas at BOOT_INIT_TARGET_DEG_PER_SEC, floored at
+            // BOOT_INIT_MOVE_MS to keep the SCS0009 wake-up latency
+            // window covered on the PMIC OFF/ON path (where Phase 0
+            // is a no-op of effect but the BOOT_INIT_MOVE_MS budget
+            // still needs to elapse before Phase 0' ReadPos). Without
+            // this calculation, a yaw-90° (or any large pre-power-off
+            // angle) prior set-point would run the boot-init yaw
+            // motion at 30 deg/s+, exceeding the 15 deg/s cap.
+            int phase0_yaw_delta;
+            int phase0_pitch_delta;
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            phase0_yaw_delta = BOOT_INIT_YAW_DEG - yaw_motion_.current_deg;
+            phase0_pitch_delta = BOOT_INIT_PITCH_DEG - pitch_motion_.current_deg;
+            xSemaphoreGive(motion_mutex_);
+            if (phase0_yaw_delta < 0) phase0_yaw_delta = -phase0_yaw_delta;
+            if (phase0_pitch_delta < 0) phase0_pitch_delta = -phase0_pitch_delta;
+            int phase0_max_delta = phase0_yaw_delta > phase0_pitch_delta
+                ? phase0_yaw_delta : phase0_pitch_delta;
+            uint32_t phase0_duration_ms =
+                (uint32_t)phase0_max_delta * 1000U /
+                BOOT_INIT_TARGET_DEG_PER_SEC;
+            if (phase0_duration_ms < BOOT_INIT_MOVE_MS) {
+                phase0_duration_ms = BOOT_INIT_MOVE_MS;
+            }
             TickType_t boot_init_start_tick = xTaskGetTickCount();
-            WriteHeadAngles(BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG, BOOT_INIT_MOVE_MS);
-            vTaskDelay(pdMS_TO_TICKS(BOOT_INIT_MOVE_MS + 100));
+            WriteHeadAngles(BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG,
+                            phase0_duration_ms);
+            vTaskDelay(pdMS_TO_TICKS(phase0_duration_ms + 100));
 
             // Issue #123: capture post-init ReadPos so the boot-init effect
             // is observable in the serial log. ServoTask is now running, so
             // hold scs_bus_mutex_ across the ReadPos pair.
+            //
+            // Retry budget mirrors Phase 1a / 1b and the get_head_angles
+            // MCP-tool retry. A transient `ReadPos == -1` on a healthy
+            // servo would otherwise cause Phase 0' re-sync to skip,
+            // leaving current_deg slightly stale for the session.
             int post_yaw_pos = -1;
             int post_pitch_pos = -1;
+            int post_yaw_attempts = 0;
+            int post_pitch_attempts = 0;
             xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
-            post_yaw_pos = scs_bus_.ReadPos(SERVO_YAW_ID);
-            post_pitch_pos = scs_bus_.ReadPos(SERVO_PITCH_ID);
+            for (int i = 0; i < BOOT_READPOS_MAX_ATTEMPTS; ++i) {
+                post_yaw_attempts = i + 1;
+                post_yaw_pos = scs_bus_.ReadPos(SERVO_YAW_ID);
+                if (post_yaw_pos >= 0) break;
+                if (i + 1 < BOOT_READPOS_MAX_ATTEMPTS) {
+                    vTaskDelay(pdMS_TO_TICKS(BOOT_READPOS_RETRY_MS));
+                }
+            }
+            for (int i = 0; i < BOOT_READPOS_MAX_ATTEMPTS; ++i) {
+                post_pitch_attempts = i + 1;
+                post_pitch_pos = scs_bus_.ReadPos(SERVO_PITCH_ID);
+                if (post_pitch_pos >= 0) break;
+                if (i + 1 < BOOT_READPOS_MAX_ATTEMPTS) {
+                    vTaskDelay(pdMS_TO_TICKS(BOOT_READPOS_RETRY_MS));
+                }
+            }
             xSemaphoreGive(scs_bus_mutex_);
             TickType_t boot_init_end_tick = xTaskGetTickCount();
             ESP_LOGI(TAG,
                      "Boot-time servo init complete: target yaw=%d pitch=%d "
-                     "(move=%ums), post-ReadPos: yaw_raw=%d pitch_raw=%d, "
-                     "elapsed_ms=%u",
+                     "(move=%ums), post-ReadPos: yaw_raw=%d (attempts=%d) "
+                     "pitch_raw=%d (attempts=%d), elapsed_ms=%u",
                      BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG,
-                     (unsigned)BOOT_INIT_MOVE_MS,
-                     post_yaw_pos, post_pitch_pos,
+                     (unsigned)phase0_duration_ms,
+                     post_yaw_pos, post_yaw_attempts,
+                     post_pitch_pos, post_pitch_attempts,
                      (unsigned)((boot_init_end_tick - boot_init_start_tick) *
                                 portTICK_PERIOD_MS));
+
+            // Phase 0': mandatory current_deg re-sync from post-init
+            // ReadPos before boot-time servo initialization completes.
+            //
+            // Background: on the PMIC long-press OFF / ON path, Phase 1
+            // ReadPos retries can exhaust the budget while the SCS0009
+            // is still in its wake-up latency window; Phase 2 then
+            // seeds current_deg with BOOT_INIT_*_DEG so the Phase 0
+            // interpolation is a no-op of effect. By the time the
+            // BOOT_INIT_MOVE_MS-long vTaskDelay above has elapsed,
+            // the SCS0009 has been powered for several seconds and a
+            // ReadPos here is almost certain to succeed (the
+            // observed boot log shows yaw_raw / pitch_raw populated
+            // at tick ≥ ~6 s).
+            //
+            // Re-syncing current_deg with the actual physical position
+            // now keeps the next move_head interpolation anchored to
+            // where the servo really is, rather than to the Phase 2
+            // safe-fallback seed.
+            //
+            // If a post-init ReadPos still fails, leave current_deg as
+            // restored-or-seeded by Phase 2. That is safer than issuing
+            // additional boot-time WritePos commands on a degraded bus.
+            if (post_yaw_pos >= 0) {
+                int actual_yaw_deg = (post_yaw_pos - 460) * 5 / 16;
+                xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+                if (yaw_motion_.current_deg != actual_yaw_deg) {
+                    int prev_yaw_deg = yaw_motion_.current_deg;
+                    yaw_motion_.current_deg = actual_yaw_deg;
+                    yaw_motion_.start_deg = actual_yaw_deg;
+                    yaw_motion_.target_deg = actual_yaw_deg;
+                    yaw_motion_.moving = false;
+                    yaw_motion_.move_start_ms =
+                        (uint32_t)(boot_init_end_tick * portTICK_PERIOD_MS);
+                    xSemaphoreGive(motion_mutex_);
+                    ESP_LOGI(TAG,
+                             "Phase 0' yaw re-sync: current_deg %d -> %d "
+                             "(actual ReadPos=%d)",
+                             prev_yaw_deg, actual_yaw_deg, post_yaw_pos);
+                } else {
+                    xSemaphoreGive(motion_mutex_);
+                }
+            } else {
+                ESP_LOGW(TAG,
+                         "Phase 0' yaw re-sync skipped: ReadPos failed; "
+                         "leaving current_deg at restored-or-seeded value");
+            }
+            if (post_pitch_pos >= 0) {
+                int actual_pitch_deg = (post_pitch_pos - 620) * 5 / 16;
+                if (actual_pitch_deg < SAFE_PITCH_MIN) actual_pitch_deg = SAFE_PITCH_MIN;
+                if (actual_pitch_deg > SAFE_PITCH_MAX) actual_pitch_deg = SAFE_PITCH_MAX;
+                xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+                if (pitch_motion_.current_deg != actual_pitch_deg) {
+                    int prev_pitch_deg = pitch_motion_.current_deg;
+                    pitch_motion_.current_deg = actual_pitch_deg;
+                    pitch_motion_.start_deg = actual_pitch_deg;
+                    pitch_motion_.target_deg = actual_pitch_deg;
+                    pitch_motion_.moving = false;
+                    pitch_motion_.move_start_ms =
+                        (uint32_t)(boot_init_end_tick * portTICK_PERIOD_MS);
+                    xSemaphoreGive(motion_mutex_);
+                    ESP_LOGI(TAG,
+                             "Phase 0' pitch re-sync: current_deg %d -> %d "
+                             "(actual ReadPos=%d, clamped to safe range %d..%d)",
+                             prev_pitch_deg, actual_pitch_deg, post_pitch_pos,
+                             SAFE_PITCH_MIN, SAFE_PITCH_MAX);
+                } else {
+                    xSemaphoreGive(motion_mutex_);
+                }
+            } else {
+                ESP_LOGW(TAG,
+                         "Phase 0' pitch re-sync skipped: ReadPos failed; "
+                         "leaving current_deg at restored-or-seeded value");
+            }
         }
     }
 
@@ -1893,7 +2054,6 @@ private:
     // Eye state images (avatar_eyes_open / _half / _closed) are referenced
     // directly by the blink state machine; we don't expose a generic
     // EyesImageFor() helper yet because no MCP tool sets eyes manually.
-    // Phase 3 may add `self.display.set_eyes` if needed.
 
     // Map a mouth shape name to its full-frame image. Returns nullptr if unknown.
     static const lv_image_dsc_t* MouthImageFor(const char* shape) {
