@@ -1096,6 +1096,14 @@ choice STACKCHAN_SERVO_DRIVER
             period. Scheduled for removal in Phase B of the migration.
 endchoice
 
+config STACKCHAN_SERVO_DELEGATED_MOTION
+    bool "Use SCS0009 delegated motion timing"
+    default n
+    help
+        Enable the Issue #143 motion path that sends one WritePos command
+        per requested move and polls ReadMove for completion. When disabled,
+        the firmware keeps the existing host-side interpolation loop.
+
 endif # BOARD_TYPE_STACKCHAN
 
 endmenu

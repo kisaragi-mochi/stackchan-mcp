@@ -32,6 +32,15 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Added a `MotionDriver` abstraction for StackChan servo motion and an
+  opt-in `CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION` path that delegates
+  move timing to the SCS0009 via single-shot `WritePos(..., time, 0)`
+  commands plus `ReadMove()` polling, while keeping the existing
+  host-interpolation path as the default fallback. The MCP tool surface
+  is unchanged; this prepares real-device validation of the delegated
+  path for
+  [#143](https://github.com/kisaragi-mochi/stackchan-mcp/issues/143).
+
 - Fixed user-configured WebSocket gateway URLs (e.g.
   `ws://192.168.x.y:8765`) being silently overwritten on every boot by
   the upstream xiaozhi OTA-config response. `Ota::CheckVersion()` still

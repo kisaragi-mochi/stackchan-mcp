@@ -601,7 +601,6 @@ private:
     bool si12t_ok_ = false;
     esp_timer_handle_t touch_poll_timer_ = nullptr;
     esp_timer_handle_t touch_revert_timer_ = nullptr;
-    esp_timer_handle_t servo_wobble_timer_ = nullptr;
 
     // Touch detection state (single-thread access from the touch_poll_timer_
     // callback, which runs on the ESP_TIMER_TASK).
@@ -620,31 +619,68 @@ private:
     // Servo wobble sub-state. Keeps the previously-set angles untouched
     // before/after the wobble so that an external set_head_angles call is
     // not silently overwritten beyond the wobble window.
-    int servo_wobble_step_ = 0;       // 0..3 sequence index
-    bool servo_wobble_active_ = false;
+    std::atomic<int> servo_wobble_step_{0};       // 0..3 sequence index
+    std::atomic<bool> servo_wobble_active_{false};
 
-    // Issue #1: Servo motion task — interpolate WritePos to avoid SCS0009 bus
-    // collisions on large-angle reversals. A dedicated FreeRTOS task ticks at
-    // MOTION_TICK_MS, walks current_deg → target_deg over move_duration_ms, and
-    // issues short MOTION_PER_WRITE_TIME_MS WritePos commands so the servo never
-    // receives a discontinuous jump.
+    // Shared motion state. This stays on the board singleton because boot-init
+    // ReadPos restore / re-sync phases seed the same state before and after the
+    // concrete MotionDriver is selected. Drivers only borrow these references.
     struct AxisMotion {
         int target_deg = 0;
         int start_deg = 0;
         int current_deg = 0;
         uint32_t move_start_ms = 0;
+        // For the delegated driver: time the WritePos for this request
+        // was successfully ACK'd by the servo (i.e. when the physical
+        // motion actually began on the SCS0009's internal clock). May
+        // be later than move_start_ms when the dispatch is delayed by
+        // Tick wake or retry rounds. ApplyReadMoveResult's stuck-high
+        // timeout is measured from dispatch_start_ms, not from staging,
+        // so that degraded-bus latency does not cause premature force-
+        // clear while the servo is genuinely still mid-motion. 0 means
+        // "not yet dispatched"; ApplyReadMoveResult skips the
+        // stuck-high check until dispatch_start_ms is populated by
+        // FinishDispatch's write_ok branch. HostInterpolation path
+        // does not consult this field.
+        uint32_t dispatch_start_ms = 0;
         uint32_t move_duration_ms = 0;
         bool moving = false;
+        // Monotonic counter incremented by ServoDelegatedMotionDriver::
+        // StartMove on each dispatch stage. Used by Tick() to detect
+        // when a newer StartMove has raced in between the snapshot at
+        // the top of Tick() and the post-WritePos / post-ReadMove
+        // commit (motion_mutex_ is dropped while the bus operation
+        // runs). esp_timer_get_time()/1000 has 1 ms resolution and is
+        // not unique enough on its own — two StartMove calls within
+        // the same millisecond would collide on move_start_ms. The
+        // HostInterpolation path does not consult this field; the
+        // monotonic counter is owned by the delegated driver.
+        uint64_t request_token = 0;
+        // Set by the delegated driver when ApplyReadMoveResult's
+        // 5-consecutive-failure force-clear fires: WritePos ACK
+        // confirmed the servo received the command, but ReadMove
+        // polling never observed completion. current_deg holds the
+        // last optimistic commit (the requested target), but the
+        // physical head may be mid-trajectory or at the wrong angle.
+        // The next StartMove on this axis treats position_unknown as
+        // a "force re-dispatch" signal (no-op skip is suppressed),
+        // so a same-target retry surfaces the failure rather than
+        // hiding it behind a stale-but-equal current_deg. The
+        // HostInterpolation path does not consult this field.
+        bool position_unknown = false;
     };
+    class MotionDriver;
     // TODO: motion_mutex_/scs_bus_mutex_/servo_task_handle_ have no destroy path; board is singleton via DECLARE_BOARD.
     AxisMotion yaw_motion_;
     AxisMotion pitch_motion_;
     SemaphoreHandle_t motion_mutex_ = nullptr;     // protects AxisMotion fields
     SemaphoreHandle_t scs_bus_mutex_ = nullptr;    // serializes UART access (WritePos/ReadPos)
+    std::unique_ptr<MotionDriver> motion_driver_;
     TaskHandle_t servo_task_handle_ = nullptr;
     static constexpr uint32_t MOTION_TICK_MS = 20;
     static constexpr uint32_t MOTION_DEFAULT_DURATION_MS = 600;
     static constexpr uint32_t MOTION_PER_WRITE_TIME_MS = 30;
+    static constexpr uint32_t MOTION_POLL_INTERVAL_MS = 50;
 
     // Issue #80 / #98: pitch is guarded by two complementary tiers.
     //
@@ -789,6 +825,695 @@ private:
         if (pos > 1000) pos = 1000;
         return pos;
     }
+
+    static uint16_t clamp_u16(uint32_t v) {
+        if (v > std::numeric_limits<uint16_t>::max()) {
+            return std::numeric_limits<uint16_t>::max();
+        }
+        return static_cast<uint16_t>(v);
+    }
+
+    class MotionDriver {
+    public:
+        virtual ~MotionDriver() = default;
+
+        // Non-blocking. Both axes are dispatched within a single call.
+        // WriteHeadAngles holds motion_mutex_ while calling this method; Tick()
+        // and getters take the mutex internally for their own state access.
+        virtual void StartMove(float yaw_deg, float pitch_deg,
+                               uint32_t duration_ms) = 0;
+
+        // Last-known committed angle for each axis.
+        virtual float GetYawDeg() const = 0;
+        virtual float GetPitchDeg() const = 0;
+
+        // True iff at least one axis is currently in motion.
+        virtual bool IsMoving() const = 0;
+
+        // Called from ServoTask body at a driver-dependent cadence.
+        virtual void Tick() = 0;
+
+        // Optional hooks for drivers that need setup or shutdown.
+        virtual bool Initialize() { return true; }
+        virtual void Shutdown() {}
+    };
+
+    class HostInterpolationMotionDriver final : public MotionDriver {
+    public:
+        HostInterpolationMotionDriver(ScsBus& scs_bus,
+                                      SemaphoreHandle_t& scs_bus_mutex,
+                                      SemaphoreHandle_t& motion_mutex,
+                                      AxisMotion& yaw_motion,
+                                      AxisMotion& pitch_motion)
+            : scs_bus_(scs_bus),
+              scs_bus_mutex_(scs_bus_mutex),
+              motion_mutex_(motion_mutex),
+              yaw_motion_(yaw_motion),
+              pitch_motion_(pitch_motion) {}
+
+        void StartMove(float yaw_deg, float pitch_deg,
+                       uint32_t duration_ms) override {
+            uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+            int yaw = static_cast<int>(yaw_deg);
+            int pitch = static_cast<int>(pitch_deg);
+
+            yaw_motion_.target_deg = yaw;
+            yaw_motion_.start_deg = yaw_motion_.current_deg;
+            yaw_motion_.move_start_ms = now_ms;
+            yaw_motion_.move_duration_ms = duration_ms;
+            yaw_motion_.moving = (yaw_motion_.target_deg != yaw_motion_.current_deg);
+
+            pitch_motion_.target_deg = pitch;
+            pitch_motion_.start_deg = pitch_motion_.current_deg;
+            pitch_motion_.move_start_ms = now_ms;
+            pitch_motion_.move_duration_ms = duration_ms;
+            pitch_motion_.moving = (pitch_motion_.target_deg != pitch_motion_.current_deg);
+        }
+
+        float GetYawDeg() const override {
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            int yaw = yaw_motion_.current_deg;
+            xSemaphoreGive(motion_mutex_);
+            return static_cast<float>(yaw);
+        }
+
+        float GetPitchDeg() const override {
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            int pitch = pitch_motion_.current_deg;
+            xSemaphoreGive(motion_mutex_);
+            return static_cast<float>(pitch);
+        }
+
+        bool IsMoving() const override {
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            bool moving = yaw_motion_.moving || pitch_motion_.moving;
+            xSemaphoreGive(motion_mutex_);
+            return moving;
+        }
+
+        void Tick() override {
+            constexpr TickType_t kInterFrameGap = pdMS_TO_TICKS(10);
+
+            vTaskDelay(pdMS_TO_TICKS(MOTION_TICK_MS));
+
+            AxisMotion yaw_local;
+            AxisMotion pitch_local;
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            yaw_local = yaw_motion_;
+            pitch_local = pitch_motion_;
+            xSemaphoreGive(motion_mutex_);
+
+            if (!yaw_local.moving && !pitch_local.moving) return;
+
+            uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+
+            int new_yaw_current = yaw_local.current_deg;
+            bool new_yaw_moving = yaw_local.moving;
+            if (yaw_local.moving) {
+                uint32_t elapsed = now_ms - yaw_local.move_start_ms;
+                if (elapsed >= yaw_local.move_duration_ms) {
+                    new_yaw_current = yaw_local.target_deg;
+                    new_yaw_moving = false;
+                } else {
+                    int delta = yaw_local.target_deg - yaw_local.start_deg;
+                    new_yaw_current = yaw_local.start_deg +
+                        static_cast<int>(static_cast<int64_t>(delta) * elapsed / yaw_local.move_duration_ms);
+                }
+            }
+
+            int new_pitch_current = pitch_local.current_deg;
+            bool new_pitch_moving = pitch_local.moving;
+            if (pitch_local.moving) {
+                uint32_t elapsed = now_ms - pitch_local.move_start_ms;
+                if (elapsed >= pitch_local.move_duration_ms) {
+                    new_pitch_current = pitch_local.target_deg;
+                    new_pitch_moving = false;
+                } else {
+                    int delta = pitch_local.target_deg - pitch_local.start_deg;
+                    new_pitch_current = pitch_local.start_deg +
+                        static_cast<int>(static_cast<int64_t>(delta) * elapsed / pitch_local.move_duration_ms);
+                }
+            }
+
+            xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
+            if (yaw_local.moving) {
+                int yaw_pos = YawDegToPos(new_yaw_current);
+                int r = scs_bus_.WritePos(SERVO_YAW_ID, yaw_pos, MOTION_PER_WRITE_TIME_MS, 0);
+                if (!ServoWritePosOk(r)) {
+                    ESP_LOGW(TAG, "Motion yaw WritePos failed: r=%d (deg=%d, pos=%d)",
+                             r, new_yaw_current, yaw_pos);
+                }
+            }
+            vTaskDelay(kInterFrameGap);
+            if (pitch_local.moving) {
+                int pitch_pos = PitchDegToPos(new_pitch_current);
+                int r = scs_bus_.WritePos(SERVO_PITCH_ID, pitch_pos, MOTION_PER_WRITE_TIME_MS, 0);
+                if (!ServoWritePosOk(r)) {
+                    ESP_LOGW(TAG, "Motion pitch WritePos failed: r=%d (deg=%d, pos=%d)",
+                             r, new_pitch_current, pitch_pos);
+                }
+            }
+            xSemaphoreGive(scs_bus_mutex_);
+
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            if (yaw_motion_.move_start_ms == yaw_local.move_start_ms) {
+                yaw_motion_.current_deg = new_yaw_current;
+            }
+            if (!new_yaw_moving && yaw_motion_.target_deg == yaw_local.target_deg
+                && yaw_motion_.move_start_ms == yaw_local.move_start_ms) {
+                yaw_motion_.moving = false;
+            }
+            if (pitch_motion_.move_start_ms == pitch_local.move_start_ms) {
+                pitch_motion_.current_deg = new_pitch_current;
+            }
+            if (!new_pitch_moving && pitch_motion_.target_deg == pitch_local.target_deg
+                && pitch_motion_.move_start_ms == pitch_local.move_start_ms) {
+                pitch_motion_.moving = false;
+            }
+            xSemaphoreGive(motion_mutex_);
+        }
+
+    private:
+        ScsBus& scs_bus_;
+        SemaphoreHandle_t& scs_bus_mutex_;
+        SemaphoreHandle_t& motion_mutex_;
+        AxisMotion& yaw_motion_;
+        AxisMotion& pitch_motion_;
+    };
+
+    class ServoDelegatedMotionDriver final : public MotionDriver {
+    public:
+        ServoDelegatedMotionDriver(ScsBus& scs_bus,
+                                   SemaphoreHandle_t& scs_bus_mutex,
+                                   SemaphoreHandle_t& motion_mutex,
+                                   AxisMotion& yaw_motion,
+                                   AxisMotion& pitch_motion)
+            : scs_bus_(scs_bus),
+              scs_bus_mutex_(scs_bus_mutex),
+              motion_mutex_(motion_mutex),
+              yaw_motion_(yaw_motion),
+              pitch_motion_(pitch_motion) {}
+
+        // StartMove only mutates AxisMotion state (under the caller's
+        // motion_mutex_ per the MotionDriver::StartMove contract) and marks
+        // each axis as having a pending dispatch. The actual WritePos is
+        // performed by Tick() on the servo_motion task, so callers running
+        // on timer tasks (e.g. TouchPollCb -> StartServoWobble) never block
+        // on UART I/O. This mirrors HostInterpolationMotionDriver's
+        // "StartMove writes state; Tick drives the bus" split and keeps
+        // timer-task latency bounded.
+        void StartMove(float yaw_deg, float pitch_deg,
+                       uint32_t duration_ms) override {
+            uint16_t clamped = clamp_u16(duration_ms);
+            if (duration_ms > clamped) {
+                static bool duration_overflow_warned = false;
+                if (!duration_overflow_warned) {
+                    ESP_LOGW(TAG,
+                             "Servo-delegated motion duration overflow: axis=yaw/pitch requested_ms=%u clamped_ms=%u",
+                             (unsigned)duration_ms, (unsigned)clamped);
+                    duration_overflow_warned = true;
+                } else {
+                    ESP_LOGD(TAG,
+                             "Servo-delegated motion duration overflow: axis=yaw/pitch requested_ms=%u clamped_ms=%u",
+                             (unsigned)duration_ms, (unsigned)clamped);
+                }
+            }
+
+            int yaw = static_cast<int>(yaw_deg);
+            int pitch = static_cast<int>(pitch_deg);
+
+            // Per-axis no-op detection: when the axis is idle AND the request
+            // matches the last-known current_deg AND the position is not
+            // marked unknown, skip staging a dispatch. Issuing WritePos in
+            // that case would start a delegated motion toward host-side
+            // current_deg, which may diverge from the physical position
+            // (e.g. after a boot ReadPos-failure path where current_deg was
+            // seeded to BOOT_INIT_* via the safe fallback but the head sits
+            // elsewhere). HostInterpolation path keeps its always-WritePos
+            // behaviour for backward compatibility.
+            //
+            // position_unknown is the recovery signal from a prior ReadMove
+            // force-clear: current_deg holds the requested target but
+            // physical completion was never confirmed, so we MUST re-dispatch
+            // (even when yaw == current_deg) to surface a persistent failure
+            // rather than silently treat the axis as at-target.
+            //
+            // motion_mutex_ is held by the WriteHeadAngles caller per the
+            // MotionDriver::StartMove contract (declared at the base class).
+            // Taking it again here would deadlock the non-recursive FreeRTOS
+            // semaphore — read {yaw,pitch}_motion_ directly.
+            bool yaw_noop =
+                !yaw_motion_.moving && !yaw_motion_.position_unknown &&
+                yaw == yaw_motion_.current_deg;
+            bool pitch_noop =
+                !pitch_motion_.moving && !pitch_motion_.position_unknown &&
+                pitch == pitch_motion_.current_deg;
+
+            uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+            if (!yaw_noop) {
+                yaw_motion_.start_deg = yaw_motion_.current_deg;
+                yaw_motion_.target_deg = yaw;
+                yaw_motion_.move_start_ms = now_ms;
+                // dispatch_start_ms stays 0 until Tick's FinishDispatch
+                // confirms a WritePos ACK. ApplyReadMoveResult's stuck-
+                // high timeout skips the check while dispatch_start_ms
+                // is 0, so retry latency does not eat into the
+                // servo-internal duration budget.
+                yaw_motion_.dispatch_start_ms = 0;
+                yaw_motion_.move_duration_ms = clamped;
+                yaw_motion_.moving = true;
+                yaw_motion_.request_token = ++next_request_token_;
+                // NOTE: position_unknown is NOT cleared here. It is
+                // cleared by FinishDispatch only after a successful
+                // WritePos ACK. Clearing it on stage would let
+                // dispatch retry exhaustion (WritePos failing 5 times
+                // in a row) leave position_unknown=false despite no
+                // confirmed physical motion — then the next
+                // same-target StartMove would no-op-skip on
+                // current_deg==target_deg, hiding the underlying bus
+                // failure.
+                yaw_pending_dispatch_ = true;
+                // Fresh request: reset the per-axis dispatch retry
+                // budget so previous failures don't shorten this
+                // request's retry runway.
+                yaw_dispatch_failures_ = 0;
+            }
+            if (!pitch_noop) {
+                pitch_motion_.start_deg = pitch_motion_.current_deg;
+                pitch_motion_.target_deg = pitch;
+                pitch_motion_.move_start_ms = now_ms;
+                pitch_motion_.dispatch_start_ms = 0;
+                pitch_motion_.move_duration_ms = clamped;
+                pitch_motion_.moving = true;
+                pitch_motion_.request_token = ++next_request_token_;
+                pitch_pending_dispatch_ = true;
+                pitch_dispatch_failures_ = 0;
+            }
+        }
+
+        float GetYawDeg() const override {
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            int yaw = yaw_motion_.current_deg;
+            xSemaphoreGive(motion_mutex_);
+            return static_cast<float>(yaw);
+        }
+
+        float GetPitchDeg() const override {
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            int pitch = pitch_motion_.current_deg;
+            xSemaphoreGive(motion_mutex_);
+            return static_cast<float>(pitch);
+        }
+
+        bool IsMoving() const override {
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            bool moving = yaw_motion_.moving || pitch_motion_.moving;
+            xSemaphoreGive(motion_mutex_);
+            return moving;
+        }
+
+        void Tick() override {
+            vTaskDelay(pdMS_TO_TICKS(MOTION_POLL_INTERVAL_MS));
+
+            AxisMotion yaw_local;
+            AxisMotion pitch_local;
+            bool yaw_dispatch = false;
+            bool pitch_dispatch = false;
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            yaw_local = yaw_motion_;
+            pitch_local = pitch_motion_;
+            yaw_dispatch = yaw_pending_dispatch_;
+            pitch_dispatch = pitch_pending_dispatch_;
+            // Do NOT clear pending_dispatch here. The flag is consumed in
+            // FinishDispatch only on success (or when the per-axis retry
+            // budget is exhausted). Failed WritePos preserves
+            // pending_dispatch=true so the next tick retries the same
+            // target — without retry, a transient ACK timeout would
+            // silently drop the request and StartMove callers would
+            // observe a "succeeded" motion that never reaches the servo.
+            xSemaphoreGive(motion_mutex_);
+
+            // Step 1: dispatch any pending WritePos that StartMove staged.
+            // This is the I/O previously executed inside StartMove on the
+            // caller's task. By moving it onto the servo_motion task here,
+            // timer-task callers (TouchPollCb -> StartServoWobble) don't
+            // pay UART ACK latency.
+            if (yaw_dispatch || pitch_dispatch) {
+                int yaw_r = 0;
+                int pitch_r = 0;
+                uint16_t yaw_dur =
+                    static_cast<uint16_t>(yaw_local.move_duration_ms);
+                uint16_t pitch_dur =
+                    static_cast<uint16_t>(pitch_local.move_duration_ms);
+                int yaw_pos = YawDegToPos(yaw_local.target_deg);
+                int pitch_pos = PitchDegToPos(pitch_local.target_deg);
+
+                // Per-axis freshness gate immediately before each
+                // WritePos. A single snapshot before both writes leaves a
+                // window between the yaw dispatch and the pitch
+                // freshness check where a newer StartMove can race in,
+                // so the pitch dispatch could still send a stale
+                // physical command. Checking each axis individually
+                // under motion_mutex_ narrows the window per axis.
+                //
+                // Lock ordering: scs_bus_mutex_ → motion_mutex_ (held
+                // only at the per-axis freshness gate, never across
+                // WritePos). Other paths take motion_mutex_ alone
+                // (StartMove, wobble) or scs_bus_mutex_ then
+                // motion_mutex_ (Tick step-2 ReadMove). No path takes
+                // motion_mutex_ before scs_bus_mutex_, so the
+                // lock-ordering cycle that would cause a deadlock does
+                // not exist.
+                constexpr TickType_t kInterFrameGap = pdMS_TO_TICKS(10);
+                bool yaw_live = false;
+                bool pitch_live = false;
+                xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
+                if (yaw_dispatch) {
+                    xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+                    yaw_live = yaw_motion_.request_token == yaw_local.request_token;
+                    xSemaphoreGive(motion_mutex_);
+                    if (yaw_live) {
+                        yaw_r = scs_bus_.WritePos(SERVO_YAW_ID, yaw_pos, yaw_dur, 0);
+                    }
+                }
+                if (pitch_dispatch) {
+                    // SCS0009 bus stability: insert the same inter-frame
+                    // gap the host-interpolation Tick uses between two
+                    // consecutive WritePos on the shared bus. Without
+                    // this, back-to-back yaw + pitch dispatches can
+                    // re-introduce the bus-hang signature originally
+                    // observed during the boot-init climb. Held under
+                    // scs_bus_mutex_ — same pattern as the
+                    // HostInterpolationMotionDriver::Tick path.
+                    if (yaw_live) {
+                        vTaskDelay(kInterFrameGap);
+                    }
+                    xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+                    pitch_live = pitch_motion_.request_token == pitch_local.request_token;
+                    xSemaphoreGive(motion_mutex_);
+                    if (pitch_live) {
+                        pitch_r = scs_bus_.WritePos(SERVO_PITCH_ID, pitch_pos, pitch_dur, 0);
+                    }
+                }
+                xSemaphoreGive(scs_bus_mutex_);
+
+                bool yaw_ok = !yaw_live || ServoWritePosOk(yaw_r);
+                bool pitch_ok = !pitch_live || ServoWritePosOk(pitch_r);
+                if (yaw_live && !yaw_ok) {
+                    ESP_LOGW(TAG,
+                             "Motion yaw WritePos failed: r=%d (deg=%d, pos=%d)",
+                             yaw_r, yaw_local.target_deg, yaw_pos);
+                }
+                if (pitch_live && !pitch_ok) {
+                    ESP_LOGW(TAG,
+                             "Motion pitch WritePos failed: r=%d (deg=%d, pos=%d)",
+                             pitch_r, pitch_local.target_deg, pitch_pos);
+                }
+
+                // dispatch_now_ms captures the time WritePos completed
+                // (ACK or timeout). FinishDispatch will use this for
+                // axis.dispatch_start_ms on success, so that
+                // ApplyReadMoveResult's stuck-high check measures
+                // elapsed from when the servo actually accepted the
+                // command — not from staging time.
+                uint32_t dispatch_now_ms =
+                    static_cast<uint32_t>(esp_timer_get_time() / 1000);
+                xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+                // Commit / consume pending only if the snapshot we
+                // dispatched is still the live request AND we actually
+                // performed the WritePos (yaw_live / pitch_live).
+                // Superseded dispatches (token mismatch at either the
+                // pre-WritePos freshness gate or here) drop the retry
+                // counter so the new request — which has its own
+                // request_token and pending flag set by the racing
+                // StartMove — starts its retry budget fresh.
+                if (yaw_dispatch) {
+                    if (yaw_live &&
+                        yaw_motion_.request_token == yaw_local.request_token) {
+                        FinishDispatch("yaw", yaw_motion_, yaw_local.target_deg,
+                                       yaw_ok, dispatch_now_ms,
+                                       yaw_pending_dispatch_,
+                                       yaw_dispatch_failures_,
+                                       yaw_readmove_failures_);
+                    } else {
+                        yaw_dispatch_failures_ = 0;
+                    }
+                }
+                if (pitch_dispatch) {
+                    if (pitch_live &&
+                        pitch_motion_.request_token == pitch_local.request_token) {
+                        FinishDispatch("pitch", pitch_motion_,
+                                       pitch_local.target_deg, pitch_ok,
+                                       dispatch_now_ms,
+                                       pitch_pending_dispatch_,
+                                       pitch_dispatch_failures_,
+                                       pitch_readmove_failures_);
+                    } else {
+                        pitch_dispatch_failures_ = 0;
+                    }
+                }
+                xSemaphoreGive(motion_mutex_);
+
+                // This tick's bus budget is spent on the dispatch. Skip the
+                // ReadMove poll path; the next tick will pick up the
+                // in-flight motion.
+                return;
+            }
+
+            // Step 2: ReadMove poll for in-flight motion.
+            if (!yaw_local.moving && !pitch_local.moving) return;
+
+            int yaw_move = -1;
+            int pitch_move = -1;
+            xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
+            if (yaw_local.moving) {
+                yaw_move = scs_bus_.ReadMove(SERVO_YAW_ID);
+            }
+            if (pitch_local.moving) {
+                pitch_move = scs_bus_.ReadMove(SERVO_PITCH_ID);
+            }
+            xSemaphoreGive(scs_bus_mutex_);
+
+            uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+
+            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+            // request_token guards against a newer StartMove racing in
+            // between the Tick snapshot and this commit; ms-resolution
+            // move_start_ms can collide for back-to-back requests.
+            if (yaw_local.moving &&
+                yaw_motion_.request_token == yaw_local.request_token) {
+                ApplyReadMoveResult("yaw", yaw_motion_, yaw_move, now_ms,
+                                    yaw_readmove_failures_);
+            }
+            if (pitch_local.moving &&
+                pitch_motion_.request_token == pitch_local.request_token) {
+                ApplyReadMoveResult("pitch", pitch_motion_, pitch_move, now_ms,
+                                    pitch_readmove_failures_);
+            }
+            xSemaphoreGive(motion_mutex_);
+        }
+
+    private:
+        static constexpr int kReadMoveFailureLimit = 5;
+        static constexpr int kDispatchFailureLimit = 5;
+        // Settle margin past move_duration_ms before treating a
+        // stuck-high ReadMove (servo returns 1 forever after the
+        // requested completion) as a failure. Without this bound,
+        // a degraded servo / register path would keep moving=true
+        // indefinitely; wobble would never advance and same-target
+        // recovery would never run.
+        static constexpr uint32_t kReadMoveStuckMarginMs = 1000;
+        // Margin below move_duration_ms in which an early ReadMove==0
+        // is allowed as a genuine completion (the SCS0009's internal
+        // interpolation can finish slightly early). A ReadMove==0
+        // arriving further before the commanded completion is
+        // implausible and likely a stuck-low / false-zero status read
+        // from a degraded register path; treat it as suspicious and
+        // mark position_unknown so the next StartMove forces a fresh
+        // dispatch instead of trusting the stale optimistic commit.
+        static constexpr uint32_t kReadMoveEarlyMarginMs = 200;
+
+        // Finalises a dispatched WritePos. Caller holds motion_mutex_.
+        // - write_ok==true:  commit current_deg = target, consume the
+        //   pending_dispatch flag, reset dispatch + ReadMove failure
+        //   counters. ReadMove poll then tracks the in-flight delegated
+        //   motion to completion.
+        // - write_ok==false: keep pending_dispatch=true so the next tick
+        //   retries the same target (transient ACK timeout / UART error
+        //   should not silently drop the request). Bound the retry by
+        //   kDispatchFailureLimit; when exhausted, log once, consume
+        //   pending_dispatch, and clear moving so the axis returns to
+        //   idle rather than spinning the retry loop forever.
+        // readmove_failures is reset on success only; it tracks ReadMove
+        // polling and is independent of WritePos ack semantics.
+        static void FinishDispatch(const char* axis_name, AxisMotion& axis,
+                                   int target_deg, bool write_ok,
+                                   uint32_t dispatch_now_ms,
+                                   bool& pending_dispatch,
+                                   int& dispatch_failures,
+                                   int& readmove_failures) {
+            if (write_ok) {
+                axis.current_deg = target_deg;
+                // dispatch_start_ms records when the servo actually
+                // received the GOAL_POSITION / GOAL_TIME write. This
+                // (not the staging timestamp in move_start_ms) is what
+                // ApplyReadMoveResult uses for the stuck-high timeout,
+                // so degraded-bus dispatch latency doesn't eat into
+                // the servo-internal duration budget.
+                axis.dispatch_start_ms = dispatch_now_ms;
+                // Confirmed WritePos ACK supersedes any prior
+                // position_unknown mark. The new WritePos+ReadMove
+                // cycle is what proves (or fails to prove) the
+                // physical position.
+                axis.position_unknown = false;
+                pending_dispatch = false;
+                dispatch_failures = 0;
+                readmove_failures = 0;
+                return;
+            }
+            dispatch_failures++;
+            if (dispatch_failures >= kDispatchFailureLimit) {
+                ESP_LOGW(TAG,
+                         "Motion %s WritePos retries exhausted: current_deg=%d target_deg=%d; %d consecutive dispatch failures, abandoning request and marking position unknown",
+                         axis_name, axis.current_deg, axis.target_deg,
+                         kDispatchFailureLimit);
+                pending_dispatch = false;
+                axis.moving = false;
+                // A WritePos ACK timeout is NOT proof that the servo
+                // ignored the command — the command may have reached
+                // the servo while only the ACK/readback path failed.
+                // In that case the physical head has already moved to
+                // target_deg, but current_deg still holds the old
+                // value. Without position_unknown=true here, the next
+                // same-old-position StartMove would no-op-skip on the
+                // stale current_deg and silently drop the recovery
+                // request — exactly the degraded-bus condition this
+                // path is meant to handle. Mark unknown so a same-
+                // target retry forces a fresh dispatch and either
+                // confirms (FinishDispatch write_ok clears the flag)
+                // or surfaces another failure.
+                axis.position_unknown = true;
+                dispatch_failures = 0;
+            }
+            // else: pending_dispatch stays true; next Tick will retry the
+            // same target (same start_deg / move_start_ms / move_duration_ms).
+        }
+
+        static void ApplyReadMoveResult(const char* axis_name,
+                                        AxisMotion& axis,
+                                        int read_move,
+                                        uint32_t now_ms,
+                                        int& failures) {
+            if (read_move >= 0) {
+                failures = 0;
+                if (read_move == 0) {
+                    // Sanity check against a stuck-low / false-zero
+                    // status register: FinishDispatch optimistically
+                    // committed current_deg to target_deg on WritePos
+                    // ACK, so a transient ReadMove==0 returned before
+                    // the servo could physically reach target would
+                    // make the host treat the axis as "at target" and
+                    // let the next same-target StartMove no-op-skip.
+                    // If the elapsed time since confirmed dispatch is
+                    // implausibly short relative to the commanded
+                    // move_duration_ms (allowing kReadMoveEarlyMarginMs
+                    // for genuine early arrival), treat the zero as
+                    // suspicious and mark the position unknown.
+                    if (axis.dispatch_start_ms != 0 &&
+                        axis.move_duration_ms > kReadMoveEarlyMarginMs) {
+                        uint32_t elapsed = now_ms - axis.dispatch_start_ms;
+                        uint32_t plausible_min =
+                            axis.move_duration_ms - kReadMoveEarlyMarginMs;
+                        if (elapsed < plausible_min) {
+                            ESP_LOGW(TAG,
+                                     "Motion %s ReadMove=0 implausibly early: current_deg=%d target_deg=%d, elapsed=%ums but commanded duration=%ums (early margin=%ums); marking position unknown",
+                                     axis_name, axis.current_deg, axis.target_deg,
+                                     (unsigned)elapsed,
+                                     (unsigned)axis.move_duration_ms,
+                                     (unsigned)kReadMoveEarlyMarginMs);
+                            axis.moving = false;
+                            axis.position_unknown = true;
+                            return;
+                        }
+                    }
+                    axis.moving = false;
+                    return;
+                }
+                // read_move > 0: servo reports still moving. Bound the
+                // wait by move_duration_ms + kReadMoveStuckMarginMs to
+                // guard against a stuck-high ReadMove (the servo or
+                // register path degrades such that the motion-status
+                // bit never clears even after the requested completion
+                // time has elapsed).
+                //
+                // Elapsed is measured from dispatch_start_ms (when the
+                // servo actually received the command via a successful
+                // WritePos ACK), not from move_start_ms (staging time),
+                // so degraded-bus dispatch latency does not cause
+                // premature force-clear while the servo is genuinely
+                // still mid-motion. If dispatch_start_ms is still 0 the
+                // WritePos has not yet ACK'd; skip the timeout check
+                // until the dispatch is confirmed. Unsigned subtraction
+                // stays wrap-safe across the uint32 ms counter.
+                if (axis.dispatch_start_ms == 0) {
+                    return;
+                }
+                uint32_t elapsed = now_ms - axis.dispatch_start_ms;
+                if (elapsed > axis.move_duration_ms + kReadMoveStuckMarginMs) {
+                    ESP_LOGW(TAG,
+                             "Motion %s ReadMove stuck-high: current_deg=%d target_deg=%d, %ums past commanded completion; marking position unknown and force-clearing moving",
+                             axis_name, axis.current_deg, axis.target_deg,
+                             (unsigned)(elapsed - axis.move_duration_ms));
+                    axis.moving = false;
+                    axis.position_unknown = true;
+                }
+                return;
+            }
+
+            failures++;
+            if (failures >= kReadMoveFailureLimit) {
+                ESP_LOGW(TAG,
+                         "Motion %s ReadMove failed: current_deg=%d target_deg=%d; %d consecutive ReadMove failures, marking position unknown and force-clearing moving (next StartMove will re-dispatch even if target matches current_deg)",
+                         axis_name, axis.current_deg, axis.target_deg,
+                         kReadMoveFailureLimit);
+                axis.moving = false;
+                // Without this flag, a subsequent same-target StartMove
+                // would no-op-skip on current_deg==target_deg and the
+                // bus failure would stay hidden behind the optimistic
+                // commit. Marking the position unknown forces the next
+                // StartMove to re-dispatch and surface (or recover from)
+                // the underlying ReadMove fault.
+                axis.position_unknown = true;
+                failures = 0;
+            }
+        }
+
+        ScsBus& scs_bus_;
+        SemaphoreHandle_t& scs_bus_mutex_;
+        SemaphoreHandle_t& motion_mutex_;
+        AxisMotion& yaw_motion_;
+        AxisMotion& pitch_motion_;
+        int yaw_readmove_failures_ = 0;
+        int pitch_readmove_failures_ = 0;
+        // Set by StartMove when staging a dispatch for an axis. Cleared by
+        // FinishDispatch only on a successful WritePos (or when the
+        // per-axis retry budget kDispatchFailureLimit is exhausted), so
+        // transient bus failures retry on the next tick instead of being
+        // silently dropped. motion_mutex_ guards both fields.
+        bool yaw_pending_dispatch_ = false;
+        bool pitch_pending_dispatch_ = false;
+        // Consecutive WritePos dispatch failures per axis. motion_mutex_
+        // guards both fields.
+        int yaw_dispatch_failures_ = 0;
+        int pitch_dispatch_failures_ = 0;
+        // Monotonically increasing request id. Each StartMove that stages
+        // a dispatch picks ++next_request_token_ and writes it into the
+        // corresponding AxisMotion::request_token. Tick() then uses
+        // request_token equality (rather than move_start_ms, which only
+        // has ms resolution) to detect whether a snapshot is still the
+        // live request. motion_mutex_ guards this counter.
+        uint64_t next_request_token_ = 0;
+    };
 
     void InitializePowerSaveTimer() {
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
@@ -1162,6 +1887,26 @@ private:
                 return;
             }
 
+#if CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION
+            motion_driver_ = std::make_unique<ServoDelegatedMotionDriver>(
+                scs_bus_, scs_bus_mutex_, motion_mutex_,
+                yaw_motion_, pitch_motion_);
+#else
+            motion_driver_ = std::make_unique<HostInterpolationMotionDriver>(
+                scs_bus_, scs_bus_mutex_, motion_mutex_,
+                yaw_motion_, pitch_motion_);
+#endif
+            if (!motion_driver_->Initialize()) {
+                ESP_LOGE(TAG, "Failed to initialize motion driver; disabling servo");
+                motion_driver_.reset();
+                vSemaphoreDelete(motion_mutex_);
+                motion_mutex_ = nullptr;
+                vSemaphoreDelete(scs_bus_mutex_);
+                scs_bus_mutex_ = nullptr;
+                servo_ok_ = false;
+                return;
+            }
+
             // Issue #121 (Problem 1, "downward drop on power-on") + #123
             // (boot-init diagnostics).
             //
@@ -1381,6 +2126,7 @@ private:
                     vSemaphoreDelete(scs_bus_mutex_);
                     scs_bus_mutex_ = nullptr;
                 }
+                motion_driver_.reset();
                 servo_task_handle_ = nullptr;
                 servo_ok_ = false;
                 return;
@@ -1424,10 +2170,10 @@ private:
             // motion at 30 deg/s+, exceeding the 15 deg/s cap.
             int phase0_yaw_delta;
             int phase0_pitch_delta;
-            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
-            phase0_yaw_delta = BOOT_INIT_YAW_DEG - yaw_motion_.current_deg;
-            phase0_pitch_delta = BOOT_INIT_PITCH_DEG - pitch_motion_.current_deg;
-            xSemaphoreGive(motion_mutex_);
+            phase0_yaw_delta =
+                BOOT_INIT_YAW_DEG - static_cast<int>(motion_driver_->GetYawDeg());
+            phase0_pitch_delta =
+                BOOT_INIT_PITCH_DEG - static_cast<int>(motion_driver_->GetPitchDeg());
             if (phase0_yaw_delta < 0) phase0_yaw_delta = -phase0_yaw_delta;
             if (phase0_pitch_delta < 0) phase0_pitch_delta = -phase0_pitch_delta;
             int phase0_max_delta = phase0_yaw_delta > phase0_pitch_delta
@@ -1441,7 +2187,67 @@ private:
             TickType_t boot_init_start_tick = xTaskGetTickCount();
             WriteHeadAngles(BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG,
                             phase0_duration_ms);
-            vTaskDelay(pdMS_TO_TICKS(phase0_duration_ms + 100));
+            // Two-phase boot-init wait:
+            //
+            // (1) Mandatory minimum: vTaskDelay until
+            //     phase0_duration_ms + 100 ms has elapsed. This must
+            //     run UNCONDITIONALLY — independent of IsMoving() —
+            //     because phase0_duration_ms is floored to
+            //     BOOT_INIT_MOVE_MS specifically to cover the
+            //     SCS0009 wake-up window on the PMIC OFF/ON path,
+            //     even when WriteHeadAngles is a no-op (Phase 2
+            //     safe-fallback seeded current_deg to exactly the
+            //     boot target → motion_driver_->IsMoving() == false
+            //     immediately → Phase 0' ReadPos would otherwise run
+            //     inside the wake-up latency window and exhaust).
+            //
+            // (2) Optional extension: while motion_driver_->IsMoving()
+            //     reports a motion still in flight, keep waiting up
+            //     to a safety deadline. This covers the ServoDelegated
+            //     path where the actual servo motion can start late
+            //     due to dispatch retry latency (max 5 ×
+            //     MOTION_POLL_INTERVAL_MS = 250 ms) — phase (1)'s
+            //     budget may finish before the servo has completed
+            //     its internal interpolation in that worst case.
+            TickType_t boot_init_min_deadline =
+                xTaskGetTickCount() +
+                pdMS_TO_TICKS(phase0_duration_ms + 100);
+            // Safety extension covers the worst-case ServoDelegated
+            // dispatch latency. Each retry round dispatches yaw and
+            // pitch sequentially under scs_bus_mutex_, so one fully-
+            // timing-out round on both axes costs approximately:
+            //   MOTION_POLL_INTERVAL_MS (50 ms tick wake)
+            // + yaw WritePos ACK timeout (~100 ms; SCSCL's
+            //   SCSerial::IOTimeOut = 100 ms, FeetechScs comparable)
+            // + kInterFrameGap (10 ms)
+            // + pitch WritePos ACK timeout (~100 ms)
+            // ≈ 260 ms per retry round.
+            //
+            // 4 failing rounds + 1 successful round bound the
+            // worst-case dispatch latency at roughly 4 × 260 ≈ 1040 ms.
+            // Add a settle margin so the wait outlasts a genuine
+            // delayed dispatch instead of breaking while IsMoving()
+            // is legitimately true. 2000 ms covers the full retry
+            // budget plus margin.
+            //
+            // HostInterpolation path is unaffected (dispatch latency
+            // is 0 there; the wait exits well before this deadline
+            // regardless).
+            TickType_t boot_init_safety_deadline =
+                boot_init_min_deadline + pdMS_TO_TICKS(2000);
+            while ((int32_t)(xTaskGetTickCount() -
+                             boot_init_min_deadline) < 0) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+            while (motion_driver_->IsMoving()) {
+                if ((int32_t)(xTaskGetTickCount() -
+                              boot_init_safety_deadline) >= 0) {
+                    ESP_LOGW(TAG,
+                             "Boot init Phase 0 wait safety deadline elapsed while motion_driver_ still reports moving; proceeding to Phase 0' ReadPos anyway");
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
 
             // Issue #123: capture post-init ReadPos so the boot-init effect
             // is observable in the serial log. ServoTask is now running, so
@@ -1527,9 +2333,21 @@ private:
                     xSemaphoreGive(motion_mutex_);
                 }
             } else {
+                // Phase 0' ReadPos failed: current_deg holds the
+                // Phase 2 restored-or-seeded value, which has NOT
+                // been physically verified. Mark the axis position
+                // unknown so the ServoDelegated path's no-op gate
+                // does not silently skip a same-target recovery
+                // command. The HostInterpolation path ignores this
+                // flag; on that path the next WriteHeadAngles still
+                // dispatches a fresh interpolation as before.
+                xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+                yaw_motion_.position_unknown = true;
+                xSemaphoreGive(motion_mutex_);
                 ESP_LOGW(TAG,
                          "Phase 0' yaw re-sync skipped: ReadPos failed; "
-                         "leaving current_deg at restored-or-seeded value");
+                         "leaving current_deg at restored-or-seeded value "
+                         "and marking position unknown for delegated no-op gate");
             }
             if (post_pitch_pos >= 0) {
                 int actual_pitch_deg = (post_pitch_pos - 620) * 5 / 16;
@@ -1554,9 +2372,13 @@ private:
                     xSemaphoreGive(motion_mutex_);
                 }
             } else {
+                xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+                pitch_motion_.position_unknown = true;
+                xSemaphoreGive(motion_mutex_);
                 ESP_LOGW(TAG,
                          "Phase 0' pitch re-sync skipped: ReadPos failed; "
-                         "leaving current_deg at restored-or-seeded value");
+                         "leaving current_deg at restored-or-seeded value "
+                         "and marking position unknown for delegated no-op gate");
             }
         }
     }
@@ -1571,79 +2393,110 @@ private:
     // which hung the SCS0009 bus on large-angle reversals (the second
     // servo's frame collided with the first servo still being driven).
     // Now it sets the target and lets the servo_motion task interpolate.
+    //
+    // The wobble-cancel + StartMove sequence runs under motion_mutex_ so a
+    // concurrent ServoWobbleStepAdvance() on servo_motion task cannot pass
+    // its active-load gate after this call has cleared
+    // servo_wobble_active_ but before it dispatches the user-driven
+    // target — which would let a stale wobble step overwrite the new
+    // command.
     void WriteHeadAngles(int yaw_deg, int pitch_deg,
                          uint32_t duration_ms = MOTION_DEFAULT_DURATION_MS) {
-        if (!servo_ok_) {
+        if (!servo_ok_ || motion_driver_ == nullptr) {
             ESP_LOGW(TAG, "WriteHeadAngles skipped: servo not initialized");
             return;
         }
-        uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-
         xSemaphoreTake(motion_mutex_, portMAX_DELAY);
-        yaw_motion_.target_deg = yaw_deg;
-        yaw_motion_.start_deg = yaw_motion_.current_deg;
-        yaw_motion_.move_start_ms = now_ms;
-        yaw_motion_.move_duration_ms = duration_ms;
-        yaw_motion_.moving = (yaw_motion_.target_deg != yaw_motion_.current_deg);
-
-        pitch_motion_.target_deg = pitch_deg;
-        pitch_motion_.start_deg = pitch_motion_.current_deg;
-        pitch_motion_.move_start_ms = now_ms;
-        pitch_motion_.move_duration_ms = duration_ms;
-        pitch_motion_.moving = (pitch_motion_.target_deg != pitch_motion_.current_deg);
+        if (servo_wobble_active_.load()) {
+            servo_wobble_active_.store(false);
+            servo_wobble_step_.store(0);
+        }
+        motion_driver_->StartMove(yaw_deg, pitch_deg, duration_ms);
         xSemaphoreGive(motion_mutex_);
     }
 
-    // Servo wobble: yaw -A -> +A -> -A -> 0, each step SERVO_WOBBLE_STEP_MS.
-    // Driven by servo_wobble_timer_ to avoid blocking the touch poll task.
-    static void ServoWobbleStepCb(void* arg) {
-        StackChanBoard* self = static_cast<StackChanBoard*>(arg);
-        self->ServoWobbleStepAdvance();
-    }
-
+    // Servo wobble: yaw -A -> +A -> -A -> 0. Each step is dispatched only
+    // after the active MotionDriver reports idle, so the delegated path never
+    // overwrites an in-flight SCS0009 internal motion.
+    //
+    // Entire body runs under motion_mutex_. Without that hold, a concurrent
+    // non-wobble WriteHeadAngles() could clear servo_wobble_active_ AFTER
+    // this function has passed the active-load + IsMoving gate but BEFORE
+    // the switch reaches dispatch, which would let a wobble step
+    // overwrite the user's freshly-staged target. Holding the mutex makes
+    // "wobble-active check → idle check → step dispatch" atomic w.r.t.
+    // any external StartMove() request.
     void ServoWobbleStepAdvance() {
+        if (!servo_ok_ || motion_driver_ == nullptr) {
+            return;
+        }
+        xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+        if (!servo_wobble_active_.load()) {
+            xSemaphoreGive(motion_mutex_);
+            return;
+        }
+        // Direct AxisMotion field access under motion_mutex_; calling
+        // motion_driver_->IsMoving() here would re-take the non-recursive
+        // semaphore and deadlock.
+        bool moving = yaw_motion_.moving || pitch_motion_.moving;
+        if (moving) {
+            xSemaphoreGive(motion_mutex_);
+            return;
+        }
         const int A = SERVO_WOBBLE_AMPLITUDE_DEG;
-        switch (servo_wobble_step_) {
-            case 0: WriteHeadAngles(-A, 0, SERVO_WOBBLE_STEP_MS); break;
-            case 1: WriteHeadAngles(+A, 0, SERVO_WOBBLE_STEP_MS); break;
-            case 2: WriteHeadAngles(-A, 0, SERVO_WOBBLE_STEP_MS); break;
-            case 3: WriteHeadAngles(  0, 0, SERVO_WOBBLE_STEP_MS); break;
+        int step = servo_wobble_step_.load();
+        int target_yaw = 0;
+        int target_pitch = 0;
+        switch (step) {
+            case 0: target_yaw = -A; target_pitch = 0; break;
+            case 1: target_yaw = +A; target_pitch = 0; break;
+            case 2: target_yaw = -A; target_pitch = 0; break;
+            case 3: target_yaw =  0; target_pitch = 0; break;
             default:
-                servo_wobble_active_ = false;
+                servo_wobble_active_.store(false);
+                xSemaphoreGive(motion_mutex_);
                 return;
         }
-        servo_wobble_step_++;
-        if (servo_wobble_step_ <= 3) {
-            esp_timer_start_once(servo_wobble_timer_,
-                                 (uint64_t)SERVO_WOBBLE_STEP_MS * 1000);
-        } else {
-            servo_wobble_active_ = false;
+        // StartMove contract: caller holds motion_mutex_. Direct call
+        // (not via WriteHeadAngles) avoids the re-entrant mutex take.
+        motion_driver_->StartMove(target_yaw, target_pitch, SERVO_WOBBLE_STEP_MS);
+        servo_wobble_step_.store(step + 1);
+        if (step + 1 > 3) {
+            servo_wobble_active_.store(false);
         }
+        xSemaphoreGive(motion_mutex_);
     }
 
     void StartServoWobble() {
-        if (!servo_ok_) {
+        if (!servo_ok_ || motion_driver_ == nullptr) {
             ESP_LOGW(TAG, "Servo wobble skipped: servo not initialized");
             return;
         }
-        if (servo_wobble_active_) {
-            // Restart from step 0 if a new wobble is requested mid-flight.
-            esp_timer_stop(servo_wobble_timer_);
-        }
-        if (servo_wobble_timer_ == nullptr) {
-            esp_timer_create_args_t args = {
-                .callback = &StackChanBoard::ServoWobbleStepCb,
-                .arg = this,
-                .dispatch_method = ESP_TIMER_TASK,
-                .name = "servo_wobble",
-                .skip_unhandled_events = true,
-            };
-            ESP_ERROR_CHECK(esp_timer_create(&args, &servo_wobble_timer_));
-        }
-        servo_wobble_step_ = 0;
-        servo_wobble_active_ = true;
-        // Kick off the first step immediately.
-        ServoWobbleStepAdvance();
+        // Stage the wobble; the actual ServoWobbleStepAdvance() is
+        // performed on servo_motion task next tick (see ServoTaskMain).
+        // Calling ServoWobbleStepAdvance() directly from here — which is
+        // commonly reached via the ESP_TIMER_TASK touch-poll callback —
+        // would race with the servo_motion task's own per-tick
+        // ServoWobbleStepAdvance() at idle: the atomic step load/store
+        // does not exclude the read-switch-store compound operation, so
+        // two callers can both observe step==0 and end up dispatching
+        // step 0 and step 1 concurrently. Centralising advance on the
+        // servo_motion task makes the step sequence deterministic, at
+        // the cost of a single MOTION_POLL_INTERVAL_MS / MOTION_TICK_MS
+        // delay on the first wobble step (well under human perception).
+        //
+        // motion_mutex_ also serialises this restart against a
+        // concurrent ServoWobbleStepAdvance() running on servo_motion:
+        // without the hold, a final-step advancement finishing at the
+        // same moment as this restart could overwrite our step=0 /
+        // active=true with step+1 or active=false, silently dropping
+        // the new stroke's wobble. The mutex is staging-only (no UART
+        // I/O is performed under it), so taking it from ESP_TIMER_TASK
+        // is bounded to sub-millisecond hold time.
+        xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+        servo_wobble_step_.store(0);
+        servo_wobble_active_.store(true);
+        xSemaphoreGive(motion_mutex_);
     }
 
     static void ServoTaskTrampoline(void* arg) {
@@ -1651,87 +2504,14 @@ private:
     }
 
     void ServoTaskMain() {
-        constexpr TickType_t kInterFrameGap = pdMS_TO_TICKS(10);
-
         while (true) {
-            vTaskDelay(pdMS_TO_TICKS(MOTION_TICK_MS));
-            if (!servo_ok_) continue;
-
-            AxisMotion yaw_local;
-            AxisMotion pitch_local;
-            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
-            yaw_local = yaw_motion_;
-            pitch_local = pitch_motion_;
-            xSemaphoreGive(motion_mutex_);
-
-            if (!yaw_local.moving && !pitch_local.moving) continue;
-
-            uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-
-            int new_yaw_current = yaw_local.current_deg;
-            bool new_yaw_moving = yaw_local.moving;
-            if (yaw_local.moving) {
-                uint32_t elapsed = now_ms - yaw_local.move_start_ms;
-                if (elapsed >= yaw_local.move_duration_ms) {
-                    new_yaw_current = yaw_local.target_deg;
-                    new_yaw_moving = false;
-                } else {
-                    int delta = yaw_local.target_deg - yaw_local.start_deg;
-                    new_yaw_current = yaw_local.start_deg +
-                        static_cast<int>(static_cast<int64_t>(delta) * elapsed / yaw_local.move_duration_ms);
-                }
+            if (!servo_ok_ || motion_driver_ == nullptr) {
+                vTaskDelay(pdMS_TO_TICKS(MOTION_TICK_MS));
+                continue;
             }
-
-            int new_pitch_current = pitch_local.current_deg;
-            bool new_pitch_moving = pitch_local.moving;
-            if (pitch_local.moving) {
-                uint32_t elapsed = now_ms - pitch_local.move_start_ms;
-                if (elapsed >= pitch_local.move_duration_ms) {
-                    new_pitch_current = pitch_local.target_deg;
-                    new_pitch_moving = false;
-                } else {
-                    int delta = pitch_local.target_deg - pitch_local.start_deg;
-                    new_pitch_current = pitch_local.start_deg +
-                        static_cast<int>(static_cast<int64_t>(delta) * elapsed / pitch_local.move_duration_ms);
-                }
-            }
-
-            xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
-            if (yaw_local.moving) {
-                int yaw_pos = YawDegToPos(new_yaw_current);
-                int r = scs_bus_.WritePos(SERVO_YAW_ID, yaw_pos, MOTION_PER_WRITE_TIME_MS, 0);
-                if (!ServoWritePosOk(r)) {
-                    ESP_LOGW(TAG, "Motion yaw WritePos failed: r=%d (deg=%d, pos=%d)",
-                             r, new_yaw_current, yaw_pos);
-                }
-            }
-            vTaskDelay(kInterFrameGap);
-            if (pitch_local.moving) {
-                int pitch_pos = PitchDegToPos(new_pitch_current);
-                int r = scs_bus_.WritePos(SERVO_PITCH_ID, pitch_pos, MOTION_PER_WRITE_TIME_MS, 0);
-                if (!ServoWritePosOk(r)) {
-                    ESP_LOGW(TAG, "Motion pitch WritePos failed: r=%d (deg=%d, pos=%d)",
-                             r, new_pitch_current, pitch_pos);
-                }
-            }
-            xSemaphoreGive(scs_bus_mutex_);
-
-            xSemaphoreTake(motion_mutex_, portMAX_DELAY);
-            if (yaw_motion_.move_start_ms == yaw_local.move_start_ms) {
-                yaw_motion_.current_deg = new_yaw_current;
-            }
-            if (!new_yaw_moving && yaw_motion_.target_deg == yaw_local.target_deg
-                && yaw_motion_.move_start_ms == yaw_local.move_start_ms) {
-                yaw_motion_.moving = false;
-            }
-            if (pitch_motion_.move_start_ms == pitch_local.move_start_ms) {
-                pitch_motion_.current_deg = new_pitch_current;
-            }
-            if (!new_pitch_moving && pitch_motion_.target_deg == pitch_local.target_deg
-                && pitch_motion_.move_start_ms == pitch_local.move_start_ms) {
-                pitch_motion_.moving = false;
-            }
-            xSemaphoreGive(motion_mutex_);
+            motion_driver_->Tick();
+            ServoWobbleStepAdvance();
+            taskYIELD();
         }
     }
 
