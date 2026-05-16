@@ -154,6 +154,30 @@ change is called out under a `Firmware` subsection of the release entry.
   [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
   Problem 1.
 
+- Extended the boot-time snap-suppress hold added for #121 Problem 1
+  (PR #137) so that it actually fires on the PMIC long-press OFF / ON
+  path, by retrying the pre-hold `ReadPos` long enough to absorb the
+  SCS0009 `~200 ms` startup latency after `VM_EN` HIGH. Each `ReadPos`
+  in `InitializeServo()` is now attempted up to 5 times at 50 ms
+  intervals (250 ms total budget per axis), well above the observed
+  wake-up latency window. The `Boot pre-init ReadPos` diagnostic line
+  now includes the attempt count taken
+  (`yaw_raw=N (attempts=K) pitch_raw=N (attempts=K)`). If all retries
+  still fail (e.g. a genuine SCS0009 bus hang per #100), the firmware
+  seeds `pitch_motion_.current_deg` with `BOOT_INIT_PITCH_DEG` (45°)
+  instead of leaving the struct-default `current_deg=0`, so the
+  subsequent boot-init `WriteHeadAngles(0, 45, 4000)` interpolation
+  becomes a near-no-op rather than walking `WritePos` calls upward
+  from `pos=620` (the lower mechanical end-stop) through
+  end-stop-adjacent positions. The `BOOT_INIT_YAW_DEG` /
+  `BOOT_INIT_PITCH_DEG` / `BOOT_INIT_MOVE_MS` constants are promoted
+  from local block scope to class-level `static constexpr` so the
+  safe-fallback branch can reference them. Closes
+  [#138](https://github.com/kisaragi-mochi/stackchan-mcp/issues/138).
+  Refs
+  [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 1.
+
 ## [0.7.0] - 2026-05-14
 
 ### Gateway

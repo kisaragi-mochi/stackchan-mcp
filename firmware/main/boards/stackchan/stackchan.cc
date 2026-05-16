@@ -699,6 +699,39 @@ private:
     static constexpr int RECOMMENDED_PITCH_MIN = 5;   // M5Stack official docs
     static constexpr int RECOMMENDED_PITCH_MAX = 85;  // M5Stack official docs
 
+    // Issue #115: boot-time initialization target. Fall-safe neutral pose
+    // well clear of both mechanical end-stops, in the centre of the
+    // M5Stack-recommended 5..85° pitch range. Design follows the
+    // goHome() pattern in m5stack/StackChan
+    // (apps/app_setup/workers/servo.cpp:144) and the 1-second
+    // positioning timing established in mongonta0716/stackchan-arduino
+    // attachServos().
+    //
+    // Issue #121 Problem 2: BOOT_INIT_MOVE_MS=4000 (was 1000) drops the
+    // effective angular speed for the post-power-on climb from ~45°/s
+    // to ~11°/s. On-device feedback identified the original 1-second
+    // duration as startling ("ブルンっ" / audible servo stress) on the
+    // CoreS3 + SCS0009 hardware. The 100 ms post-settle vTaskDelay in
+    // InitializeServo() is unchanged. The separate "unintended downward
+    // drop on power-on" (#121 Problem 1) is addressed by the
+    // snap-suppress hold in InitializeServo() Phase 1a (PR #137) and
+    // the ReadPos retry + safe-fallback seed in this file (#138).
+    //
+    // Issue #138: promoted from local block scope inside
+    // InitializeServo() to class-level static constexpr so the
+    // safe-fallback branch in Phase 2 can seed
+    // pitch_motion_.current_deg with BOOT_INIT_PITCH_DEG when the
+    // pre-init ReadPos retries all fail. Without that seed, the
+    // boot-init `WriteHeadAngles(0, 45, 4000)` interpolation would
+    // start from the struct-default `current_deg=0` (== pos=620 at
+    // deg=0, the lower mechanical end-stop) and walk WritePos calls
+    // upward through end-stop-adjacent positions before reaching the
+    // target, risking servo bus degradation if the SCS0009 wakes up
+    // mid-sequence.
+    static constexpr int BOOT_INIT_YAW_DEG = 0;
+    static constexpr int BOOT_INIT_PITCH_DEG = 45;
+    static constexpr uint32_t BOOT_INIT_MOVE_MS = 4000;
+
     static int YawDegToPos(int deg) {
         int pos = 460 + deg * 16 / 5;
         if (pos < 0) pos = 0;
@@ -1136,7 +1169,39 @@ private:
             // separately.
 
             // Phase 1a: pitch first -- read and immediately hold.
-            int pitch_pos_actual = scs_bus_.ReadPos(SERVO_PITCH_ID);
+            //
+            // Issue #138: retry ReadPos to absorb the SCS0009 ~200 ms
+            // startup latency observed after VM_EN HIGH on the PMIC
+            // long-press OFF/ON path. Without retry, the first ReadPos
+            // (measured at around tick 140 on this hardware) typically
+            // lands inside the wake-up window and returns -1, causing
+            // the snap-suppress hold below to skip on exactly the path
+            // #121 Problem 1 targets. Budget: 5 attempts × 50 ms = 250 ms
+            // total per axis, well above the observed ~200 ms latency.
+            // This is distinct from the SCS0009 bus hang (#100), which a
+            // fixed retry budget cannot clear; in that case all attempts
+            // fail and the safe-fallback branch in Phase 2 below seeds
+            // pitch_motion_.current_deg with BOOT_INIT_PITCH_DEG to avoid
+            // an end-stop walk during the subsequent boot-init
+            // `WriteHeadAngles` interpolation.
+            // Loop form mirrors the `get_head_angles` MCP-tool retry below
+            // (set attempts to `i + 1` inside the loop so the final value
+            // equals the number of attempts actually made, even when all
+            // retries fail). The previous `for (attempts = 1; attempts <=
+            // MAX; ++attempts)` form left attempts at MAX+1 on failure
+            // and made the diagnostic log overstate the attempt count.
+            constexpr int BOOT_READPOS_MAX_ATTEMPTS = 5;
+            constexpr uint32_t BOOT_READPOS_RETRY_MS = 50;
+            int pitch_pos_actual = -1;
+            int pitch_attempts = 0;
+            for (int i = 0; i < BOOT_READPOS_MAX_ATTEMPTS; ++i) {
+                pitch_attempts = i + 1;
+                pitch_pos_actual = scs_bus_.ReadPos(SERVO_PITCH_ID);
+                if (pitch_pos_actual >= 0) break;
+                if (i + 1 < BOOT_READPOS_MAX_ATTEMPTS) {
+                    vTaskDelay(pdMS_TO_TICKS(BOOT_READPOS_RETRY_MS));
+                }
+            }
             if (pitch_pos_actual >= 0) {
                 // Bound the snap-suppress hold to the SAFE_PITCH_MIN..
                 // SAFE_PITCH_MAX range applied at every other pitch
@@ -1172,8 +1237,21 @@ private:
             }
 
             // Phase 1b: yaw second -- no analogous snap-into-end-stop
-            // failure mode, so timing is not critical.
-            int yaw_pos_actual = scs_bus_.ReadPos(SERVO_YAW_ID);
+            // failure mode, so timing is not critical. Retry budget
+            // matches pitch (Issue #138) for symmetry; in practice yaw
+            // typically succeeds on the first attempt because the pitch
+            // retries above have already consumed the SCS0009 startup-
+            // latency window on the shared bus.
+            int yaw_pos_actual = -1;
+            int yaw_attempts = 0;
+            for (int i = 0; i < BOOT_READPOS_MAX_ATTEMPTS; ++i) {
+                yaw_attempts = i + 1;
+                yaw_pos_actual = scs_bus_.ReadPos(SERVO_YAW_ID);
+                if (yaw_pos_actual >= 0) break;
+                if (i + 1 < BOOT_READPOS_MAX_ATTEMPTS) {
+                    vTaskDelay(pdMS_TO_TICKS(BOOT_READPOS_RETRY_MS));
+                }
+            }
             if (yaw_pos_actual >= 0) {
                 int yaw_hold_r = scs_bus_.WritePos(
                     SERVO_YAW_ID, yaw_pos_actual, 0, 0);
@@ -1187,8 +1265,10 @@ private:
             // intentionally; ServoTask has not been created yet, so no
             // `scs_bus_mutex_` contention is possible at this point.
             ESP_LOGI(TAG,
-                     "Boot pre-init ReadPos: yaw_raw=%d pitch_raw=%d tick=%u",
-                     yaw_pos_actual, pitch_pos_actual,
+                     "Boot pre-init ReadPos: yaw_raw=%d (attempts=%d) "
+                     "pitch_raw=%d (attempts=%d) tick=%u",
+                     yaw_pos_actual, yaw_attempts,
+                     pitch_pos_actual, pitch_attempts,
                      (unsigned)xTaskGetTickCount());
 
             // Phase 2: software-side current_deg restore. Order does not
@@ -1200,7 +1280,17 @@ private:
                 ESP_LOGI(TAG, "Restored yaw_motion_.current_deg=%d from ReadPos=%d",
                          yaw_motion_.current_deg, yaw_pos_actual);
             } else {
-                ESP_LOGW(TAG, "Failed to ReadPos(yaw); current_deg stays at 0");
+                // Issue #138: seed yaw current_deg to BOOT_INIT_YAW_DEG
+                // rather than leaving the struct default. The default
+                // happens to be 0 (== BOOT_INIT_YAW_DEG today), so this
+                // is a no-op assignment in current numerical terms; the
+                // explicit form keeps intent visible and propagates any
+                // future change to BOOT_INIT_YAW_DEG.
+                yaw_motion_.current_deg = BOOT_INIT_YAW_DEG;
+                ESP_LOGW(TAG,
+                         "Failed to ReadPos(yaw) after %d attempts; "
+                         "seeded current_deg=%d (BOOT_INIT_YAW_DEG)",
+                         BOOT_READPOS_MAX_ATTEMPTS, BOOT_INIT_YAW_DEG);
             }
             if (pitch_pos_actual >= 0) {
                 int restored_pitch = (pitch_pos_actual - 620) * 5 / 16;
@@ -1215,7 +1305,28 @@ private:
                 ESP_LOGI(TAG, "Restored pitch_motion_.current_deg=%d from ReadPos=%d (clamped to safe range %d..%d)",
                          pitch_motion_.current_deg, pitch_pos_actual, SAFE_PITCH_MIN, SAFE_PITCH_MAX);
             } else {
-                ESP_LOGW(TAG, "Failed to ReadPos(pitch); current_deg stays at 0");
+                // Issue #138: seed pitch current_deg to BOOT_INIT_PITCH_DEG.
+                // Without this, the boot-init `WriteHeadAngles(0, 45, 4000)`
+                // interpolation below would start from the struct-default
+                // `current_deg=0` (== pos=620 at deg=0, the lower mechanical
+                // end-stop) and walk WritePos calls upward (pos=620, 623,
+                // 626, ...) through end-stop-adjacent positions before
+                // reaching the target -- risking servo bus degradation if
+                // the SCS0009 wakes up mid-sequence. Seeding to
+                // BOOT_INIT_PITCH_DEG makes the subsequent interpolation a
+                // near-no-op (start_deg == target_deg == 45) which keeps
+                // the servo away from end-stop territory throughout the
+                // wake-up window. This is the firmware-side counterpart to
+                // the Phase 1a ReadPos retry: retry absorbs the typical
+                // wake-up case so the snap-suppress hold can fire; this
+                // seed handles the residual case where wake-up exceeds the
+                // retry budget or the bus is genuinely hung (#100).
+                pitch_motion_.current_deg = BOOT_INIT_PITCH_DEG;
+                ESP_LOGW(TAG,
+                         "Failed to ReadPos(pitch) after %d attempts; "
+                         "seeded current_deg=%d (BOOT_INIT_PITCH_DEG) "
+                         "to avoid end-stop walk during boot-init climb",
+                         BOOT_READPOS_MAX_ATTEMPTS, BOOT_INIT_PITCH_DEG);
             }
 
             BaseType_t ok = xTaskCreate(&StackChanBoard::ServoTaskTrampoline,
@@ -1257,20 +1368,12 @@ private:
             // Implements #99 Option C and the boot-init aspect of #100
             // direction E. Existing pitch guards (#80 / #98 / #109)
             // continue to apply unchanged.
-            constexpr int BOOT_INIT_YAW_DEG = 0;
-            constexpr int BOOT_INIT_PITCH_DEG = 45;
-            // Issue #121: at the original 1000 ms duration the
-            // post-power-on climb to 45° produced ~45°/s angular speed,
-            // perceived on-device as startling ("ブルンっ" + audible
-            // stress). Bumping the interpolated move to 4000 ms drops
-            // the effective rate to ~11°/s while keeping the motion
-            // monotonic through the existing `WriteHeadAngles` ->
-            // `servo_motion` task path. The 100 ms post-settle margin
-            // is unchanged. This is the cheap fix for #121 Problem 2;
-            // the separate "unintended downward drop on power-on"
-            // (#121 Problem 1 / hypotheses 1-3) still requires a
-            // root-cause investigation tracked separately.
-            constexpr uint32_t BOOT_INIT_MOVE_MS = 4000;
+            // BOOT_INIT_YAW_DEG / BOOT_INIT_PITCH_DEG / BOOT_INIT_MOVE_MS
+            // are class-level static constexpr; see the comment block at
+            // their declaration above the YawDegToPos helper for the full
+            // rationale (Issue #115 target pose, Issue #121 Problem 2
+            // slower climb, Issue #138 promotion to class scope for the
+            // safe-fallback seed in Phase 2 above).
             TickType_t boot_init_start_tick = xTaskGetTickCount();
             WriteHeadAngles(BOOT_INIT_YAW_DEG, BOOT_INIT_PITCH_DEG, BOOT_INIT_MOVE_MS);
             vTaskDelay(pdMS_TO_TICKS(BOOT_INIT_MOVE_MS + 100));
