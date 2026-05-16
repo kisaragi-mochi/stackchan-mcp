@@ -143,7 +143,7 @@ bool WebsocketProtocol::SendText(const std::string& text) {
 }
 
 bool WebsocketProtocol::IsAudioChannelOpened() const {
-    return websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
+    return audio_channel_open_.load() && websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
 }
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
@@ -160,6 +160,7 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     // By skipping the teardown and directly invoking the closed callback,
     // the app transitions back to idle while the WebSocket stays connected
     // for continued MCP control.
+    audio_channel_open_.store(false);
     ESP_LOGI(TAG, "CloseAudioChannel: keeping WebSocket alive for MCP");
     if (on_audio_channel_closed_ != nullptr) {
         on_audio_channel_closed_();
@@ -177,6 +178,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
     // nor any deferred reconnect job triggers a spurious reconnect; the
     // new socket below installs a fresh token of its own and clears
     // intentional_close_ once the server hello has been acked.
+    audio_channel_open_.store(false);
     intentional_close_.store(true);
     if (current_notify_disconnect_) {
         current_notify_disconnect_->store(false);
@@ -311,6 +313,12 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
 
         websocket_->OnData([this, notify_disconnect](const char* data, size_t len, bool binary) {
             if (binary) {
+                // Drop inbound audio when the audio channel is logically
+                // closed. Without this guard, a late TTS frame from the
+                // previous session could resurrect kDeviceStateSpeaking.
+                if (!audio_channel_open_.load()) {
+                    return;
+                }
                 if (on_incoming_audio_ != nullptr) {
                     if (version_ == 2) {
                         BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
@@ -352,6 +360,14 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
                 if (cJSON_IsString(type)) {
                     if (strcmp(type->valuestring, "hello") == 0) {
                         ParseServerHello(root, notify_disconnect);
+                    } else if (!audio_channel_open_.load() &&
+                               (strcmp(type->valuestring, "tts") == 0 ||
+                                strcmp(type->valuestring, "listen") == 0)) {
+                        // Drop audio-session JSON (tts.*, listen.*) when
+                        // the channel is logically closed. A late tts.start
+                        // from the previous session would otherwise
+                        // schedule kDeviceStateSpeaking against intent.
+                        ESP_LOGD(TAG, "Dropping %s message (audio channel closed)", type->valuestring);
                     } else {
                         if (on_incoming_json_ != nullptr) {
                             on_incoming_json_(root);
@@ -366,15 +382,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
         });
 
         websocket_->OnDisconnected([this, notify_disconnect]() {
-            // notify_disconnect carries this socket's reconnect intent.
-            // ParseServerHello() flips it to true the moment the server
-            // hello arrives; an intentional teardown (CloseAudioChannel,
-            // OpenAudioChannelInternal prologue, or destructor) flips it
-            // back to false synchronously before invoking
-            // websocket_.reset(). A `false` reading here therefore means
-            // either the candidate failed before server hello or the
-            // firmware is tearing the socket down on purpose — neither
-            // case should schedule a reconnect.
+            audio_channel_open_.store(false);
             if (!notify_disconnect->load()) {
                 ESP_LOGI(TAG, "Websocket disconnected (no reconnect: candidate failed or intentional close)");
                 return;
@@ -569,6 +577,7 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
     // Reusing this protocol from a context that drives CloseAudioChannel
     // from a separate task would invalidate that assumption and would
     // also need a different mirror strategy (e.g. atomic_shared_ptr).
+    audio_channel_open_.store(true);
     intentional_close_.store(false);
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 }

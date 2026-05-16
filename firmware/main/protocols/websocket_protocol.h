@@ -57,6 +57,14 @@ private:
     // own esp_timer_stop() does not cancel work the timer has already
     // re-posted via Application::Schedule).
     std::atomic<bool> intentional_close_ = false;
+    // Logical audio-channel state, independent of the physical WebSocket
+    // connection. Set to true after a successful server hello exchange
+    // (ParseServerHello), set to false in CloseAudioChannel() and
+    // OnDisconnected(). IsAudioChannelOpened() checks this flag instead
+    // of the raw socket state so that keeping the WebSocket alive for
+    // MCP control does not make callers (ToggleChatState,
+    // CanEnterSleepMode) believe an audio session is still active.
+    std::atomic<bool> audio_channel_open_ = false;
     int reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
     int version_ = 1;
 
