@@ -32,6 +32,17 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Added [`smooth_ui_toolkit`](https://github.com/Forairaaaaa/smooth_ui_toolkit)
+  v2.12.0 (MIT, Copyright (c) 2023 Forairaaaaa) as a git-submodule
+  ESP-IDF component dependency under
+  `firmware/components/smooth_ui_toolkit/`, wired into the main
+  component via `PRIV_REQUIRES`. No source-level consumer yet; this
+  stages the dependency for the upcoming motion-subsystem migration
+  tracked in
+  [#152](https://github.com/kisaragi-mochi/stackchan-mcp/issues/152)
+  (Phase 1). Contributors building from source must run
+  `git submodule update --init --recursive` after pulling.
+
 - Added a `MotionDriver` abstraction for StackChan servo motion and an
   opt-in `CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION` path that delegates
   move timing to the SCS0009 via single-shot `WritePos(..., time, 0)`

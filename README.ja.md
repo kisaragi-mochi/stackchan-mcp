@@ -95,6 +95,15 @@ ESP-IDF や Docker のセットアップは不要。
 
 #### オプション B: ソースから Docker でビルド（コントリビュータ向け）
 
+このリポジトリは `firmware/components/` 配下に git submodule を使っています。
+`--recursive` を付けずに clone した場合は、先に初期化してください:
+
+```bash
+git submodule update --init --recursive
+```
+
+その後ビルド:
+
 ```bash
 cd firmware
 docker run --rm --cpus=4 --ulimit nofile=65536:65536 \
