@@ -32,6 +32,17 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Refactored `ServoDelegatedMotionDriver` (opt-in via
+  `CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION=y`) so that bus dispatch
+  and `ReadMove` polling happen per-axis under a short-hold
+  `scs_bus_mutex_`, removing the bundled two-axis critical section.
+  This eliminates the necessary side of the residual hang trigger
+  documented in PR #146 (two-axis simultaneous dispatch combined with
+  pitch end-stop proximity or cumulative load). Internal `AxisServo`
+  private nested class introduced; public `MotionDriver` interface
+  unchanged. `HostInterpolationMotionDriver` (default Kconfig path)
+  is byte-equivalent. (#152 Phase 2)
+
 - Added [`smooth_ui_toolkit`](https://github.com/Forairaaaaa/smooth_ui_toolkit)
   v2.12.0 (MIT, Copyright (c) 2023 Forairaaaaa) as a git-submodule
   ESP-IDF component dependency under
