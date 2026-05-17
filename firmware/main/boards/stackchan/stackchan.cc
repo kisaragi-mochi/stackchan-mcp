@@ -3996,6 +3996,120 @@ private:
                 return result;
             });
 
+        mcp_server.AddTool(
+            "self.robot.set_servo_torque",
+            "Enable or disable SCS0009 servo torque on the yaw / pitch axes "
+            "independently. Disabling torque stops motor current on that axis; "
+            "the head holds via static friction (no motion is commanded). "
+            "On disable, the corresponding axis's MotionDriver state is reset "
+            "(moving=false, position_unknown=true, request token invalidated) "
+            "so a stale interpolation cannot resume on the bus and a "
+            "subsequent same-target set_head_angles is re-dispatched rather "
+            "than no-op-optimized. Re-enabling torque does NOT trigger a "
+            "move -- the next set_head_angles or wobble call will. Returns "
+            "the per-axis bus return codes. Diagnostic / power-management "
+            "primitive; auto release on idle is tracked separately under "
+            "#152 Phase 4.",
+            PropertyList({Property("yaw_enabled", kPropertyTypeBoolean),
+                          Property("pitch_enabled", kPropertyTypeBoolean)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                bool yaw_enabled = properties["yaw_enabled"].value<bool>();
+                bool pitch_enabled = properties["pitch_enabled"].value<bool>();
+
+                // Cancel MotionDriver state for any axis whose torque is
+                // being disabled BEFORE issuing the EnableTorque bus
+                // frame. Without this ordering, ServoTask could snapshot
+                // motion state while moving=true, wait on scs_bus_mutex_
+                // through our EnableTorque(OFF), then fire one stale
+                // WritePos on the freshly-disabled axis right after we
+                // release scs_bus_mutex_ (silently absorbed while torque
+                // is off, then resuming audibly when torque comes back).
+                // Performing the cancellation first lets the next Tick
+                // observe moving=false / a fresh request_token before it
+                // commits any WritePos. position_unknown forces the
+                // delegated path to re-dispatch the next move
+                // (HostInterpolation ignores the flag, but the
+                // moving=false + token bump already block resumption
+                // there). Re-enable is treated as a user-driven re-
+                // anchor: the caller is expected to use get_head_angles
+                // + set_head_angles to re-establish a verified position
+                // if needed.
+                //
+                // Known carve-out (#160): on the delegated path,
+                // ServoDelegatedMotionDriver does not override
+                // InvalidateAxisToken, and the per-axis AxisServo private
+                // pending_dispatch_ / retry-state is not cleared by this
+                // path. A subsequent Update() tick can therefore still
+                // re-stage a WritePos on the freshly-disabled axis from
+                // pending state captured before this call. Full
+                // delegated-path cancellation requires the same refactor
+                // tracked under #160 and is out of scope for this probe.
+                if (motion_driver_ != nullptr && motion_mutex_ != nullptr &&
+                    (!yaw_enabled || !pitch_enabled)) {
+                    xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+                    if (!yaw_enabled) {
+                        yaw_motion_.moving = false;
+                        yaw_motion_.position_unknown = true;
+                        motion_driver_->InvalidateAxisToken(SERVO_YAW_ID);
+                    }
+                    if (!pitch_enabled) {
+                        pitch_motion_.moving = false;
+                        pitch_motion_.position_unknown = true;
+                        motion_driver_->InvalidateAxisToken(SERVO_PITCH_ID);
+                    }
+                    // Also cancel any in-flight servo wobble sequence.
+                    // Wobble drives both axes through ServoTaskMain's
+                    // ServoWobbleStepAdvance after Tick; without
+                    // clearing the active flag here, the next tick
+                    // would observe moving==false and stage the next
+                    // wobble StartMove with torque off, enqueuing fresh
+                    // WritePos targets that would run on re-enable.
+                    // Mirrors the wobble-cancel sequence in
+                    // WriteHeadAngles.
+                    servo_wobble_active_.store(false);
+                    servo_wobble_step_.store(0);
+                    xSemaphoreGive(motion_mutex_);
+                }
+
+                int r_yaw = -1;
+                int r_pitch = -1;
+                if (servo_ok_ && scs_bus_mutex_ != nullptr) {
+                    xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
+                    r_yaw = scs_bus_.EnableTorque(SERVO_YAW_ID,
+                                                  yaw_enabled ? 1 : 0);
+                    r_pitch = scs_bus_.EnableTorque(SERVO_PITCH_ID,
+                                                    pitch_enabled ? 1 : 0);
+                    xSemaphoreGive(scs_bus_mutex_);
+                }
+
+#if CONFIG_STACKCHAN_SERVO_FEETECH
+                bool yaw_ok = (r_yaw == 0);
+                bool pitch_ok = (r_pitch == 0);
+#else
+                bool yaw_ok = (r_yaw > 0);
+                bool pitch_ok = (r_pitch > 0);
+#endif
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "yaw_enabled", yaw_enabled);
+                cJSON_AddBoolToObject(root, "pitch_enabled", pitch_enabled);
+                cJSON_AddNumberToObject(root, "yaw_bus_return", r_yaw);
+                cJSON_AddNumberToObject(root, "pitch_bus_return", r_pitch);
+                cJSON_AddBoolToObject(root, "servo_ok", servo_ok_);
+                cJSON_AddBoolToObject(root, "ok", servo_ok_ && yaw_ok && pitch_ok);
+                if (!servo_ok_) {
+                    cJSON_AddStringToObject(root, "error",
+                                            "Servo bus not initialized.");
+                }
+                ESP_LOGI(TAG,
+                         "set_servo_torque: servo_ok=%d yaw_enabled=%d (r=%d) "
+                         "pitch_enabled=%d (r=%d)",
+                         servo_ok_ ? 1 : 0,
+                         (int)yaw_enabled, r_yaw,
+                         (int)pitch_enabled, r_pitch);
+                return root;
+            });
+
         // Diagnostic: toggle GPIO6 (servo TX) HIGH/LOW to verify physical signal
         mcp_server.AddTool(
             "self.robot.gpio_test",

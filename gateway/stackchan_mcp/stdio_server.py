@@ -297,6 +297,44 @@ def create_server() -> Server:
                 },
             ),
             Tool(
+                name="set_servo_torque",
+                description=(
+                    "Enable or disable SCS0009 servo torque on the yaw / "
+                    "pitch axes independently. Disabling torque stops motor "
+                    "current on that axis; the head holds via static "
+                    "friction (no motion is commanded). On disable, the "
+                    "firmware also cancels any in-flight MotionDriver "
+                    "interpolation and marks the axis position unknown so "
+                    "a subsequent same-target set_head_angles is re-"
+                    "dispatched rather than no-op-optimized. Re-enabling "
+                    "torque does NOT trigger a move; the next "
+                    "set_head_angles or wobble call will. Diagnostic / "
+                    "power-management primitive used to observe physical "
+                    "head behavior under torque-off (Issue #163; auto "
+                    "release on idle is Issue #152 Phase 4)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "yaw_enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True to enable yaw axis torque, false to "
+                                "disable."
+                            ),
+                        },
+                        "pitch_enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True to enable pitch axis torque, false "
+                                "to disable."
+                            ),
+                        },
+                    },
+                    "required": ["yaw_enabled", "pitch_enabled"],
+                },
+            ),
+            Tool(
                 name="get_touch_state",
                 description=(
                     "Read the head-touch (Si12T) sensor state and the most recent "
@@ -675,6 +713,10 @@ def create_server() -> Server:
             ),
             "set_blink": (
                 "self.display.set_blink",
+                arguments,
+            ),
+            "set_servo_torque": (
+                "self.robot.set_servo_torque",
                 arguments,
             ),
             "get_touch_state": (
