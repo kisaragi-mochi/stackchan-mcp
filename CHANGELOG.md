@@ -32,6 +32,29 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Added a post-init `ReadPos` re-sync step ("Phase 0'") to
+  `InitializeServo()` that re-reads the SCS0009 actual position after
+  the boot-init `WriteHeadAngles` interpolation completes and
+  overwrites `pitch_motion_.current_deg` / `yaw_motion_.current_deg`
+  with the actual physical position. This eliminates the firmware-side
+  / SCS0009-actual mismatch that the #138 safe-fallback intentionally
+  leaves behind on the PMIC long-press OFF / ON boot path, where
+  Phase 0's `WriteHeadAngles(0, 45, ...)` is a no-op of effect because
+  `current_deg` was seeded equal to the target. Without Phase 0',
+  `move_head(0, 45)` immediately after such a boot returned
+  `pitch_motion_started: 0` (firmware sees `current_deg == target`, no
+  interpolation starts), and `get_head_angles` returned the actual
+  position (e.g. 38°) — a contradictory observation hard to attribute
+  correctly without firmware-internals knowledge. Phase 0 is also now
+  distance-aware: its duration is computed from the actual
+  `current_deg → BOOT_INIT_*_DEG` delta at a new
+  `BOOT_INIT_TARGET_DEG_PER_SEC = 15 °/s` cap, floored at
+  `BOOT_INIT_MOVE_MS = 3000 ms` to keep the SCS0009 wake-up latency
+  window covered. New `BOOT_INIT_TARGET_DEG_PER_SEC` constant is
+  additive; existing `BOOT_INIT_YAW_DEG=0` / `BOOT_INIT_PITCH_DEG=45`
+  semantics preserved. Closes
+  [#141](https://github.com/kisaragi-mochi/stackchan-mcp/issues/141).
+
 - Refactored `ServoDelegatedMotionDriver` (opt-in via
   `CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION=y`) so that bus dispatch
   and `ReadMove` polling happen per-axis under a short-hold
