@@ -36,9 +36,27 @@ change is called out under a `Firmware` subsection of the release entry.
   opt-in `CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION` path that delegates
   move timing to the SCS0009 via single-shot `WritePos(..., time, 0)`
   commands plus `ReadMove()` polling, while keeping the existing
-  host-interpolation path as the default fallback. The MCP tool surface
-  is unchanged; this prepares real-device validation of the delegated
-  path for
+  host-interpolation path as the default fallback (default `n`). The
+  MCP tool surface is unchanged. Real-device verification on
+  M5Stack CoreS3 + SCS0009 ×2 shows the delegated path substantially
+  mitigates the bus-hang surface historically tracked under
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100):
+  single-axis large-angle reversals, two-axis moves with mid-range
+  pitch from a clean state, and pitch-only large-angle reversals
+  (including end-stop proximity) all complete cleanly. A residual hang
+  trigger requiring two-axis simultaneous dispatch combined with either
+  pitch end-stop proximity or cumulative session load remains;
+  mitigations are split to
+  [#147](https://github.com/kisaragi-mochi/stackchan-mcp/issues/147) /
+  [#148](https://github.com/kisaragi-mochi/stackchan-mcp/issues/148) /
+  [#149](https://github.com/kisaragi-mochi/stackchan-mcp/issues/149).
+  A related boot-init `current_deg` mismatch corner case after PMIC
+  OFF/ON is tracked under
+  [#150](https://github.com/kisaragi-mochi/stackchan-mcp/issues/150).
+  Default flip is deferred to a subsequent release after these
+  mitigations land. The `position_unknown` sentinel detects and reports
+  any residual trip on the firmware side; recovery still requires
+  PMIC OFF/ON. Refs
   [#143](https://github.com/kisaragi-mochi/stackchan-mcp/issues/143).
 
 - Fixed user-configured WebSocket gateway URLs (e.g.
