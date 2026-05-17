@@ -29,6 +29,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #endif
 #include "avatar_images.h"
 
+#include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <driver/gpio.h>
@@ -45,6 +46,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <cJSON.h>
 #include <lvgl.h>
 #include <atomic>
+#include <cmath>
 #include <limits>
 #include <memory>
 #include <string>
@@ -833,6 +835,45 @@ private:
         return static_cast<uint16_t>(v);
     }
 
+    // Map the StartMove duration contract to spring options that approximate
+    // the requested timing. This is the stackchan-mcp side of
+    // m5stack/StackChan's map_speed_to_spring_options(speed): shorter
+    // duration -> higher stiffness/damping, longer duration -> lower
+    // stiffness/damping, with critical damping for no overshoot.
+    static smooth_ui_toolkit::SpringOptions_t MapDurationToSpringOptions(
+        uint32_t duration_ms) {
+        if (duration_ms == 0) {
+            duration_ms = 1;
+        }
+
+        float speed_f = 500.0f *
+            (static_cast<float>(MOTION_DEFAULT_DURATION_MS) /
+             static_cast<float>(duration_ms));
+        if (speed_f < 1.0f) speed_f = 1.0f;
+        if (speed_f > 1000.0f) speed_f = 1000.0f;
+        int speed = static_cast<int>(speed_f);
+
+        constexpr float kMin = 10.0f;
+        constexpr float kMax = 650.0f;
+        constexpr float kMass = 1.0f;
+        float normalized_speed = static_cast<float>(speed) / 1000.0f;
+        float stiffness =
+            kMin + (normalized_speed * normalized_speed) * (kMax - kMin);
+        float damping = 2.0f * std::sqrt(kMass * stiffness);
+
+        smooth_ui_toolkit::SpringOptions_t options;
+        options.stiffness = stiffness;
+        options.damping = damping;
+        options.mass = kMass;
+        options.velocity = 0.0f;
+        options.restDelta = speed > 800 ? 0.5f : 0.1f;
+        options.restSpeed = speed > 800 ? 0.5f : 0.1f;
+        options.duration = 0.0f;
+        options.bounce = 0.0f;
+        options.visualDuration = 0.0f;
+        return options;
+    }
+
     class MotionDriver {
     public:
         virtual ~MotionDriver() = default;
@@ -869,10 +910,15 @@ private:
               scs_bus_mutex_(scs_bus_mutex),
               motion_mutex_(motion_mutex),
               yaw_motion_(yaw_motion),
-              pitch_motion_(pitch_motion) {}
+              pitch_motion_(pitch_motion) {
+            yaw_anim_.teleport(static_cast<float>(yaw_motion_.current_deg));
+            pitch_anim_.teleport(static_cast<float>(pitch_motion_.current_deg));
+        }
 
         void StartMove(float yaw_deg, float pitch_deg,
                        uint32_t duration_ms) override {
+            smooth_ui_toolkit::SpringOptions_t spring_options =
+                MapDurationToSpringOptions(duration_ms);
             uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
             int yaw = static_cast<int>(yaw_deg);
             int pitch = static_cast<int>(pitch_deg);
@@ -882,12 +928,18 @@ private:
             yaw_motion_.move_start_ms = now_ms;
             yaw_motion_.move_duration_ms = duration_ms;
             yaw_motion_.moving = (yaw_motion_.target_deg != yaw_motion_.current_deg);
+            StartAxisSpring(yaw_anim_, yaw_snap_on_rest_,
+                            yaw_motion_.current_deg, yaw,
+                            yaw_motion_.moving, spring_options);
 
             pitch_motion_.target_deg = pitch;
             pitch_motion_.start_deg = pitch_motion_.current_deg;
             pitch_motion_.move_start_ms = now_ms;
             pitch_motion_.move_duration_ms = duration_ms;
             pitch_motion_.moving = (pitch_motion_.target_deg != pitch_motion_.current_deg);
+            StartAxisSpring(pitch_anim_, pitch_snap_on_rest_,
+                            pitch_motion_.current_deg, pitch,
+                            pitch_motion_.moving, spring_options);
         }
 
         float GetYawDeg() const override {
@@ -918,42 +970,26 @@ private:
 
             AxisMotion yaw_local;
             AxisMotion pitch_local;
+            int new_yaw_current;
+            bool new_yaw_moving;
+            int new_pitch_current;
+            bool new_pitch_moving;
             xSemaphoreTake(motion_mutex_, portMAX_DELAY);
             yaw_local = yaw_motion_;
             pitch_local = pitch_motion_;
+            if (!yaw_local.moving && !pitch_local.moving) {
+                xSemaphoreGive(motion_mutex_);
+                return;
+            }
+            new_yaw_current = yaw_local.current_deg;
+            new_yaw_moving = yaw_local.moving;
+            AdvanceAxisSpring(yaw_local, yaw_anim_, yaw_snap_on_rest_,
+                              new_yaw_current, new_yaw_moving);
+            new_pitch_current = pitch_local.current_deg;
+            new_pitch_moving = pitch_local.moving;
+            AdvanceAxisSpring(pitch_local, pitch_anim_, pitch_snap_on_rest_,
+                              new_pitch_current, new_pitch_moving);
             xSemaphoreGive(motion_mutex_);
-
-            if (!yaw_local.moving && !pitch_local.moving) return;
-
-            uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-
-            int new_yaw_current = yaw_local.current_deg;
-            bool new_yaw_moving = yaw_local.moving;
-            if (yaw_local.moving) {
-                uint32_t elapsed = now_ms - yaw_local.move_start_ms;
-                if (elapsed >= yaw_local.move_duration_ms) {
-                    new_yaw_current = yaw_local.target_deg;
-                    new_yaw_moving = false;
-                } else {
-                    int delta = yaw_local.target_deg - yaw_local.start_deg;
-                    new_yaw_current = yaw_local.start_deg +
-                        static_cast<int>(static_cast<int64_t>(delta) * elapsed / yaw_local.move_duration_ms);
-                }
-            }
-
-            int new_pitch_current = pitch_local.current_deg;
-            bool new_pitch_moving = pitch_local.moving;
-            if (pitch_local.moving) {
-                uint32_t elapsed = now_ms - pitch_local.move_start_ms;
-                if (elapsed >= pitch_local.move_duration_ms) {
-                    new_pitch_current = pitch_local.target_deg;
-                    new_pitch_moving = false;
-                } else {
-                    int delta = pitch_local.target_deg - pitch_local.start_deg;
-                    new_pitch_current = pitch_local.start_deg +
-                        static_cast<int>(static_cast<int64_t>(delta) * elapsed / pitch_local.move_duration_ms);
-                }
-            }
 
             xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
             if (yaw_local.moving) {
@@ -994,11 +1030,56 @@ private:
         }
 
     private:
+        static void StartAxisSpring(
+            smooth_ui_toolkit::AnimateValue& axis_anim,
+            bool& snap_on_rest,
+            int current_deg,
+            int target_deg,
+            bool moving,
+            const smooth_ui_toolkit::SpringOptions_t& spring_options) {
+            if (!moving) {
+                axis_anim.teleport(static_cast<float>(current_deg));
+                snap_on_rest = false;
+                return;
+            }
+
+            axis_anim.springOptions() = spring_options;
+            axis_anim.teleport(static_cast<float>(current_deg));
+            axis_anim = static_cast<float>(target_deg);
+            snap_on_rest = true;
+        }
+
+        static void AdvanceAxisSpring(
+            const AxisMotion& axis_local,
+            smooth_ui_toolkit::AnimateValue& axis_anim,
+            bool& snap_on_rest,
+            int& new_current_deg,
+            bool& new_moving) {
+            if (!axis_local.moving) {
+                return;
+            }
+
+            axis_anim.updateWithDelta(
+                static_cast<float>(MOTION_TICK_MS) / 1000.0f);
+            new_current_deg = static_cast<int>(axis_anim.directValue());
+            if (axis_anim.done()) {
+                new_moving = false;
+                if (snap_on_rest) {
+                    new_current_deg = static_cast<int>(axis_anim.end);
+                    snap_on_rest = false;
+                }
+            }
+        }
+
         ScsBus& scs_bus_;
         SemaphoreHandle_t& scs_bus_mutex_;
         SemaphoreHandle_t& motion_mutex_;
         AxisMotion& yaw_motion_;
         AxisMotion& pitch_motion_;
+        smooth_ui_toolkit::AnimateValue yaw_anim_;
+        smooth_ui_toolkit::AnimateValue pitch_anim_;
+        bool yaw_snap_on_rest_ = false;
+        bool pitch_snap_on_rest_ = false;
     };
 
     class ServoDelegatedMotionDriver final : public MotionDriver {

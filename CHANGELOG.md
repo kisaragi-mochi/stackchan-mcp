@@ -32,6 +32,15 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- #152 Phase 3 — replaced `HostInterpolationMotionDriver` linear
+  interpolation with `smooth_ui_toolkit` spring physics (`AnimateValue`
+  per axis, m5stack/StackChan-equivalent default spring, and
+  `duration_ms`-driven stiffness/damping mapping). The default
+  `CONFIG_STACKCHAN_SERVO_FEETECH=y` path now uses natural-spring
+  host-side interpolation; the
+  `CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION=y` opt-in path is unchanged
+  from Phase 2 / PR #154.
+
 - Added a post-init `ReadPos` re-sync step ("Phase 0'") to
   `InitializeServo()` that re-reads the SCS0009 actual position after
   the boot-init `WriteHeadAngles` interpolation completes and
