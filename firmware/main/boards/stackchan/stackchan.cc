@@ -898,6 +898,15 @@ private:
         // Optional hooks for drivers that need setup or shutdown.
         virtual bool Initialize() { return true; }
         virtual void Shutdown() {}
+
+        // Invalidate the freshness token for one axis. Used by board-
+        // level code that mutates AxisMotion fields directly outside
+        // StartMove (currently only InitializeServo's Phase 0' post-
+        // init ReadPos re-sync). Caller must hold motion_mutex_.
+        // Drivers without a token-based freshness guard treat this as
+        // a no-op (default implementation). Argument is SERVO_YAW_ID
+        // or SERVO_PITCH_ID; unknown values are ignored.
+        virtual void InvalidateAxisToken(int /*axis_id*/) {}
     };
 
     class HostInterpolationMotionDriver final : public MotionDriver {
@@ -911,7 +920,8 @@ private:
               scs_bus_mutex_(scs_bus_mutex),
               motion_mutex_(motion_mutex),
               yaw_motion_(yaw_motion),
-              pitch_motion_(pitch_motion) {
+              pitch_motion_(pitch_motion),
+              next_request_token_(0) {
             yaw_anim_.teleport(static_cast<float>(yaw_motion_.current_deg));
             pitch_anim_.teleport(static_cast<float>(pitch_motion_.current_deg));
         }
@@ -923,6 +933,7 @@ private:
             int yaw = static_cast<int>(yaw_deg);
             int pitch = static_cast<int>(pitch_deg);
 
+            yaw_motion_.request_token = ++next_request_token_;
             yaw_motion_.target_deg = yaw;
             yaw_motion_.start_deg = yaw_motion_.current_deg;
             yaw_motion_.move_start_ms = now_ms;
@@ -930,6 +941,7 @@ private:
             yaw_motion_.moving = (yaw_motion_.target_deg != yaw_motion_.current_deg);
             yaw_linear_mode_ = prefer_linear;
 
+            pitch_motion_.request_token = ++next_request_token_;
             pitch_motion_.target_deg = pitch;
             pitch_motion_.start_deg = pitch_motion_.current_deg;
             pitch_motion_.move_start_ms = now_ms;
@@ -1033,6 +1045,17 @@ private:
             }
             xSemaphoreGive(motion_mutex_);
 
+            // Known carve-out (#161): motion_mutex_ is released here
+            // and re-acquired after the WritePos block. If StartMove
+            // or InvalidateAxisToken (Phase 0') fires inside this
+            // release window, the WritePos calls below still send a
+            // stale interpolation step on the bus. The post-bus
+            // request_token guard below then correctly skips the
+            // current_deg / moving commit, but the physical
+            // intermediate position has already been issued. The
+            // pre-PR move_start_ms guard had the same surface; this
+            // PR does not regress that behavior. Closing the pre-bus
+            // gate is tracked separately under #161.
             xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
             if (yaw_local.moving) {
                 int yaw_pos = YawDegToPos(new_yaw_current);
@@ -1054,21 +1077,35 @@ private:
             xSemaphoreGive(scs_bus_mutex_);
 
             xSemaphoreTake(motion_mutex_, portMAX_DELAY);
-            if (yaw_motion_.move_start_ms == yaw_local.move_start_ms) {
+            if (yaw_motion_.request_token == yaw_local.request_token) {
                 yaw_motion_.current_deg = new_yaw_current;
             }
             if (!new_yaw_moving && yaw_motion_.target_deg == yaw_local.target_deg
-                && yaw_motion_.move_start_ms == yaw_local.move_start_ms) {
+                && yaw_motion_.request_token == yaw_local.request_token) {
                 yaw_motion_.moving = false;
             }
-            if (pitch_motion_.move_start_ms == pitch_local.move_start_ms) {
+            if (pitch_motion_.request_token == pitch_local.request_token) {
                 pitch_motion_.current_deg = new_pitch_current;
             }
             if (!new_pitch_moving && pitch_motion_.target_deg == pitch_local.target_deg
-                && pitch_motion_.move_start_ms == pitch_local.move_start_ms) {
+                && pitch_motion_.request_token == pitch_local.request_token) {
                 pitch_motion_.moving = false;
             }
             xSemaphoreGive(motion_mutex_);
+        }
+
+        // Bump the request token for the specified axis. Used by
+        // InitializeServo's Phase 0' re-sync so a Tick() snapshot
+        // taken before the re-sync no longer passes the post-bus
+        // freshness guard (which would otherwise overwrite the just-
+        // re-synced current_deg / moving state). Caller must hold
+        // motion_mutex_; this method does not take it.
+        void InvalidateAxisToken(int axis_id) override {
+            if (axis_id == SERVO_YAW_ID) {
+                yaw_motion_.request_token = ++next_request_token_;
+            } else if (axis_id == SERVO_PITCH_ID) {
+                pitch_motion_.request_token = ++next_request_token_;
+            }
         }
 
     private:
@@ -1144,6 +1181,29 @@ private:
         SemaphoreHandle_t& motion_mutex_;
         AxisMotion& yaw_motion_;
         AxisMotion& pitch_motion_;
+        // Monotonically increasing request id. Each StartMove increments
+        // this and writes the new value into yaw_motion_.request_token
+        // and pitch_motion_.request_token. Tick() snapshots both fields
+        // with the rest of AxisMotion and uses request_token equality
+        // (rather than move_start_ms, which only has ms resolution) to
+        // detect whether a snapshot is still the live request.
+        // InvalidateAxisToken() also bumps this counter for board-level
+        // direct AxisMotion resets that do not go through StartMove
+        // (currently only InitializeServo's Phase 0' post-init ReadPos
+        // re-sync); without that bump, a Tick() snapshot taken before
+        // such a reset would pass the post-bus freshness guard and
+        // overwrite the just-reset state. motion_mutex_ guards this
+        // counter. Canonicalizing the board ↔ driver token-invalidation
+        // boundary (e.g. moving the counter onto the board, or adding
+        // a dedicated MotionDriver override-position API) is tracked
+        // as a design improvement under #160. A separate carve-out
+        // (the pre-bus stale-WritePos race: Tick releases motion_mutex_
+        // before scs_bus_mutex_, so a StartMove / Phase 0' re-sync that
+        // lands in that release window still leaks one physical
+        // WritePos to the bus even though the post-bus commit guard
+        // here correctly rejects the AxisMotion write-back) is tracked
+        // under #161.
+        uint64_t next_request_token_ = 0;
         smooth_ui_toolkit::AnimateValue yaw_anim_;
         smooth_ui_toolkit::AnimateValue pitch_anim_;
         bool yaw_snap_on_rest_ = false;
@@ -1289,6 +1349,24 @@ private:
             yaw_axis_.Update();
             pitch_axis_.Update();
         }
+
+        // Intentionally does NOT override MotionDriver::InvalidateAxisToken.
+        // Bumping AxisMotion::request_token alone is not a sufficient
+        // cancellation boundary for the delegated path: AxisServo
+        // tracks per-axis dispatch state (pending_dispatch_, retry
+        // counters, ReadMove poll cursors) in driver-private fields
+        // that survive a Phase 0' direct AxisMotion reset, and a
+        // subsequent Update() tick could re-stage a WritePos for the
+        // freshly-reset axis even though the AxisMotion fields look
+        // clean. A full Phase 0' cancellation boundary (atomic token
+        // bump + pending_dispatch_ clear + retry-state reset) requires
+        // a larger refactor of the AxisServo state machine and is
+        // tracked separately as a design improvement under #160.
+        //
+        // Falling back to the MotionDriver base default no-op here is
+        // safe: the delegated path's Phase 0' race exists since
+        // PR #154 and this PR does not widen it. The previous behavior
+        // is preserved verbatim for this driver.
 
     private:
         static constexpr int kReadMoveFailureLimit = 5;
@@ -2534,6 +2612,16 @@ private:
                     yaw_motion_.moving = false;
                     yaw_motion_.move_start_ms =
                         (uint32_t)(boot_init_end_tick * portTICK_PERIOD_MS);
+                    // Bump the driver's request_token so any Tick()
+                    // snapshot taken before this re-sync no longer
+                    // passes the post-bus freshness guard and does
+                    // not overwrite the just-re-synced state. On the
+                    // HostInterpolation path this is a full
+                    // cancellation boundary. On the delegated path
+                    // this is a no-op (the override is intentionally
+                    // omitted; see ServoDelegatedMotionDriver and
+                    // #160 for the carved-out follow-up).
+                    motion_driver_->InvalidateAxisToken(SERVO_YAW_ID);
                     xSemaphoreGive(motion_mutex_);
                     ESP_LOGI(TAG,
                              "Phase 0' yaw re-sync: current_deg %d -> %d "
@@ -2553,6 +2641,10 @@ private:
                 // dispatches a fresh interpolation as before.
                 xSemaphoreTake(motion_mutex_, portMAX_DELAY);
                 yaw_motion_.position_unknown = true;
+                // Token bump covers the position_unknown mutation on
+                // the HostInterpolation path (same rationale as the
+                // success branch above); no-op on the delegated path.
+                motion_driver_->InvalidateAxisToken(SERVO_YAW_ID);
                 xSemaphoreGive(motion_mutex_);
                 ESP_LOGW(TAG,
                          "Phase 0' yaw re-sync skipped: ReadPos failed; "
@@ -2572,6 +2664,11 @@ private:
                     pitch_motion_.moving = false;
                     pitch_motion_.move_start_ms =
                         (uint32_t)(boot_init_end_tick * portTICK_PERIOD_MS);
+                    // Bump the driver's request_token (see the yaw
+                    // branch above for the rationale; HostInterpolation
+                    // full plug, delegated path no-op + carve-out
+                    // #160).
+                    motion_driver_->InvalidateAxisToken(SERVO_PITCH_ID);
                     xSemaphoreGive(motion_mutex_);
                     ESP_LOGI(TAG,
                              "Phase 0' pitch re-sync: current_deg %d -> %d "
@@ -2584,6 +2681,10 @@ private:
             } else {
                 xSemaphoreTake(motion_mutex_, portMAX_DELAY);
                 pitch_motion_.position_unknown = true;
+                // Token bump covers the position_unknown mutation
+                // (HostInterpolation full plug, delegated no-op +
+                // carve-out #160; see the yaw fail branch above).
+                motion_driver_->InvalidateAxisToken(SERVO_PITCH_ID);
                 xSemaphoreGive(motion_mutex_);
                 ESP_LOGW(TAG,
                          "Phase 0' pitch re-sync skipped: ReadPos failed; "
