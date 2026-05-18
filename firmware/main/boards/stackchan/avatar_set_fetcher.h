@@ -7,16 +7,19 @@
 
 #include "avatar_set.h"
 
-// AvatarSetFetcher — HTTP fetch + checksum verify + AvatarSet::Load.
+// AvatarSetFetcher — HTTP fetch + checksum verify + AvatarSet adoption.
 //
 // Invoked when the gateway sends a WS `avatar_set_fetch` message containing
 // a URL, one-time bearer token, mode, expected size, and SHA256 checksum.
 // The fetcher performs an authenticated HTTP GET against the gateway's
 // staging endpoint (see docs/intent/stackchan_avatar_pipeline.md §C-2),
-// verifies the SHA256, and hands the raw RGB565 payload to AvatarSet::Load.
+// verifies the SHA256, and hands the raw RGB565 payload to AvatarSet via
+// AdoptOwnedBuffer() with ownership transfer (= no internal memcpy in the
+// target set; PSRAM peak during swap is held to old + new only).
 //
 // On any failure the previously loaded set (if any) is left intact —
-// AvatarSet::Load only commits when the new buffer is validated.
+// AvatarSet only commits on AdoptOwnedBuffer success, and the fetcher's
+// PSRAM buffer is freed in the failure path here.
 
 class AvatarSetFetcher {
 public:

@@ -578,8 +578,8 @@ private:
     // ---- Avatar fetch in-progress quiescence (intent doc invariant #6) ---
     //
     // Between the WS `avatar_set_fetch` notify and `avatar_set_loaded`
-    // reply, AvatarSet::Load briefly atomically swaps the PSRAM buffer
-    // backing every face/eyes/mouth lv_image_dsc_t. Any LVGL set_src write
+    // reply, AvatarSet::AdoptOwnedBuffer briefly atomically swaps the PSRAM
+    // buffer backing every face/eyes/mouth lv_image_dsc_t. Any LVGL set_src write
     // during that window can land on a dangling pointer, so we suppress
     // writes for the whole fetch lifetime and remember the user's last
     // expressed intent. When the fetch completes (success or failure) we
@@ -3854,7 +3854,7 @@ private:
     }
 
     // Drain avatar_pending_ and apply it. Called from the avatar_fetch
-    // worker task after AvatarSet::Load returns (regardless of success);
+    // worker task after AvatarSet::AdoptOwnedBuffer returns (regardless of success);
     // the caller must have already cleared avatar_fetch_in_progress_ so
     // that the public SetAvatarExpression / SetMouthShape / set_blink
     // paths invoked here run their live LVGL writes instead of looping
@@ -6019,7 +6019,7 @@ public:
     // Phase 4.5 avatar (saiverse-stackchan-addon): handle the gateway's
     // `avatar_set_fetch` WS message. Parse url/token/mode/checksum/
     // expected_size, spawn a worker task that performs HTTP GET + SHA256
-    // verify + AvatarSet::Load, then send `avatar_set_loaded` back via
+    // verify + AvatarSet::AdoptOwnedBuffer, then send `avatar_set_loaded` back via
     // the protocol. Runs on the protocol receive task; the actual fetch
     // is delegated to a FreeRTOS task to avoid blocking the receive loop
     // while the LCD-sized payload flows in.
@@ -6070,8 +6070,8 @@ public:
             xSemaphoreGive(avatar_pending_lock_);
         }
         // Quiesce every autonomous LVGL writer so no set_src lands while
-        // AvatarSet::Load atomically swaps the PSRAM buffer backing each
-        // lv_image_dsc_t. The schedule timers / state machines restart
+        // AvatarSet::AdoptOwnedBuffer atomically swaps the PSRAM buffer backing
+        // each lv_image_dsc_t. The schedule timers / state machines restart
         // from ApplyPendingAvatarAfterFetch (blink) or the next tts.start
         // (TTS lipsync) once the fetch resolves.
         StopTtsLipSync();
@@ -6137,12 +6137,12 @@ public:
         // defer helpers and the pending state would never be drained.
         avatar_fetch_in_progress_.store(false, std::memory_order_release);
 
-        // After a successful Load the previously displayed face is still
+        // After a successful adoption the previously displayed face is still
         // pointing into the freed static-table data via avatar_img_; force a
         // refresh so the new AvatarSet entry is picked up by the next
         // RenderAvatarLocked() call. Skipped on failure (the old static
-        // image is still valid since AvatarSet::Load preserves the
-        // previous buffer on size/allocation errors).
+        // image is still valid since AvatarSet::AdoptOwnedBuffer preserves the
+        // previous buffer on size/allocation/HTTP/checksum errors).
         if (avatar_set_.is_loaded()) {
             SetAvatarExpressionIfActive(current_avatar_face_.c_str());
         }
