@@ -1104,6 +1104,25 @@ config STACKCHAN_SERVO_DELEGATED_MOTION
         per requested move and polls ReadMove for completion. When disabled,
         the firmware keeps the existing host-side interpolation loop.
 
+config STACKCHAN_AUTO_TORQUE_RELEASE_ENABLED
+    bool "Auto release SCS0009 torque on motion idle"
+    default y
+    help
+        Releases servo torque after motion idle timeout to mitigate
+        SCS0009 cumulative WritePos protection mode (#165) and reduce
+        motor heat. Re-engages automatically on the next motion command
+        via explicit EnableTorque(ON) at the motion entry point.
+
+config STACKCHAN_AUTO_TORQUE_RELEASE_MS
+    int "Idle timeout before torque release (ms)"
+    default 5000
+    range 500 600000
+    depends on STACKCHAN_AUTO_TORQUE_RELEASE_ENABLED
+    help
+        Time in milliseconds with no motion before torque auto-releases.
+        Runtime-overridable via the set_auto_torque_release MCP tool
+        (session override, not persisted across reboot).
+
 endif # BOARD_TYPE_STACKCHAN
 
 endmenu

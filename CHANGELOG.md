@@ -32,6 +32,12 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Added `set_auto_torque_release(enabled, timeout_ms)` and automatic
+  SCS0009 torque release after motion idle timeout for #152 Phase 4.
+
+- Fixed: mitigated #165 cumulative WritePos protection-mode exposure by
+  reducing session-wide WritePos accumulation during idle periods.
+
 - #152 Phase 3 — replaced normal-runtime `HostInterpolationMotionDriver`
   linear interpolation with `smooth_ui_toolkit` spring physics
   (`AnimateValue` per axis, m5stack/StackChan-equivalent default spring,
