@@ -70,15 +70,11 @@ void AvatarSetFetcher::Fetch(
         return;
     }
 
-    // Allocate PSRAM staging buffer.
-    //
-    // Note: AvatarSet::Load currently copies its input into a fresh PSRAM
-    // buffer, so during Load() the firmware temporarily holds 2× the set
-    // size in PSRAM (this buffer + the AvatarSet's own buffer). For matrix
-    // mode (~3.3 MB) this approaches the PSRAM ceiling. A follow-up
-    // optimization is to switch AvatarSet::Load to ownership-transfer
-    // semantics (e.g., std::unique_ptr<uint8_t[], PsramDeleter>), at which
-    // point this buffer can be handed directly to AvatarSet without a copy.
+    // Allocate the PSRAM buffer that will become the AvatarSet's owned
+    // image_buffer_ on success. We fill it via HTTP read, verify the SHA256,
+    // then hand it off to AvatarSet::AdoptOwnedBuffer with ownership transfer
+    // (= no internal memcpy). PSRAM peak during a swap is therefore
+    // (old AvatarSet buffer + this buffer) and not 3× the set size.
     uint8_t* buffer = static_cast<uint8_t*>(
         heap_caps_malloc(expected_size, MALLOC_CAP_SPIRAM));
     if (buffer == nullptr) {
@@ -116,10 +112,12 @@ void AvatarSetFetcher::Fetch(
         return;
     }
 
-    const bool loaded = target_set.Load(mode, buffer, expected_size);
-    heap_caps_free(buffer);  // AvatarSet::Load copies internally.
-
+    // Hand ownership to AvatarSet. On success it owns `buffer` and will
+    // free it on the next Unload() / destruction; on failure ownership
+    // stays with us and we must free it ourselves.
+    const bool loaded = target_set.AdoptOwnedBuffer(mode, buffer, expected_size);
     if (!loaded) {
+        heap_caps_free(buffer);
         on_complete(false, actual_sha256, "load_failed");
         return;
     }

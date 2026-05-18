@@ -65,7 +65,7 @@ public:
     // Returns nullptr if not loaded, mode != kMatrix, or any index out of range.
     const lv_image_dsc_t* GetMatrix(int face_index, int eyes_index, int mouth_index) const;
 
-    // Load an avatar set from a raw RGB565 payload.
+    // Adopt an externally-allocated PSRAM buffer as the new avatar set.
     //
     // Layered layout:
     //   [0 ..)                                      face   × 6
@@ -77,11 +77,21 @@ public:
     //   [idx * kImageBytes .. (idx+1) * kImageBytes)
     //   total = kMatrixPayloadBytes
     //
-    // The payload is copied into a freshly allocated PSRAM buffer; the
-    // caller may release its source buffer immediately after Load returns.
-    // On allocation failure or size mismatch, returns false and the
-    // previously loaded set (if any) is preserved.
-    bool Load(Mode mode, const uint8_t* image_data, size_t image_data_size);
+    // Ownership: on success, AvatarSet takes ownership of `owned_buffer`
+    // (allocated with heap_caps_malloc(SPIRAM)) and will heap_caps_free it
+    // on the next Unload() / AdoptOwnedBuffer() / destruction. The caller
+    // MUST NOT free `owned_buffer` after a successful call. On failure
+    // (null pointer or size mismatch) the function returns false WITHOUT
+    // touching `owned_buffer` — the caller retains ownership and is
+    // responsible for freeing it. The previously loaded set (if any) is
+    // preserved on any failure path.
+    //
+    // This is ownership-transfer to keep PSRAM peak low: the fetcher's
+    // staging buffer is handed directly to AvatarSet without an internal
+    // memcpy. The pointer swap to lv_image_dsc_t entries happens after
+    // the new buffer is fully validated, so the LCD draws from the old
+    // buffer until the swap commits (no black-frame flash on update).
+    bool AdoptOwnedBuffer(Mode mode, uint8_t* owned_buffer, size_t image_data_size);
 
     // Release the PSRAM buffer and clear all internal lv_image_dsc_t entries.
     // Safe to call multiple times.

@@ -58,9 +58,9 @@ const lv_image_dsc_t* AvatarSet::GetMatrix(int face_index, int eyes_index, int m
     return &matrix_table_[idx];
 }
 
-bool AvatarSet::Load(Mode mode, const uint8_t* image_data, size_t image_data_size) {
-    if (image_data == nullptr) {
-        ESP_LOGW(TAG, "Load: image_data is null");
+bool AvatarSet::AdoptOwnedBuffer(Mode mode, uint8_t* owned_buffer, size_t image_data_size) {
+    if (owned_buffer == nullptr) {
+        ESP_LOGW(TAG, "AdoptOwnedBuffer: owned_buffer is null");
         return false;
     }
 
@@ -68,27 +68,21 @@ bool AvatarSet::Load(Mode mode, const uint8_t* image_data, size_t image_data_siz
         (mode == Mode::kLayered) ? kLayeredPayloadBytes : kMatrixPayloadBytes;
     if (image_data_size != expected) {
         ESP_LOGW(TAG,
-                 "Load: size mismatch (got %u, expected %u for mode=%d)",
+                 "AdoptOwnedBuffer: size mismatch (got %u, expected %u for mode=%d)",
                  static_cast<unsigned int>(image_data_size),
                  static_cast<unsigned int>(expected),
                  static_cast<int>(mode));
+        // Ownership stays with caller — caller frees on false return.
         return false;
     }
 
-    uint8_t* new_buffer = static_cast<uint8_t*>(
-        heap_caps_malloc(image_data_size, MALLOC_CAP_SPIRAM));
-    if (new_buffer == nullptr) {
-        ESP_LOGE(TAG, "Load: PSRAM allocation failed (size=%u)",
-                 static_cast<unsigned int>(image_data_size));
-        return false;
-    }
-
-    std::memcpy(new_buffer, image_data, image_data_size);
-
-    // Atomically swap: free previous buffer only after the new one is staged.
+    // Atomically swap: free previous buffer (= drop old descriptors first
+    // for clarity) right before installing the new one. lv_image_dsc_t::data
+    // pointers are repopulated below, so the LCD draws from the old buffer
+    // up to this point and from the new one on the next LVGL invalidation.
     Unload();
 
-    image_buffer_ = new_buffer;
+    image_buffer_ = owned_buffer;
     image_buffer_size_ = image_data_size;
     mode_ = mode;
 
@@ -117,7 +111,7 @@ bool AvatarSet::Load(Mode mode, const uint8_t* image_data, size_t image_data_siz
     }
 
     loaded_ = true;
-    ESP_LOGI(TAG, "Avatar set loaded: mode=%d, bytes=%u",
+    ESP_LOGI(TAG, "Avatar set adopted: mode=%d, bytes=%u",
              static_cast<int>(mode),
              static_cast<unsigned int>(image_data_size));
     return true;

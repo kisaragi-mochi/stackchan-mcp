@@ -630,7 +630,7 @@ void Application::InitializeProtocol() {
             }
         } else if (strcmp(type->valuestring, "avatar_set_fetch") == 0) {
             // Phase 4.5 avatar (saiverse-stackchan-addon): dispatch to the
-            // current board for HTTP fetch + SHA256 verify + AvatarSet::Load.
+            // current board for HTTP fetch + SHA256 verify + AvatarSet adoption.
             // Non-stackchan boards default to a no-op (Board::OnAvatarSetFetch).
             // See docs/intent/stackchan_avatar_pipeline.md §C-3 (SAIVerse).
             board.OnAvatarSetFetch(root);
