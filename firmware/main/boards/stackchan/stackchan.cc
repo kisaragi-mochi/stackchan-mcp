@@ -706,6 +706,7 @@ private:
     static constexpr uint32_t AUTO_TORQUE_RELEASE_MIN_MS = 500;
     static constexpr uint32_t AUTO_TORQUE_RELEASE_MAX_MS = 600000;
     static constexpr int kMaxReengageRetries = 3;
+    static constexpr int kMaxManualReengageRetries = 3;
 #ifdef CONFIG_STACKCHAN_AUTO_TORQUE_RELEASE_MS
     static constexpr uint32_t AUTO_TORQUE_RELEASE_DEFAULT_MS =
         CONFIG_STACKCHAN_AUTO_TORQUE_RELEASE_MS;
@@ -2896,19 +2897,9 @@ private:
         // manual path waits for that pending transition before entering the
         // bus section.
         if (yaw_enabled && pitch_enabled) {
-            // Serialize manual re-engage against a pending OFF transition on
-            // the auto-release path. Without this wait, a manual
-            // set_servo_torque(true, true) could win scs_bus_mutex_ ahead of
-            // the pending EnableTorque(OFF), publish kEngaged, and then have
-            // the OFF write silently disable torque after the MCP call
-            // returned "ok" -- violating the explicit-ON contract.
-            //
-            // kReengagement is exempt: EnsureTorqueEngagedBeforeMove() has
-            // already waited out kReleasing before reaching here.
-            //
-            // kAutoIdle does not enter this branch (it requests
-            // (false, false)); included in the guard for completeness /
-            // future-proofing.
+            // Pre-mutex wait: this reduces obvious contention before
+            // attempting scs_bus_mutex_. The post-mutex re-check below closes
+            // the pre-check-to-mutex TOCTOU window.
             if (reason == ReleaseReason::kManual) {
                 auto state_pre =
                     torque_state_.load(std::memory_order_acquire);
@@ -2929,26 +2920,63 @@ private:
                 }
             }
 
-            xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
-            if (torque_state_.load(std::memory_order_acquire) ==
-                TorqueState::kEngaged) {
-                log_result(true);
+            // Bounded retry for the remaining TOCTOU window: torque_state_
+            // can flip to kReleasing between the pre-mutex check and
+            // xSemaphoreTake(). Once the bus mutex is held, re-check; if an
+            // auto-release OFF was published in that gap, release the mutex,
+            // wait, and retry. kReengagement is exempt because
+            // EnsureTorqueEngagedBeforeMove() already waited; kAutoIdle does
+            // not enter this (true, true) branch.
+            for (int attempt = 0; attempt < kMaxManualReengageRetries;
+                 ++attempt) {
+                xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
+
+                if (reason == ReleaseReason::kManual &&
+                    torque_state_.load(std::memory_order_acquire) ==
+                        TorqueState::kReleasing) {
+                    xSemaphoreGive(scs_bus_mutex_);
+                    if (!WaitForKReleasingToClear()) {
+                        ESP_LOGW(TAG,
+                                 "set_servo_torque (reason=%s): kReleasing "
+                                 "persists after attempt %d; skipping bus "
+                                 "frames, caller may retry.",
+                                 ReleaseReasonName(reason),
+                                 attempt);
+                        log_result(true);
+                        return result;
+                    }
+                    continue;
+                }
+
+                if (torque_state_.load(std::memory_order_acquire) ==
+                    TorqueState::kEngaged) {
+                    log_result(true);
+                    xSemaphoreGive(scs_bus_mutex_);
+                    return result;
+                }
+                result.yaw_bus_return =
+                    scs_bus_.EnableTorque(SERVO_YAW_ID, 1);
+                result.pitch_bus_return =
+                    scs_bus_.EnableTorque(SERVO_PITCH_ID, 1);
+                update_bus_ok();
+                if (result.yaw_ok) {
+                    yaw_torque_enabled_ = true;
+                }
+                if (result.pitch_ok) {
+                    pitch_torque_enabled_ = true;
+                }
+                PublishTorqueState();
+                log_result(false);
                 xSemaphoreGive(scs_bus_mutex_);
                 return result;
             }
-            result.yaw_bus_return = scs_bus_.EnableTorque(SERVO_YAW_ID, 1);
-            result.pitch_bus_return =
-                scs_bus_.EnableTorque(SERVO_PITCH_ID, 1);
-            update_bus_ok();
-            if (result.yaw_ok) {
-                yaw_torque_enabled_ = true;
-            }
-            if (result.pitch_ok) {
-                pitch_torque_enabled_ = true;
-            }
-            PublishTorqueState();
-            log_result(false);
-            xSemaphoreGive(scs_bus_mutex_);
+
+            ESP_LOGW(TAG,
+                     "set_servo_torque (reason=%s): kReleasing observed in "
+                     "all %d post-mutex retries; skipping bus frames.",
+                     ReleaseReasonName(reason),
+                     kMaxManualReengageRetries);
+            log_result(true);
             return result;
         } else {
             if (!yaw_enabled && !pitch_enabled) {
