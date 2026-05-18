@@ -2873,7 +2873,9 @@ private:
 
     ServoTorqueResult InternalSetServoTorque(bool yaw_enabled,
                                              bool pitch_enabled,
-                                             ReleaseReason reason) {
+                                             ReleaseReason reason,
+                                             uint32_t expected_release_epoch =
+                                                 0) {
         ServoTorqueResult result;
         const bool disables_axis = !yaw_enabled || !pitch_enabled;
 
@@ -3043,6 +3045,26 @@ private:
             }
 
             xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
+            if (reason == ReleaseReason::kAutoIdle &&
+                expected_release_epoch != 0) {
+                uint32_t current_epoch =
+                    torque_release_epoch_.load(std::memory_order_acquire);
+                auto current_state =
+                    torque_state_.load(std::memory_order_acquire);
+                if (current_epoch != expected_release_epoch ||
+                    current_state != TorqueState::kReleasing) {
+                    ESP_LOGW(TAG,
+                             "auto-release OFF aborted at bus check: epoch=%u "
+                             "(expected %u), state=%d (expected kReleasing); "
+                             "skipping EnableTorque(0,0) frames.",
+                             (unsigned)current_epoch,
+                             (unsigned)expected_release_epoch,
+                             (int)current_state);
+                    xSemaphoreGive(scs_bus_mutex_);
+                    log_result(true);
+                    return result;
+                }
+            }
             result.yaw_bus_return = scs_bus_.EnableTorque(
                 SERVO_YAW_ID, yaw_enabled ? 1 : 0);
             result.pitch_bus_return = scs_bus_.EnableTorque(
@@ -3159,17 +3181,18 @@ private:
             // block on motion_mutex_, so a concurrent manual ON is routed
             // through the kReleasing wait/retry path instead of treating the
             // already-expired engaged state as a successful no-op.
-            uint32_t my_epoch = MarkReleasing();
+            uint32_t my_pre_epoch = MarkReleasing();
             ServoTorqueResult r = InternalSetServoTorque(
-                false, false, ReleaseReason::kAutoIdle);
+                false, false, ReleaseReason::kAutoIdle,
+                /*expected_release_epoch=*/my_pre_epoch + 1);
             auto state_after =
                 torque_state_.load(std::memory_order_acquire);
             if (state_after == TorqueState::kReleased) {
                 last_motion_end_valid_ = false;
-            } else if (state_after == TorqueState::kReleasing) {
+            } else if (r.short_circuited) {
                 uint32_t current_epoch =
                     torque_release_epoch_.load(std::memory_order_acquire);
-                if (current_epoch == my_epoch) {
+                if (current_epoch == my_pre_epoch) {
                     // Auto-idle re-observed motion or wobble under
                     // motion_mutex_ and returned before any bus frame went
                     // out, so the per-axis torque state is still fully
@@ -3181,14 +3204,21 @@ private:
                              "re-check; rolled back torque_state_ to "
                              "kEngaged (epoch=%u), retry after "
                              "one idle window.",
-                             (unsigned)my_epoch);
+                             (unsigned)my_pre_epoch);
+                } else if (current_epoch == my_pre_epoch + 1) {
+                    ESP_LOGW(TAG,
+                             "auto-release OFF aborted at bus check; leaving "
+                             "torque_state_ for concurrent publisher "
+                             "(my_pre_epoch=%u current_epoch=%u).",
+                             (unsigned)my_pre_epoch,
+                             (unsigned)current_epoch);
                 } else {
                     ESP_LOGW(TAG,
-                             "auto-release OFF aborted, but release epoch "
-                             "advanced from %u to %u "
-                             "(another release publisher in flight); leaving "
-                             "torque_state_ for them.",
-                             (unsigned)my_epoch, (unsigned)current_epoch);
+                             "auto-release OFF: release epoch advanced past "
+                             "ours (my_pre_epoch=%u current_epoch=%u); "
+                             "leaving torque_state_ for concurrent publisher.",
+                             (unsigned)my_pre_epoch,
+                             (unsigned)current_epoch);
                 }
                 last_motion_end_ms_ = now_ms;
             } else {
