@@ -942,6 +942,37 @@ private:
                             std::memory_order_release);
     }
 
+    // Block until torque_state_ leaves kReleasing or the elapsed-time
+    // budget expires. Caller must NOT hold motion_mutex_ or scs_bus_mutex_.
+    // Uses esp_timer_get_time() so the budget is honored at real time
+    // regardless of CONFIG_FREERTOS_HZ.
+    //
+    // Returns true if the state is no longer kReleasing (proceed safely),
+    // false if the wait budget was exhausted while still kReleasing
+    // (caller decides how to handle: either skip with ESP_LOGW or defer to
+    // its own bounded retry).
+    bool WaitForKReleasingToClear() {
+        constexpr uint32_t kMaxKReleasingWaitMs = 200;
+        constexpr uint32_t kKReleasingPollIntervalMs = 5;
+        const TickType_t kDelayTicks =
+            std::max<TickType_t>(1,
+                                 pdMS_TO_TICKS(kKReleasingPollIntervalMs));
+        const uint32_t start_us =
+            static_cast<uint32_t>(esp_timer_get_time());
+        auto state = torque_state_.load(std::memory_order_acquire);
+        while (state == TorqueState::kReleasing) {
+            const uint32_t elapsed_ms =
+                (static_cast<uint32_t>(esp_timer_get_time()) - start_us) /
+                1000;
+            if (elapsed_ms >= kMaxKReleasingWaitMs) {
+                return false;
+            }
+            vTaskDelay(kDelayTicks);
+            state = torque_state_.load(std::memory_order_acquire);
+        }
+        return true;
+    }
+
     struct ServoTorqueResult {
         int yaw_bus_return = -1;
         int pitch_bus_return = -1;
@@ -2860,10 +2891,44 @@ private:
             return finish(false);
         }
 
-        // Fully-symmetric re-engage is mutex-ordered even when it becomes
-        // a no-op, so a manual ON racing an auto-idle OFF is determined by
-        // scs_bus_mutex_ acquisition order.
+        // Fully-symmetric re-engage remains bus-ordered even when it becomes
+        // a no-op. If an auto-idle OFF has already published kReleasing, the
+        // manual path waits for that pending transition before entering the
+        // bus section.
         if (yaw_enabled && pitch_enabled) {
+            // Serialize manual re-engage against a pending OFF transition on
+            // the auto-release path. Without this wait, a manual
+            // set_servo_torque(true, true) could win scs_bus_mutex_ ahead of
+            // the pending EnableTorque(OFF), publish kEngaged, and then have
+            // the OFF write silently disable torque after the MCP call
+            // returned "ok" -- violating the explicit-ON contract.
+            //
+            // kReengagement is exempt: EnsureTorqueEngagedBeforeMove() has
+            // already waited out kReleasing before reaching here.
+            //
+            // kAutoIdle does not enter this branch (it requests
+            // (false, false)); included in the guard for completeness /
+            // future-proofing.
+            if (reason == ReleaseReason::kManual) {
+                auto state_pre =
+                    torque_state_.load(std::memory_order_acquire);
+                if (state_pre == TorqueState::kReleasing) {
+                    if (!WaitForKReleasingToClear()) {
+                        ESP_LOGW(TAG,
+                                 "set_servo_torque (reason=%s): kReleasing "
+                                 "not clearing within wait budget; skipping "
+                                 "bus frames, caller may retry.",
+                                 ReleaseReasonName(reason));
+                        log_result(true);
+                        return result;
+                    }
+                    // After the wait, state may be kEngaged (OFF failed and
+                    // rolled back) or kReleased (OFF succeeded). Fall through
+                    // to the existing (true, true) logic, which short-circuits
+                    // on kEngaged and proceeds normally on kReleased/kPartial.
+                }
+            }
+
             xSemaphoreTake(scs_bus_mutex_, portMAX_DELAY);
             if (torque_state_.load(std::memory_order_acquire) ==
                 TorqueState::kEngaged) {
@@ -2951,16 +3016,6 @@ private:
         }
     }
 
-    // Wait budget for an in-progress OFF transition before deciding whether
-    // to re-engage. The auto-release path holds scs_bus_mutex_ for two
-    // EnableTorque bus frames (typically <5 ms total) between MarkReleasing()
-    // and the final PublishTorqueState() call. 200 ms is a generous safety
-    // margin that still keeps motion-entry latency human-imperceptible.
-    //
-    // If this budget is exhausted while torque_state_ is still kReleasing,
-    // the caller's bounded retry (kMaxReengageRetries = 3 in
-    // TakeMotionMutexAfterTorqueEngaged) will issue at most 3 such waits
-    // before declaring re-engage failure and skipping the motion entry.
     void EnsureTorqueEngagedBeforeMove() {
         auto state = torque_state_.load(std::memory_order_acquire);
         if (state == TorqueState::kEngaged) {
@@ -2970,44 +3025,18 @@ private:
             return;
         }
 
-        // Serialize against any pending OFF write before deciding whether to
-        // re-engage. Measure real elapsed time instead of advancing by the
-        // nominal poll interval: at CONFIG_FREERTOS_HZ=100, pdMS_TO_TICKS(5)
-        // floors to 0 ticks, so a nominal-ms loop would burn the 200 ms budget
-        // in a yield-only spin. Round the delay up to at least one tick so the
-        // budget is bounded by elapsed time, not loop scheduling.
-        constexpr uint32_t kMaxKReleasingWaitMs = 200;
-        constexpr uint32_t kKReleasingPollIntervalMs = 5;
-        const TickType_t kDelayTicks =
-            std::max<TickType_t>(1,
-                                 pdMS_TO_TICKS(kKReleasingPollIntervalMs));
-        const uint32_t start_us =
-            static_cast<uint32_t>(esp_timer_get_time());
-        while (state == TorqueState::kReleasing) {
-            const uint32_t elapsed_ms =
-                (static_cast<uint32_t>(esp_timer_get_time()) - start_us) /
-                1000;
-            if (elapsed_ms >= kMaxKReleasingWaitMs) {
-                break;
-            }
-            vTaskDelay(kDelayTicks);
-            state = torque_state_.load(std::memory_order_acquire);
-        }
-
-        if (state == TorqueState::kEngaged) {
-            // The OFF write failed during our wait and the state was
-            // recomputed back to kEngaged. No re-engage needed.
-            return;
-        }
         if (state == TorqueState::kReleasing) {
-            // Wait budget exhausted without the OFF transition completing.
-            // Bail out and let TakeMotionMutexAfterTorqueEngaged's bounded
-            // retry decide whether to skip the motion entirely.
-            ESP_LOGW(TAG,
-                     "EnsureTorqueEngagedBeforeMove: kReleasing not "
-                     "completing within %u ms, deferring to caller retry.",
-                     static_cast<unsigned>(kMaxKReleasingWaitMs));
-            return;
+            if (!WaitForKReleasingToClear()) {
+                ESP_LOGW(TAG,
+                         "EnsureTorqueEngagedBeforeMove: kReleasing not "
+                         "clearing within wait budget, deferring to caller "
+                         "retry.");
+                return;
+            }
+            state = torque_state_.load(std::memory_order_acquire);
+            if (state == TorqueState::kEngaged) {
+                return;  // OFF rolled back to kEngaged
+            }
         }
 
         // state is kPartial or kReleased -- safe to re-engage now.
