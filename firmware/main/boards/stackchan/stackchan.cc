@@ -682,9 +682,9 @@ private:
     uint32_t last_motion_end_ms_ = 0;              // ServoTask-private
     bool last_motion_end_valid_ = false;           // ServoTask-private
     std::atomic<bool> torque_currently_released_{false};
+    std::atomic<bool> torque_fully_engaged_{true};
     // Per-axis commanded torque state is only used to avoid suppressing a
-    // real mixed-axis re-enable; torque_currently_released_ remains the
-    // cross-task summary of "both axes released".
+    // real mixed-axis re-enable; the atomics publish cross-task summaries.
     bool yaw_torque_enabled_ = true;               // protected by scs_bus_mutex_
     bool pitch_torque_enabled_ = true;             // protected by scs_bus_mutex_
     std::atomic<bool> boot_init_done_{false};
@@ -699,6 +699,7 @@ private:
     static constexpr uint32_t MOTION_POLL_INTERVAL_MS = 50;
     static constexpr uint32_t AUTO_TORQUE_RELEASE_MIN_MS = 500;
     static constexpr uint32_t AUTO_TORQUE_RELEASE_MAX_MS = 600000;
+    static constexpr int kMaxReengageRetries = 3;
 #ifdef CONFIG_STACKCHAN_AUTO_TORQUE_RELEASE_MS
     static constexpr uint32_t AUTO_TORQUE_RELEASE_DEFAULT_MS =
         CONFIG_STACKCHAN_AUTO_TORQUE_RELEASE_MS;
@@ -2831,6 +2832,15 @@ private:
             return result;
         };
 
+        auto publish_torque_state = [&]() {
+            torque_currently_released_.store(
+                !yaw_torque_enabled_ && !pitch_torque_enabled_,
+                std::memory_order_release);
+            torque_fully_engaged_.store(
+                yaw_torque_enabled_ && pitch_torque_enabled_,
+                std::memory_order_release);
+        };
+
         if (!servo_ok_ || scs_bus_mutex_ == nullptr) {
             return finish(false);
         }
@@ -2843,6 +2853,7 @@ private:
             bool already_engaged =
                 yaw_torque_enabled_ && pitch_torque_enabled_;
             if (already_engaged) {
+                publish_torque_state();
                 log_result(true);
                 xSemaphoreGive(scs_bus_mutex_);
                 return result;
@@ -2850,10 +2861,14 @@ private:
             result.yaw_bus_return = scs_bus_.EnableTorque(SERVO_YAW_ID, 1);
             result.pitch_bus_return =
                 scs_bus_.EnableTorque(SERVO_PITCH_ID, 1);
-            yaw_torque_enabled_ = true;
-            pitch_torque_enabled_ = true;
-            torque_currently_released_.store(false, std::memory_order_release);
             update_bus_ok();
+            if (result.yaw_ok) {
+                yaw_torque_enabled_ = true;
+            }
+            if (result.pitch_ok) {
+                pitch_torque_enabled_ = true;
+            }
+            publish_torque_state();
             log_result(false);
             xSemaphoreGive(scs_bus_mutex_);
             return result;
@@ -2863,6 +2878,7 @@ private:
                 bool still_released =
                     !yaw_torque_enabled_ && !pitch_torque_enabled_;
                 if (still_released) {
+                    publish_torque_state();
                     log_result(true);
                     xSemaphoreGive(scs_bus_mutex_);
                     return result;
@@ -2902,11 +2918,14 @@ private:
                 SERVO_YAW_ID, yaw_enabled ? 1 : 0);
             result.pitch_bus_return = scs_bus_.EnableTorque(
                 SERVO_PITCH_ID, pitch_enabled ? 1 : 0);
-            yaw_torque_enabled_ = yaw_enabled;
-            pitch_torque_enabled_ = pitch_enabled;
-            torque_currently_released_.store(!yaw_enabled && !pitch_enabled,
-                                             std::memory_order_release);
             update_bus_ok();
+            if (result.yaw_ok) {
+                yaw_torque_enabled_ = yaw_enabled;
+            }
+            if (result.pitch_ok) {
+                pitch_torque_enabled_ = pitch_enabled;
+            }
+            publish_torque_state();
             log_result(false);
             xSemaphoreGive(scs_bus_mutex_);
             return result;
@@ -2914,24 +2933,39 @@ private:
     }
 
     void EnsureTorqueEngagedBeforeMove() {
-        if (!torque_currently_released_.load(std::memory_order_acquire)) {
+        if (torque_fully_engaged_.load(std::memory_order_acquire)) {
             return;
         }
         if (!servo_ok_) {
             return;
         }
-        InternalSetServoTorque(true, true, ReleaseReason::kReengagement);
+        ServoTorqueResult r = InternalSetServoTorque(
+            true, true, ReleaseReason::kReengagement);
+        if (!torque_fully_engaged_.load(std::memory_order_acquire)) {
+            ESP_LOGW(TAG,
+                     "servo torque re-engagement bus write failed: "
+                     "yaw_ok=%d (r=%d) pitch_ok=%d (r=%d)",
+                     r.yaw_ok ? 1 : 0, r.yaw_bus_return,
+                     r.pitch_ok ? 1 : 0, r.pitch_bus_return);
+        }
     }
 
-    void TakeMotionMutexAfterTorqueEngaged() {
-        while (true) {
+    bool TakeMotionMutexAfterTorqueEngaged() {
+        for (int attempt = 0; attempt < kMaxReengageRetries; ++attempt) {
             EnsureTorqueEngagedBeforeMove();
             xSemaphoreTake(motion_mutex_, portMAX_DELAY);
-            if (!torque_currently_released_.load(std::memory_order_acquire)) {
-                return;
+            if (torque_fully_engaged_.load(std::memory_order_acquire)) {
+                return true;
             }
             xSemaphoreGive(motion_mutex_);
+            vTaskDelay(pdMS_TO_TICKS(MOTION_TICK_MS));
         }
+        ESP_LOGW(TAG,
+                 "EnsureTorqueEngagedBeforeMove: re-engagement failed after "
+                 "%d attempts; skipping motion entry to avoid silent "
+                 "torque-off WritePos.",
+                 kMaxReengageRetries);
+        return false;
     }
 
     void MaybeAutoReleaseTorque() {
@@ -2969,8 +3003,22 @@ private:
             auto_release_timeout_ms_.load(std::memory_order_acquire);
         if (!torque_currently_released_.load(std::memory_order_acquire) &&
             idle_ms >= timeout_ms) {
-            InternalSetServoTorque(false, false, ReleaseReason::kAutoIdle);
-            last_motion_end_valid_ = false;
+            ServoTorqueResult r = InternalSetServoTorque(
+                false, false, ReleaseReason::kAutoIdle);
+            if (torque_currently_released_.load(
+                    std::memory_order_acquire)) {
+                last_motion_end_valid_ = false;
+            } else if (r.short_circuited) {
+                last_motion_end_valid_ = false;
+            } else {
+                last_motion_end_ms_ = now_ms;
+                ESP_LOGW(TAG,
+                         "auto-release OFF bus write failed: yaw_ok=%d "
+                         "(r=%d) pitch_ok=%d (r=%d). Retrying after one "
+                         "idle window.",
+                         r.yaw_ok ? 1 : 0, r.yaw_bus_return,
+                         r.pitch_ok ? 1 : 0, r.pitch_bus_return);
+            }
         }
     }
 
@@ -2998,7 +3046,9 @@ private:
             ESP_LOGW(TAG, "WriteHeadAngles skipped: servo not initialized");
             return;
         }
-        TakeMotionMutexAfterTorqueEngaged();
+        if (!TakeMotionMutexAfterTorqueEngaged()) {
+            return;
+        }
         if (servo_wobble_active_.load()) {
             servo_wobble_active_.store(false);
             servo_wobble_step_.store(0);
@@ -3027,7 +3077,9 @@ private:
         if (!servo_wobble_active_.load(std::memory_order_acquire)) {
             return;
         }
-        TakeMotionMutexAfterTorqueEngaged();
+        if (!TakeMotionMutexAfterTorqueEngaged()) {
+            return;
+        }
         if (!servo_wobble_active_.load()) {
             xSemaphoreGive(motion_mutex_);
             return;
