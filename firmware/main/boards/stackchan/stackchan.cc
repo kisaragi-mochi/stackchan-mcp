@@ -45,6 +45,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include "esp_video.h"
 #include <cJSON.h>
 #include <lvgl.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <limits>
@@ -2969,18 +2970,27 @@ private:
             return;
         }
 
-        // Serialize against any pending OFF write. Without this wait, a
-        // re-engage call could win scs_bus_mutex_ ahead of the pending
-        // EnableTorque(OFF) on the auto-release path, publish kEngaged, let
-        // motion start, and then have the OFF write disable torque after
-        // motion has already been staged (round-3 adversarial finding).
-        constexpr int kMaxKReleasingWaitMs = 200;
-        constexpr int kKReleasingPollIntervalMs = 5;
-        int waited_ms = 0;
-        while (state == TorqueState::kReleasing &&
-               waited_ms < kMaxKReleasingWaitMs) {
-            vTaskDelay(pdMS_TO_TICKS(kKReleasingPollIntervalMs));
-            waited_ms += kKReleasingPollIntervalMs;
+        // Serialize against any pending OFF write before deciding whether to
+        // re-engage. Measure real elapsed time instead of advancing by the
+        // nominal poll interval: at CONFIG_FREERTOS_HZ=100, pdMS_TO_TICKS(5)
+        // floors to 0 ticks, so a nominal-ms loop would burn the 200 ms budget
+        // in a yield-only spin. Round the delay up to at least one tick so the
+        // budget is bounded by elapsed time, not loop scheduling.
+        constexpr uint32_t kMaxKReleasingWaitMs = 200;
+        constexpr uint32_t kKReleasingPollIntervalMs = 5;
+        const TickType_t kDelayTicks =
+            std::max<TickType_t>(1,
+                                 pdMS_TO_TICKS(kKReleasingPollIntervalMs));
+        const uint32_t start_us =
+            static_cast<uint32_t>(esp_timer_get_time());
+        while (state == TorqueState::kReleasing) {
+            const uint32_t elapsed_ms =
+                (static_cast<uint32_t>(esp_timer_get_time()) - start_us) /
+                1000;
+            if (elapsed_ms >= kMaxKReleasingWaitMs) {
+                break;
+            }
+            vTaskDelay(kDelayTicks);
             state = torque_state_.load(std::memory_order_acquire);
         }
 
@@ -2995,8 +3005,8 @@ private:
             // retry decide whether to skip the motion entirely.
             ESP_LOGW(TAG,
                      "EnsureTorqueEngagedBeforeMove: kReleasing not "
-                     "completing within %d ms, deferring to caller retry.",
-                     kMaxKReleasingWaitMs);
+                     "completing within %u ms, deferring to caller retry.",
+                     static_cast<unsigned>(kMaxKReleasingWaitMs));
             return;
         }
 
