@@ -79,6 +79,35 @@ class Gateway:
             or ""
         )
 
+    @property
+    def audio_hook_url(self) -> str:
+        """URL receiving device-driven listen captures as Ogg/Opus.
+
+        STACKCHAN_AUDIO_HOOK_URL enables the device-driven listen
+        capture path (wake word / button / LCD touch): the gateway
+        packs inbound Opus frames into an Ogg container and POSTs to
+        this URL on ``listen.stop``. The capture path is **disabled**
+        when this is unset — stackchan-mcp's primary listen model
+        remains MCP-client-driven (the ``listen()`` tool), and
+        device-driven capture only makes sense when an external
+        service is set up to receive the audio.
+        """
+        return os.getenv("STACKCHAN_AUDIO_HOOK_URL", "")
+
+    @property
+    def audio_hook_token(self) -> str:
+        """Bearer token expected by the audio hook endpoint.
+
+        STACKCHAN_AUDIO_HOOK_TOKEN can be set separately. Falls back to
+        STACKCHAN_TOKEN so a single-token setup works out of the box.
+        """
+        return (
+            os.getenv("STACKCHAN_AUDIO_HOOK_TOKEN")
+            or os.getenv("STACKCHAN_TOKEN")
+            or os.getenv("BEARER_TOKEN")
+            or ""
+        )
+
     async def start(self, *, advertise_mdns: bool = True) -> None:
         """Start the ESP32 WebSocket server and HTTP capture server."""
         host = os.getenv("HOST", "0.0.0.0")
@@ -91,6 +120,8 @@ class Gateway:
             ws_port,
             vision_url=self.vision_url,
             vision_token=self.vision_token,
+            audio_hook_url=self.audio_hook_url,
+            audio_hook_token=self.audio_hook_token,
         )
 
         # Start HTTP capture server. Same web.Application also serves

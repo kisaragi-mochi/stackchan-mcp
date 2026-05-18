@@ -37,13 +37,25 @@ _DESCRIPTION = (
 
 _EPILOG = """\
 Environment variables:
-  STACKCHAN_TOKEN   Bearer token shared with the ESP32 firmware.
-  VISION_URL        Full public capture URL (e.g. Tailscale Funnel).
-  VISION_HOST       LAN IP of this machine, as seen from the ESP32.
-  VISION_TOKEN      Optional separate token for VISION_URL uploads.
-  HOST              Bind address for the ESP32 WebSocket server (default 0.0.0.0).
-  WS_PORT           Port for the ESP32 WebSocket server (default 8765).
-  CAPTURE_PORT      Port for the HTTP capture server (default 8766).
+  STACKCHAN_TOKEN          Bearer token shared with the ESP32 firmware.
+  VISION_URL               Full public capture URL (e.g. Tailscale Funnel).
+  VISION_HOST              LAN IP of this machine, as seen from the ESP32.
+  VISION_TOKEN             Optional separate token for VISION_URL uploads.
+  STACKCHAN_AUDIO_HOOK_URL Enables device-driven listen capture push.
+                           When set, Opus audio from a wake-word /
+                           button / LCD-touch initiated listen window
+                           is packed into Ogg/Opus and POSTed here.
+                           Leave unset to keep the gateway's behaviour
+                           unchanged from MCP-driven listen() only.
+  STACKCHAN_AUDIO_HOOK_TOKEN
+                           Bearer token for the audio hook endpoint;
+                           falls back to STACKCHAN_TOKEN.
+  HOST                     Bind address for the ESP32 WebSocket server
+                           (default 0.0.0.0).
+  WS_PORT                  Port for the ESP32 WebSocket server
+                           (default 8765).
+  CAPTURE_PORT             Port for the HTTP capture server
+                           (default 8766).
 
 See gateway/README.md and the top-level README.md for full setup,
 including pairing the ESP32 firmware and configuring the WiFi gateway URL.
@@ -483,6 +495,24 @@ def _run_preflight() -> int:
         print("  VISION_TOKEN        set (***redacted***)")
     else:
         print("  VISION_TOKEN        not set (will reuse STACKCHAN_TOKEN)")
+
+    audio_hook_url = os.getenv("STACKCHAN_AUDIO_HOOK_URL", "")
+    if audio_hook_url:
+        print(
+            f"  STACKCHAN_AUDIO_HOOK_URL  {_redact_url_secrets(audio_hook_url)}"
+        )
+        if os.getenv("STACKCHAN_AUDIO_HOOK_TOKEN"):
+            print("  STACKCHAN_AUDIO_HOOK_TOKEN set (***redacted***)")
+        else:
+            print(
+                "  STACKCHAN_AUDIO_HOOK_TOKEN not set "
+                "(will reuse STACKCHAN_TOKEN)"
+            )
+    else:
+        print(
+            "  STACKCHAN_AUDIO_HOOK_URL  not set "
+            "(device-driven listen capture disabled)"
+        )
 
     # --- Ports --------------------------------------------------------------
     print()
