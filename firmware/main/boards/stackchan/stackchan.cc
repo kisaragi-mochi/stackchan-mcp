@@ -3100,6 +3100,14 @@ private:
         if (!boot_init_done_.load(std::memory_order_acquire)) {
             return;
         }
+        // Keep the idle window scoped to the currently engaged interval.
+        // Released/partial/releasing states must not age a stale timer into
+        // the next re-engage.
+        if (torque_state_.load(std::memory_order_acquire) !=
+            TorqueState::kEngaged) {
+            last_motion_end_valid_ = false;
+            return;
+        }
         if (servo_wobble_active_.load(std::memory_order_acquire)) {
             last_motion_end_valid_ = false;
             return;
@@ -3123,14 +3131,29 @@ private:
         uint32_t idle_ms = now_ms - last_motion_end_ms_;
         uint32_t timeout_ms =
             auto_release_timeout_ms_.load(std::memory_order_acquire);
-        if (torque_state_.load(std::memory_order_acquire) ==
-            TorqueState::kEngaged &&
-            idle_ms >= timeout_ms) {
+        if (idle_ms >= timeout_ms) {
+            // Publish the pending OFF before InternalSetServoTorque() can
+            // block on motion_mutex_, so a concurrent manual ON is routed
+            // through the kReleasing wait/retry path instead of treating the
+            // already-expired engaged state as a successful no-op.
+            MarkReleasing();
             ServoTorqueResult r = InternalSetServoTorque(
                 false, false, ReleaseReason::kAutoIdle);
-            if (torque_state_.load(std::memory_order_acquire) ==
-                TorqueState::kReleased) {
+            auto state_after =
+                torque_state_.load(std::memory_order_acquire);
+            if (state_after == TorqueState::kReleased) {
                 last_motion_end_valid_ = false;
+            } else if (state_after == TorqueState::kReleasing) {
+                // Auto-idle re-observed motion or wobble under motion_mutex_
+                // and returned before any bus frame went out, so the per-axis
+                // torque state is still fully engaged.
+                torque_state_.store(TorqueState::kEngaged,
+                                    std::memory_order_release);
+                last_motion_end_ms_ = now_ms;
+                ESP_LOGW(TAG,
+                         "auto-release OFF aborted by motion/wobble "
+                         "re-check; rolled back torque_state_ to kEngaged, "
+                         "retry after one idle window.");
             } else {
                 last_motion_end_ms_ = now_ms;
                 ESP_LOGW(TAG,
