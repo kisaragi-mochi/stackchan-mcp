@@ -3306,12 +3306,20 @@ private:
         const int A = SERVO_WOBBLE_AMPLITUDE_DEG;
         int step = servo_wobble_step_.load();
         int target_yaw = 0;
-        int target_pitch = 0;
+        // Preserve the current pitch through the wobble sequence; only the
+        // yaw axis is animated. A hardcoded `target_pitch = 0` on every
+        // step would command the SCS0009 pitch axis toward the lower
+        // end-stop (raw pos ~620 ≈ pitch 0°) on a device whose standard
+        // rest pose is BOOT_INIT_PITCH_DEG=45°, accelerating #165
+        // cumulative WritePos protection-mode onset within a single
+        // STROKE gesture. Direct field read is safe here because
+        // motion_mutex_ is already held (see contract above). #175.
+        int target_pitch = pitch_motion_.current_deg;
         switch (step) {
-            case 0: target_yaw = -A; target_pitch = 0; break;
-            case 1: target_yaw = +A; target_pitch = 0; break;
-            case 2: target_yaw = -A; target_pitch = 0; break;
-            case 3: target_yaw =  0; target_pitch = 0; break;
+            case 0: target_yaw = -A; break;
+            case 1: target_yaw = +A; break;
+            case 2: target_yaw = -A; break;
+            case 3: target_yaw =  0; break;
             default:
                 servo_wobble_active_.store(false);
                 xSemaphoreGive(motion_mutex_);
