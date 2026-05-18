@@ -2950,24 +2950,58 @@ private:
         }
     }
 
+    // Wait budget for an in-progress OFF transition before deciding whether
+    // to re-engage. The auto-release path holds scs_bus_mutex_ for two
+    // EnableTorque bus frames (typically <5 ms total) between MarkReleasing()
+    // and the final PublishTorqueState() call. 200 ms is a generous safety
+    // margin that still keeps motion-entry latency human-imperceptible.
+    //
+    // If this budget is exhausted while torque_state_ is still kReleasing,
+    // the caller's bounded retry (kMaxReengageRetries = 3 in
+    // TakeMotionMutexAfterTorqueEngaged) will issue at most 3 such waits
+    // before declaring re-engage failure and skipping the motion entry.
     void EnsureTorqueEngagedBeforeMove() {
-        if (torque_state_.load(std::memory_order_acquire) ==
-            TorqueState::kEngaged) {
+        auto state = torque_state_.load(std::memory_order_acquire);
+        if (state == TorqueState::kEngaged) {
             return;
         }
         if (!servo_ok_) {
             return;
         }
-        ServoTorqueResult r = InternalSetServoTorque(
-            true, true, ReleaseReason::kReengagement);
-        if (torque_state_.load(std::memory_order_acquire) !=
-            TorqueState::kEngaged) {
-            ESP_LOGW(TAG,
-                     "servo torque re-engagement bus write failed: "
-                     "yaw_ok=%d (r=%d) pitch_ok=%d (r=%d)",
-                     r.yaw_ok ? 1 : 0, r.yaw_bus_return,
-                     r.pitch_ok ? 1 : 0, r.pitch_bus_return);
+
+        // Serialize against any pending OFF write. Without this wait, a
+        // re-engage call could win scs_bus_mutex_ ahead of the pending
+        // EnableTorque(OFF) on the auto-release path, publish kEngaged, let
+        // motion start, and then have the OFF write disable torque after
+        // motion has already been staged (round-3 adversarial finding).
+        constexpr int kMaxKReleasingWaitMs = 200;
+        constexpr int kKReleasingPollIntervalMs = 5;
+        int waited_ms = 0;
+        while (state == TorqueState::kReleasing &&
+               waited_ms < kMaxKReleasingWaitMs) {
+            vTaskDelay(pdMS_TO_TICKS(kKReleasingPollIntervalMs));
+            waited_ms += kKReleasingPollIntervalMs;
+            state = torque_state_.load(std::memory_order_acquire);
         }
+
+        if (state == TorqueState::kEngaged) {
+            // The OFF write failed during our wait and the state was
+            // recomputed back to kEngaged. No re-engage needed.
+            return;
+        }
+        if (state == TorqueState::kReleasing) {
+            // Wait budget exhausted without the OFF transition completing.
+            // Bail out and let TakeMotionMutexAfterTorqueEngaged's bounded
+            // retry decide whether to skip the motion entirely.
+            ESP_LOGW(TAG,
+                     "EnsureTorqueEngagedBeforeMove: kReleasing not "
+                     "completing within %d ms, deferring to caller retry.",
+                     kMaxKReleasingWaitMs);
+            return;
+        }
+
+        // state is kPartial or kReleased -- safe to re-engage now.
+        InternalSetServoTorque(true, true, ReleaseReason::kReengagement);
     }
 
     bool TakeMotionMutexAfterTorqueEngaged() {
