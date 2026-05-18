@@ -682,6 +682,7 @@ private:
     TaskHandle_t servo_task_handle_ = nullptr;
     uint32_t last_motion_end_ms_ = 0;              // ServoTask-private
     bool last_motion_end_valid_ = false;           // ServoTask-private
+    std::atomic<bool> idle_timer_reset_pending_{false};
     enum class TorqueState : uint8_t {
         kEngaged = 0,
         kPartial = 1,
@@ -689,6 +690,7 @@ private:
         kReleasing = 3,
     };
     std::atomic<TorqueState> torque_state_{TorqueState::kEngaged};
+    std::atomic<uint32_t> torque_release_epoch_{0};
     // Per-axis commanded torque state is protected by scs_bus_mutex_;
     // torque_state_ publishes the derived cross-task summary.
     bool yaw_torque_enabled_ = true;               // protected by scs_bus_mutex_
@@ -934,13 +936,28 @@ private:
         } else {
             state = TorqueState::kPartial;
         }
+        TorqueState old_state =
+            torque_state_.load(std::memory_order_acquire);
+        if (state == TorqueState::kEngaged &&
+            old_state != TorqueState::kEngaged) {
+            // Reset the ServoTask-owned idle window even when OFF->ON
+            // happens between ServoTask ticks.
+            idle_timer_reset_pending_.store(true,
+                                            std::memory_order_release);
+        }
         torque_state_.store(state, std::memory_order_release);
     }
 
     // Marks a fully-OFF transition while the bus write is still pending.
-    void MarkReleasing() {
+    // Returns this call's release epoch so auto-idle rollback can detect
+    // another release publisher that interleaved after it.
+    uint32_t MarkReleasing() {
+        uint32_t epoch =
+            torque_release_epoch_.fetch_add(1, std::memory_order_acq_rel) +
+            1;
         torque_state_.store(TorqueState::kReleasing,
                             std::memory_order_release);
+        return epoch;
     }
 
     // Block until torque_state_ leaves kReleasing or the elapsed-time
@@ -3020,7 +3037,7 @@ private:
                 // motion_mutex_ so concurrent motion entries do not observe
                 // the old engaged state while the OFF bus write is pending.
                 if (!yaw_enabled && !pitch_enabled) {
-                    MarkReleasing();
+                    (void)MarkReleasing();
                 }
                 xSemaphoreGive(motion_mutex_);
             }
@@ -3100,6 +3117,12 @@ private:
         if (!boot_init_done_.load(std::memory_order_acquire)) {
             return;
         }
+        // PublishTorqueState() raises this when torque re-engages between
+        // ServoTask ticks, so a stale idle timer cannot immediately re-OFF.
+        if (idle_timer_reset_pending_.exchange(
+                false, std::memory_order_acq_rel)) {
+            last_motion_end_valid_ = false;
+        }
         // Keep the idle window scoped to the currently engaged interval.
         // Released/partial/releasing states must not age a stale timer into
         // the next re-engage.
@@ -3136,7 +3159,7 @@ private:
             // block on motion_mutex_, so a concurrent manual ON is routed
             // through the kReleasing wait/retry path instead of treating the
             // already-expired engaged state as a successful no-op.
-            MarkReleasing();
+            uint32_t my_epoch = MarkReleasing();
             ServoTorqueResult r = InternalSetServoTorque(
                 false, false, ReleaseReason::kAutoIdle);
             auto state_after =
@@ -3144,16 +3167,30 @@ private:
             if (state_after == TorqueState::kReleased) {
                 last_motion_end_valid_ = false;
             } else if (state_after == TorqueState::kReleasing) {
-                // Auto-idle re-observed motion or wobble under motion_mutex_
-                // and returned before any bus frame went out, so the per-axis
-                // torque state is still fully engaged.
-                torque_state_.store(TorqueState::kEngaged,
-                                    std::memory_order_release);
+                uint32_t current_epoch =
+                    torque_release_epoch_.load(std::memory_order_acquire);
+                if (current_epoch == my_epoch) {
+                    // Auto-idle re-observed motion or wobble under
+                    // motion_mutex_ and returned before any bus frame went
+                    // out, so the per-axis torque state is still fully
+                    // engaged.
+                    torque_state_.store(TorqueState::kEngaged,
+                                        std::memory_order_release);
+                    ESP_LOGW(TAG,
+                             "auto-release OFF aborted by motion/wobble "
+                             "re-check; rolled back torque_state_ to "
+                             "kEngaged (epoch=%u), retry after "
+                             "one idle window.",
+                             (unsigned)my_epoch);
+                } else {
+                    ESP_LOGW(TAG,
+                             "auto-release OFF aborted, but release epoch "
+                             "advanced from %u to %u "
+                             "(another release publisher in flight); leaving "
+                             "torque_state_ for them.",
+                             (unsigned)my_epoch, (unsigned)current_epoch);
+                }
                 last_motion_end_ms_ = now_ms;
-                ESP_LOGW(TAG,
-                         "auto-release OFF aborted by motion/wobble "
-                         "re-check; rolled back torque_state_ to kEngaged, "
-                         "retry after one idle window.");
             } else {
                 last_motion_end_ms_ = now_ms;
                 ESP_LOGW(TAG,
