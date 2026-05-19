@@ -69,10 +69,11 @@ private:
     int version_ = 1;
 
     void ParseServerHello(const cJSON* root,
-                          const std::shared_ptr<std::atomic<bool>>& notify_disconnect);
+                          const std::shared_ptr<std::atomic<bool>>& notify_disconnect,
+                          bool arm_audio_channel);
     bool SendText(const std::string& text) override;
     std::string GetHelloMessage();
-    bool OpenAudioChannelInternal(bool report_error);
+    bool OpenAudioChannelInternal(bool report_error, bool arm_audio_channel = true);
     void ScheduleReconnect();
     void StopReconnectTimer();
 };
