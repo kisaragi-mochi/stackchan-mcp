@@ -326,6 +326,23 @@ change is called out under a `Firmware` subsection of the release entry.
   [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
   Problem 1.
 
+### Docs
+
+- Corrected the stack-chan project attribution in `README.md` and
+  `README.ja.md`. The hero blurb, the self-built-stack-chan note,
+  and the "Related projects" entry previously credited the project
+  to "Takawo-san" (mongonta0716 / Takao Akaki) and linked to a
+  personal fork; the project originator is **Shinya Ishikawa**
+  (ししかわ / 石川真也), with public release in 2021, and the
+  canonical upstream is `stack-chan/stack-chan`. The "Related
+  projects" section now also separately credits Takao Akaki
+  (mongonta0716) via the `stack-chan/stackchan-arduino` entry,
+  which is the implementation lineage actually referenced by this
+  firmware. A new `Trademarks` / `商標` section is appended to
+  both READMEs acknowledging that "StackChan" / "スタックチャン"
+  is a registered trademark of Shinya Ishikawa. Closes
+  [#184](https://github.com/kisaragi-mochi/stackchan-mcp/issues/184).
+
 ## [0.8.0] - 2026-05-19
 
 ### Gateway

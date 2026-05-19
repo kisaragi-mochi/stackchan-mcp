@@ -4,7 +4,7 @@
 
 **M5Stack 公式 [StackChan](https://docs.m5stack.com/ja/StackChan)** (2025年 Kickstarter 出荷キット) を任意の LLM クライアントから操作するための MCP (Model Context Protocol) ブリッジ。
 
-> オリジナルの [stack-chan プロジェクト (タカヲさん)](https://github.com/mongonta0716/stack-chan) のコミュニティから生まれ、M5Stack 公式が製品化した StackChan キットを対象としています。
+> [stack-chan プロジェクト](https://github.com/stack-chan/stack-chan)（ししかわ／石川真也 さんが 2021 年に公開）のコミュニティから生まれ、M5Stack 公式が製品化した StackChan キットを対象としています。
 
 ```
 ┌─────────────┐     stdio MCP      ┌──────────────┐    WebSocket MCP    ┌──────────────┐
@@ -39,7 +39,7 @@
 | **タッチ** | FT6336 / Si12T |
 | **ディスプレイ** | ILI9342 (SPI, 320×240) |
 
-> 自作の stack-chan (タカヲさん版オリジナル設計) でも、上記のピンアサイン・I2C アドレスが一致していれば動く可能性があります。動作報告・修正 PR 歓迎です。
+> 自作の stack-chan（[stack-chan プロジェクト](https://github.com/stack-chan/stack-chan)のオリジナル設計に準拠）でも、上記のピンアサイン・I2C アドレスが一致していれば動く可能性があります。動作報告・修正 PR 歓迎です。
 
 ## ツール一覧 (gateway 経由で MCP クライアントが呼べる)
 
@@ -519,7 +519,9 @@ X 軸 (yaw、`-90..+90°`) には同等のハードウェア制限はなく — 
 
 - [M5Stack 公式 StackChan ドキュメント](https://docs.m5stack.com/ja/StackChan) — 想定ハードウェアの公式ドキュメント (出荷時ファーム / 配線図 / API リファレンス等)
 - [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) — ベースとなる ESP32 LLM クライアントファームウェア
-- [stack-chan](https://github.com/mongonta0716/stack-chan) — オリジナルの StackChan プロジェクト (タカヲさん)
+- [stack-chan](https://github.com/stack-chan/stack-chan) — オリジナルの StackChan プロジェクト（ししかわ／石川真也 さん）
+- [stackchan-arduino](https://github.com/stack-chan/stackchan-arduino) — Arduino 系の servo 制御 library（タカオ さん／mongonta0716）。本ファームウェアの SCS0009 positioning timing はこちらを参考にしています
+- [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar) — StackChan 系 firmware で広く使われている avatar 描画 library
 - [Model Context Protocol](https://modelcontextprotocol.io) — MCP プロトコル仕様
 
 ## コントリビューション
@@ -527,3 +529,7 @@ X 軸 (yaw、`-90..+90°`) には同等のハードウェア制限はなく — 
 Issue / PR 歓迎です。StackChan コミュニティで使える形を目指しています。
 
 開発手順は [`CONTRIBUTING.md`](CONTRIBUTING.md) を参照してください。
+
+## 商標
+
+「StackChan」および「スタックチャン」は、stack-chan プロジェクトを発足したししかわ（石川真也）さんの登録商標です。本リポジトリでは、対象ハードウェアである M5Stack 公式 StackChan キットを指す用語としてこれらの名称を使用しています。

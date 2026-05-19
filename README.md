@@ -4,7 +4,7 @@
 
 An MCP (Model Context Protocol) bridge for the **M5Stack official [StackChan](https://docs.m5stack.com/ja/StackChan)** (2025 Kickstarter shipping kit), letting any LLM client drive the device.
 
-> Born out of the [stack-chan project](https://github.com/mongonta0716/stack-chan) community (originated by Takawo-san). This repository targets the M5Stack official StackChan kit that grew out of that lineage.
+> Born out of the [stack-chan project](https://github.com/stack-chan/stack-chan) community (originated by Shinya Ishikawa in 2021). This repository targets the M5Stack official StackChan kit that grew out of that lineage.
 
 ```
 ┌─────────────┐     stdio MCP      ┌──────────────┐    WebSocket MCP    ┌──────────────┐
@@ -39,7 +39,7 @@ This repository is a monorepo.
 | **Touch** | FT6336 / Si12T |
 | **Display** | ILI9342 (SPI, 320×240) |
 
-> A self-built stack-chan (Takawo-san's original design) may also work as long as the pin assignments and I2C addresses match. Reports and PRs welcome.
+> A self-built stack-chan (following the original [stack-chan project](https://github.com/stack-chan/stack-chan) design) may also work as long as the pin assignments and I2C addresses match. Reports and PRs welcome.
 
 ## Tools (callable by MCP clients via the gateway)
 
@@ -569,7 +569,9 @@ The `gateway/` runs as an independent Python process and only talks to the ESP32
 
 - [M5Stack official StackChan documentation](https://docs.m5stack.com/ja/StackChan) — official documentation for the target hardware (factory firmware / wiring / API reference / etc.)
 - [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) — the base ESP32 LLM client firmware
-- [stack-chan](https://github.com/mongonta0716/stack-chan) — the original StackChan project (Takawo-san)
+- [stack-chan](https://github.com/stack-chan/stack-chan) — the original StackChan project (Shinya Ishikawa)
+- [stackchan-arduino](https://github.com/stack-chan/stackchan-arduino) — Arduino-side servo control library (Takao Akaki / mongonta0716); this firmware references the SCS0009 positioning timing established there
+- [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar) — Avatar rendering library widely used by StackChan firmware
 - [Model Context Protocol](https://modelcontextprotocol.io) — the MCP protocol specification
 
 ## Contributing
@@ -577,3 +579,7 @@ The `gateway/` runs as an independent Python process and only talks to the ESP32
 Issues and PRs are welcome. We aim to provide something the StackChan community can use as-is.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development flow.
+
+## Trademarks
+
+"StackChan" and "スタックチャン" are registered trademarks of Shinya Ishikawa, the originator of the stack-chan project. This repository uses these names in reference to the M5Stack official StackChan kit it targets.
