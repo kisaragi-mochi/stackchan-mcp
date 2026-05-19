@@ -43,7 +43,7 @@ This document describes the WebSocket communication protocol between the device 
 
 4. **Server replies with "hello"**
    - The device waits for a JSON message whose `"type"` is `"hello"` and whose `"transport"` is `"websocket"`.
-   - The server may include a `session_id`; the device will store it.
+   - The server **must** include a non-empty string `session_id`; the device stores it and uses it to validate subsequent `tts.*` / `listen.*` messages. A hello without a valid `session_id` is rejected and the device falls back to the next candidate URL (or surfaces a connection failure when no candidates remain).
    - Example:
    ```json
    {
@@ -232,9 +232,9 @@ WebSocket text frames carry JSON. The most common `"type"` values and their sema
 1. **Hello**
    - The handshake acknowledgement.
    - Must include `"type": "hello"` and `"transport": "websocket"`.
+   - Must include a non-empty string `session_id` which the device records; subsequent `tts.*` / `listen.*` messages must echo the same value to pass the firmware's session-match gate.
    - May include `audio_params`, meaning the audio parameters the server expects / the canonical set agreed with the device.
-   - May include a `session_id` which the device records.
-   - Once received, the device sets the "audio channel open" event.
+   - Once received (and `session_id` validated), the device sets the "audio channel open" event.
 
 2. **STT**
    - `{"session_id": "xxx", "type": "stt", "text": "..."}`

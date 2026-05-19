@@ -17,6 +17,37 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Fixed: WebSocket was torn down on every user-initiated
+  `CloseAudioChannel()` (touch in listening mode, audio session abort),
+  making MCP control surfaces (LEDs, avatar, head movement, etc.)
+  unreachable until the next wake / touch reopened the channel. The
+  teardown is now skipped — the device transitions back to idle while
+  the WebSocket stays connected for continued MCP control. Contributed
+  via
+  [PR #136](https://github.com/kisaragi-mochi/stackchan-mcp/pull/136).
+
+- Fixed: gateway-driven `tts.start` / `listen.start` MCP messages were
+  silently dropped after a user-initiated `CloseAudioChannel()`,
+  because the audio-channel-state drop guard introduced alongside
+  [#136](https://github.com/kisaragi-mochi/stackchan-mcp/pull/136)
+  did not distinguish current-session messages from stale ones.
+  Replaced the binary `audio_channel_open_` predicate with a
+  `session_id` mismatch check: current-session messages flow through
+  to drive the firmware state machine while stale messages from
+  superseded WebSocket sessions remain blocked. Binary-frame gating
+  now runs up-front via an early `kDeviceStateSpeaking` check,
+  avoiding `BinaryProtocol2/3` header parse and `AudioStreamPacket`
+  payload allocation on the closed-channel path. The public WebSocket
+  protocol contract (`firmware/docs/websocket.md`,
+  `firmware/docs/websocket_zh.md`) now requires a non-empty string
+  `session_id` in the server hello. Carved-out follow-ups:
+  [#190](https://github.com/kisaragi-mochi/stackchan-mcp/issues/190)
+  (audio-operation-level identifier for same-session delayed
+  messages),
+  [#191](https://github.com/kisaragi-mochi/stackchan-mcp/issues/191)
+  (fail-fast on invalid server hello). Closes
+  [#187](https://github.com/kisaragi-mochi/stackchan-mcp/issues/187).
+
 - Fixed: STROKE-triggered touch wobble previously commanded
   `target_pitch = 0` per step, forcing the SCS0009 pitch axis toward
   the lower mechanical end-stop (raw `pos ≈ 620`) on every touch. The
