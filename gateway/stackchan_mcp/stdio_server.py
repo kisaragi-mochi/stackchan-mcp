@@ -580,6 +580,126 @@ def create_server() -> Server:
                     },
                 },
             ),
+            Tool(
+                name="i2c_scan",
+                description=(
+                    "Scan the external I2C bus on Grove Port A and return "
+                    "all 7-bit addresses (probe range 0x08..0x77, "
+                    "excluding I2C reserved ranges) that ACK a probe. Use "
+                    "this to discover attached M5Stack Unit modules "
+                    "(ENV III, ToF, gas sensor, PaHub, etc.). On-board ICs "
+                    "on the internal bus are NOT included (this tool "
+                    "operates on a physically separate bus). Returns "
+                    "{\"ok\": true, \"addresses\": [...]}."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="i2c_read",
+                description=(
+                    "Read n_bytes from an I2C device at 7-bit address "
+                    "`addr` on Grove Port A. Use this for protocols that "
+                    "read the device's current register / output without "
+                    "a preceding write. For typical 'write register "
+                    "address, then read' patterns, use `i2c_write_read` "
+                    "instead. Returns "
+                    "{\"ok\": true, \"bytes\": [...]} or "
+                    "{\"ok\": false, \"error\": \"ESP_ERR_TIMEOUT\"} on NACK."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "addr": {
+                            "type": "integer",
+                            "description": "7-bit I2C address (0..127).",
+                            "minimum": 0,
+                            "maximum": 127,
+                        },
+                        "n_bytes": {
+                            "type": "integer",
+                            "description": "Bytes to read (1..256).",
+                            "minimum": 1,
+                            "maximum": 256,
+                        },
+                    },
+                    "required": ["addr", "n_bytes"],
+                },
+            ),
+            Tool(
+                name="i2c_write",
+                description=(
+                    "Write bytes to an I2C device at 7-bit address `addr` "
+                    "on Grove Port A. `bytes` is an array of integers "
+                    "(0..255). This tool operates on the external Port A "
+                    "bus only; on-board ICs (PMIC, AW9523, touch, etc.) "
+                    "on the internal bus are not reachable."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "addr": {
+                            "type": "integer",
+                            "description": "7-bit I2C address (0..127).",
+                            "minimum": 0,
+                            "maximum": 127,
+                        },
+                        "bytes": {
+                            "type": "array",
+                            "description": "Bytes to write (each 0..255).",
+                            "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255,
+                            },
+                        },
+                    },
+                    "required": ["addr", "bytes"],
+                },
+            ),
+            Tool(
+                name="i2c_write_read",
+                description=(
+                    "Write `write_bytes` to an I2C device at 7-bit address "
+                    "`addr` on Grove Port A, then read `n_bytes` back in a "
+                    "single Repeated Start transaction. Common 'set "
+                    "register pointer, then read' idiom: pass "
+                    "write_bytes=[reg_addr] to read from a specific "
+                    "register."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "addr": {
+                            "type": "integer",
+                            "description": "7-bit I2C address (0..127).",
+                            "minimum": 0,
+                            "maximum": 127,
+                        },
+                        "write_bytes": {
+                            "type": "array",
+                            "description": (
+                                "Bytes to write before reading "
+                                "(each 0..255)."
+                            ),
+                            "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255,
+                            },
+                        },
+                        "n_bytes": {
+                            "type": "integer",
+                            "description": "Bytes to read (1..256).",
+                            "minimum": 1,
+                            "maximum": 256,
+                        },
+                    },
+                    "required": ["addr", "write_bytes", "n_bytes"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -779,6 +899,22 @@ def create_server() -> Server:
             "clear_leds": (
                 "self.led.clear",
                 {},
+            ),
+            "i2c_scan": (
+                "self.i2c.scan",
+                {},
+            ),
+            "i2c_read": (
+                "self.i2c.read",
+                arguments,
+            ),
+            "i2c_write": (
+                "self.i2c.write",
+                arguments,
+            ),
+            "i2c_write_read": (
+                "self.i2c.write_read",
+                arguments,
             ),
         }
 
