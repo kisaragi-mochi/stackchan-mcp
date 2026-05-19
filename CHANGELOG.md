@@ -17,6 +17,35 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Fixed: device booted to `idle` without connecting to the gateway,
+  leaving MCP tools (`set_avatar`, `set_leds`, `move_head`, etc.)
+  unreachable until a touch or wake-word trigger first opened an
+  audio session. `WebsocketProtocol::Start()` now connects to the
+  configured gateway at boot via `OpenAudioChannelInternal(report_error=false,
+  arm_audio_channel=false)`, decoupling the physical WebSocket
+  transport from the logical audio-session state introduced in
+  [#192](https://github.com/kisaragi-mochi/stackchan-mcp/pull/192).
+  Two coupled fixes ride along: (a) the `OpenAudioChannelInternal`
+  failure-exit now clears `intentional_close_` and arms
+  `ScheduleReconnect()` so a gateway-down boot (or any subsequent
+  failed retry) continues to retry automatically instead of silently
+  latching into a no-reconnect state — restoring the apparent intent
+  of the constructor's reconnect-timer lambda, whose own redundant
+  `ScheduleReconnect()` call is removed to prevent double-advancing
+  `reconnect_interval_ms_` per failed retry; (b)
+  `Application::CanEnterSleepMode()` now also blocks the legacy
+  60-second `PowerSaveTimer` deep-sleep entry while a new
+  `Protocol::IsTransportConnected()` virtual returns true, closing
+  the regression in which a boot-time WS connect with
+  `arm_audio_channel=false` would still trip the timer because
+  `audio_channel_open_` stays false. The transport-state predicate
+  is backed by a `std::atomic<bool> transport_connected_` flag
+  updated at server-hello success / disconnect / prologue /
+  destructor, avoiding the use-after-free race that would result
+  from reading `websocket_` directly on `ESP_TIMER_TASK`. External
+  reproduction confirmation by @tjkang. Closes
+  [#169](https://github.com/kisaragi-mochi/stackchan-mcp/issues/169).
+
 - Fixed: WebSocket was torn down on every user-initiated
   `CloseAudioChannel()` (touch in listening mode, audio session abort),
   making MCP control surfaces (LEDs, avatar, head movement, etc.)

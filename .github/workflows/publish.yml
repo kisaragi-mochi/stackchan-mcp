@@ -98,6 +98,17 @@ jobs:
           print("Version policy: OK (pre-release allowed; local version rejected)")
           PY
 
+      - name: Verify gateway/uv.lock is in sync with gateway/pyproject.toml
+        # Catches the failure mode that motivated this step: a release
+        # bump to gateway/pyproject.toml without re-running `uv lock`,
+        # leaving uv.lock pinned at the previous version. `uv sync
+        # --frozen` reads the lock as-is and does not detect this
+        # drift; `uv lock --check` re-resolves and exits non-zero on
+        # any mismatch, blocking the publish job before it produces a
+        # divergent sdist / wheel.
+        working-directory: gateway
+        run: uv lock --check
+
       - name: Install gateway dependencies
         working-directory: gateway
         run: uv sync --frozen
