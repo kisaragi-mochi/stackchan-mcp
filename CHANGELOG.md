@@ -15,21 +15,6 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ## [Unreleased]
 
-### Gateway
-
-- Added hardware-lane aware dispatch for ESP32 tool calls. Independent
-  hardware lanes (servo, LED, avatar/display, screen, audio, camera,
-  touch, status) now pipeline concurrently on the gateway side, while
-  ordering within the same lane is preserved. The existing
-  `ESP32Manager.call_tool()` API remains compatible. `tools/call`
-  send-failure handling is also hardened: WebSocket send failures now
-  mark the ESP32 connection disconnected and no longer leave
-  unobserved pending future exceptions. Refs
-  [#73](https://github.com/kisaragi-mochi/stackchan-mcp/issues/73)
-  (firmware-side `tools/call` execution remains serialized by
-  `Application::Schedule()`, so Issue #73 stays open as the
-  firmware-side follow-up).
-
 ### Firmware
 
 - Fixed: STROKE-triggered touch wobble previously commanded
@@ -340,6 +325,42 @@ change is called out under a `Firmware` subsection of the release entry.
   Refs
   [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
   Problem 1.
+
+## [0.8.0] - 2026-05-19
+
+### Gateway
+
+- Added the `set_auto_torque_release(enabled, timeout_ms)` MCP tool
+  exposure on the gateway, the runtime configuration surface for the
+  firmware-side Phase 4 auto-torque-release feature
+  ([#152](https://github.com/kisaragi-mochi/stackchan-mcp/issues/152)
+  Phase 4). `timeout_ms` is clamped by the firmware to `500..600000`
+  ms; the gateway forwards the request and returns the firmware's
+  response including the `clamped` flag and the
+  `torque_released_at_call` state. Refs
+  [#168](https://github.com/kisaragi-mochi/stackchan-mcp/issues/168).
+
+- Added the `set_servo_torque(yaw_enabled, pitch_enabled)` MCP tool
+  exposure on the gateway. The tool is a per-axis SCS0009 torque
+  toggle primitive originally introduced as a diagnostic probe for the
+  Phase 4 design work but also useful as a standalone power-management
+  primitive. The gateway forwards the request and returns the
+  firmware's response including the `short_circuited` flag indicating
+  whether the bus call was actually issued. Closes
+  [#163](https://github.com/kisaragi-mochi/stackchan-mcp/issues/163).
+
+- Added hardware-lane aware dispatch for ESP32 tool calls. Independent
+  hardware lanes (servo, LED, avatar/display, screen, audio, camera,
+  touch, status) now pipeline concurrently on the gateway side, while
+  ordering within the same lane is preserved. The existing
+  `ESP32Manager.call_tool()` API remains compatible. `tools/call`
+  send-failure handling is also hardened: WebSocket send failures now
+  mark the ESP32 connection disconnected and no longer leave
+  unobserved pending future exceptions. Refs
+  [#73](https://github.com/kisaragi-mochi/stackchan-mcp/issues/73)
+  (firmware-side `tools/call` execution remains serialized by
+  `Application::Schedule()`, so Issue #73 stays open as the
+  firmware-side follow-up).
 
 ## [0.7.0] - 2026-05-14
 
@@ -762,7 +783,9 @@ uv tool install stackchan-mcp
   releases only and does not maintain a moving `@v8` major-version
   alias, so the previous floating pin no longer resolved. ([#47])
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.6.0
 [0.5.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.4.0
