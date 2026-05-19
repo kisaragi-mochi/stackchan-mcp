@@ -6,14 +6,31 @@ The format is based on
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Version tags (`vX.Y.Z`) track the **Python MCP gateway** published to PyPI
-as `stackchan-mcp`. The ESP32 firmware lives in the same repository but is
-built and distributed separately through `firmware/scripts/release.py` and
-the upstream xiaozhi-esp32 firmware version (currently `v2.2.6`); when a
-tagged gateway release also requires a coordinated firmware change, that
-change is called out under a `Firmware` subsection of the release entry.
+Two release series ship from this repository:
+
+- **Gateway** — version tags `vX.Y.Z` track the Python MCP gateway
+  published to PyPI as `stackchan-mcp`. Changes appear under a
+  `Gateway` subsection of the release entry.
+- **Firmware** — version tags `firmware-vX.Y.Z` track the ESP32
+  firmware distributed via GitHub Releases (built through
+  `firmware/scripts/release.py`). Changes appear under a `Firmware`
+  subsection of the release entry. The upstream xiaozhi-esp32 firmware
+  version is currently `v2.2.6`; firmware-v* tags advance independently
+  of the upstream version.
+
+When a tagged release also makes documentation changes that are not
+specific to one side, those go under a `Docs` subsection of the release
+entry.
+
+See `CONTRIBUTING.md` for the release promotion process. The firmware
+release workflow refuses to publish if the new tag does not have a
+matching dated `## [firmware-vX.Y.Z] - YYYY-MM-DD` section in this
+file, so promotion of `[Unreleased]` entries is enforced rather than
+documented-only.
 
 ## [Unreleased]
+
+## [firmware-v1.8.0] - 2026-05-20
 
 ### Firmware
 
@@ -76,6 +93,65 @@ change is called out under a `Firmware` subsection of the release entry.
   [#191](https://github.com/kisaragi-mochi/stackchan-mcp/issues/191)
   (fail-fast on invalid server hello). Closes
   [#187](https://github.com/kisaragi-mochi/stackchan-mcp/issues/187).
+
+### Docs
+
+- Corrected the stack-chan project attribution in `README.md` and
+  `README.ja.md`. The hero blurb, the self-built-stack-chan note,
+  and the "Related projects" entry previously credited the project
+  to "Takawo-san" (mongonta0716 / Takao Akaki) and linked to a
+  personal fork; the project originator is **Shinya Ishikawa**
+  (ししかわ / 石川真也), with public release in 2021, and the
+  canonical upstream is `stack-chan/stack-chan`. The "Related
+  projects" section now also separately credits Takao Akaki
+  (mongonta0716) via the `stack-chan/stackchan-arduino` entry,
+  which is the implementation lineage actually referenced by this
+  firmware. A new `Trademarks` / `商標` section is appended to
+  both READMEs acknowledging that "StackChan" / "スタックチャン"
+  is a registered trademark of Shinya Ishikawa. Closes
+  [#184](https://github.com/kisaragi-mochi/stackchan-mcp/issues/184).
+
+
+## [0.8.0] - 2026-05-19
+
+### Gateway
+
+- Added the `set_auto_torque_release(enabled, timeout_ms)` MCP tool
+  exposure on the gateway, the runtime configuration surface for the
+  firmware-side Phase 4 auto-torque-release feature
+  ([#152](https://github.com/kisaragi-mochi/stackchan-mcp/issues/152)
+  Phase 4). `timeout_ms` is clamped by the firmware to `500..600000`
+  ms; the gateway forwards the request and returns the firmware's
+  response including the `clamped` flag and the
+  `torque_released_at_call` state. Refs
+  [#168](https://github.com/kisaragi-mochi/stackchan-mcp/issues/168).
+
+- Added the `set_servo_torque(yaw_enabled, pitch_enabled)` MCP tool
+  exposure on the gateway. The tool is a per-axis SCS0009 torque
+  toggle primitive originally introduced as a diagnostic probe for the
+  Phase 4 design work but also useful as a standalone power-management
+  primitive. The gateway forwards the request and returns the
+  firmware's response including the `short_circuited` flag indicating
+  whether the bus call was actually issued. Closes
+  [#163](https://github.com/kisaragi-mochi/stackchan-mcp/issues/163).
+
+- Added hardware-lane aware dispatch for ESP32 tool calls. Independent
+  hardware lanes (servo, LED, avatar/display, screen, audio, camera,
+  touch, status) now pipeline concurrently on the gateway side, while
+  ordering within the same lane is preserved. The existing
+  `ESP32Manager.call_tool()` API remains compatible. `tools/call`
+  send-failure handling is also hardened: WebSocket send failures now
+  mark the ESP32 connection disconnected and no longer leave
+  unobserved pending future exceptions. Refs
+  [#73](https://github.com/kisaragi-mochi/stackchan-mcp/issues/73)
+  (firmware-side `tools/call` execution remains serialized by
+  `Application::Schedule()`, so Issue #73 stays open as the
+  firmware-side follow-up).
+
+
+## [firmware-v1.7.0] - 2026-05-19
+
+### Firmware
 
 - Fixed: STROKE-triggered touch wobble previously commanded
   `target_pitch = 0` per step, forcing the SCS0009 pitch axis toward
@@ -168,6 +244,10 @@ change is called out under a `Firmware` subsection of the release entry.
   `CONFIG_STACKCHAN_SERVO_DELEGATED_MOTION=y` opt-in path is unchanged
   from Phase 2 / PR #154.
 
+## [firmware-v1.6.0] - 2026-05-17
+
+### Firmware
+
 - Added a post-init `ReadPos` re-sync step ("Phase 0'") to
   `InitializeServo()` that re-reads the SCS0009 actual position after
   the boot-init `WriteHeadAngles` interpolation completes and
@@ -239,6 +319,123 @@ change is called out under a `Firmware` subsection of the release entry.
   any residual trip on the firmware side; recovery still requires
   PMIC OFF/ON. Refs
   [#143](https://github.com/kisaragi-mochi/stackchan-mcp/issues/143).
+
+## [firmware-v1.5.0] - 2026-05-16
+
+### Firmware
+
+- Added a boot-time snap-suppress hold to `InitializeServo()` to
+  mitigate the [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 1 "downward drop on power-on" symptom. Immediately after the
+  existing pre-init `ReadPos` diagnostic, the firmware now issues a
+  `WritePos(id, current_pos, time=0, speed=0)` per servo, which the
+  SCS0009 treats as a new target equal to its current position and uses
+  to truncate any in-progress "snap-to-last-target" motion. Background:
+  the SCS0009 retains its commanded set-point across power cycles
+  (Hypothesis 1 in #121, confirmed by the firmware-v1.4.1 clean-install
+  reproduction in which `Boot pre-init ReadPos` still matched the
+  pre-power-off pose exactly after a full NVS reset on the ESP32 side,
+  demonstrating the set-point lives in the servo itself). When `VM_EN`
+  asserts at hardware power-on the servo restores torque and snaps
+  toward that retained target before any firmware-side speed limiting
+  can apply, audible as a mechanical end-stop impact when the previous
+  session ended near `pitch=0°`. Efficacy is observable in the serial
+  log via new `Boot snap-suppress yaw/pitch hold(pos=...): r=...`
+  lines; if `ReadPos` already captured an end-stop position the hold is
+  a no-op for that boot and a deeper fix (e.g. firmware-controlled
+  `VM_EN` sequencing through the PY32 IO-expander) would be required,
+  tracked separately. The pitch hold is additionally gated on the
+  `ReadPos` raw value falling inside the same `SAFE_PITCH_MIN..
+  SAFE_PITCH_MAX` range as every other pitch servo-write boundary in
+  the firmware: out-of-range reads (e.g. the head was hand-pushed past
+  an end-stop pre-boot, or the previous session's set-point fell
+  outside the safe range) skip the hold and let the subsequent
+  interpolating boot-init climb to `(yaw=0°, pitch=45°)` drive the
+  head back into the safe range through the existing speed-limited
+  path, instead of pinning the servo against an out-of-range raw
+  position. Refs
+  [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 1.
+
+- Extended the boot-time snap-suppress hold added for #121 Problem 1
+  (PR #137) so that it actually fires on the PMIC long-press OFF / ON
+  path, by retrying the pre-hold `ReadPos` long enough to absorb the
+  SCS0009 `~200 ms` startup latency after `VM_EN` HIGH. Each `ReadPos`
+  in `InitializeServo()` is now attempted up to 5 times at 50 ms
+  intervals (250 ms total budget per axis), well above the observed
+  wake-up latency window. The `Boot pre-init ReadPos` diagnostic line
+  now includes the attempt count taken
+  (`yaw_raw=N (attempts=K) pitch_raw=N (attempts=K)`). If all retries
+  still fail (e.g. a genuine SCS0009 bus hang per #100), the firmware
+  seeds `pitch_motion_.current_deg` with `BOOT_INIT_PITCH_DEG` (45°)
+  instead of leaving the struct-default `current_deg=0`, so the
+  subsequent boot-init `WriteHeadAngles(0, 45, 4000)` interpolation
+  becomes a near-no-op rather than walking `WritePos` calls upward
+  from `pos=620` (the lower mechanical end-stop) through
+  end-stop-adjacent positions. The `BOOT_INIT_YAW_DEG` /
+  `BOOT_INIT_PITCH_DEG` / `BOOT_INIT_MOVE_MS` constants are promoted
+  from local block scope to class-level `static constexpr` so the
+  safe-fallback branch can reference them. Closes
+  [#138](https://github.com/kisaragi-mochi/stackchan-mcp/issues/138).
+  Refs
+  [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
+  Problem 1.
+
+
+- Fixed a missing trailing comma in
+  `firmware/main/boards/freenove-esp32s3-display-2.8-lcd/config.json`
+  that caused `release.py` to fail to parse the file and silently skip
+  the `sdkconfig_append` entries for the
+  `freenove-esp32s3-display-2.8-lcd` board variant. The variant builds
+  now pick up `CONFIG_LANGUAGE_EN_US=y`,
+  `CONFIG_SR_WN_WN9S_HIESP=y`, and `CONFIG_SR_WN_WN9_HIESP=y` as
+  intended, and the spurious `[ERROR] Failed to parse ...` line is no
+  longer printed during any `release.py` invocation. The default
+  `release.py stackchan` build, which only targets the `stackchan`
+  board, is unaffected. Closes
+  [#113](https://github.com/kisaragi-mochi/stackchan-mcp/issues/113).
+
+- `release.py` now masks `CONFIG_DEFAULT_WEBSOCKET_TOKEN` in its
+  summary stdout so build logs are safe to paste into Issues / PRs
+  without leaking a personal token. The token is still applied to
+  the build itself; this change is purely build-log hygiene. Closes
+  [#131](https://github.com/kisaragi-mochi/stackchan-mcp/issues/131).
+
+## [0.7.0] - 2026-05-14
+
+### Gateway
+
+- `listen()` now accepts optional visual/motion feedback arguments:
+  `motion="face-only"` shows the `thinking` avatar during capture and
+  restores `idle` at the end, while `motion="look-up"` preserves yaw,
+  tilts pitch to `look_up_pitch` (validated to 5..85 degrees), shows
+  `thinking`, and holds the pose on success so the caller's response
+  can continue from the attentive posture. The default
+  `motion="none"` preserves the existing behavior. Refs #96.
+
+- `move_head` MCP tool now constrains `pitch` to `5..85` — the
+  M5Stack-recommended operating range. Both the `inputSchema`
+  (`minimum: 5`, `maximum: 85` for `pitch`; `minimum: -90`, `maximum: 90`
+  for `yaw`) and the gateway `call_tool` handler enforce the bound as
+  belt-and-suspenders. The tool description now references
+  `set_head_angles` for callers that genuinely need the wider firmware
+  hard clamp (`0..88`). This also refuses `move_head(yaw=0, pitch=0)`
+  and other below-`5°` pitch requests at the MCP boundary, so an
+  LLM-driven agent cannot trigger the SCS0009 servo bus hang state
+  tracked in
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
+  from a default pose-reset call. See README "Y-axis (pitch) safe
+  range — two-tier guard" for the gateway-side restrictive vs
+  firmware-side permissive policy contrast, and the comment thread on
+  [#99](https://github.com/kisaragi-mochi/stackchan-mcp/issues/99) /
+  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
+  for the on-device reproduction (2026-05-14). Closes
+  [#109](https://github.com/kisaragi-mochi/stackchan-mcp/issues/109).
+
+
+## [firmware-v1.4.1] - 2026-05-14
+
+### Firmware
 
 - Fixed user-configured WebSocket gateway URLs (e.g.
   `ws://192.168.x.y:8765`) being silently overwritten on every boot by
@@ -315,160 +512,6 @@ change is called out under a `Firmware` subsection of the release entry.
   Problem 2 (climb speed); the separate "unintended downward drop on
   power-on" (#121 Problem 1 / hypotheses 1–3) remains under
   investigation and is unaffected by this change.
-
-- Fixed a missing trailing comma in
-  `firmware/main/boards/freenove-esp32s3-display-2.8-lcd/config.json`
-  that caused `release.py` to fail to parse the file and silently skip
-  the `sdkconfig_append` entries for the
-  `freenove-esp32s3-display-2.8-lcd` board variant. The variant builds
-  now pick up `CONFIG_LANGUAGE_EN_US=y`,
-  `CONFIG_SR_WN_WN9S_HIESP=y`, and `CONFIG_SR_WN_WN9_HIESP=y` as
-  intended, and the spurious `[ERROR] Failed to parse ...` line is no
-  longer printed during any `release.py` invocation. The default
-  `release.py stackchan` build, which only targets the `stackchan`
-  board, is unaffected. Closes
-  [#113](https://github.com/kisaragi-mochi/stackchan-mcp/issues/113).
-
-- Added a boot-time snap-suppress hold to `InitializeServo()` to
-  mitigate the [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
-  Problem 1 "downward drop on power-on" symptom. Immediately after the
-  existing pre-init `ReadPos` diagnostic, the firmware now issues a
-  `WritePos(id, current_pos, time=0, speed=0)` per servo, which the
-  SCS0009 treats as a new target equal to its current position and uses
-  to truncate any in-progress "snap-to-last-target" motion. Background:
-  the SCS0009 retains its commanded set-point across power cycles
-  (Hypothesis 1 in #121, confirmed by the firmware-v1.4.1 clean-install
-  reproduction in which `Boot pre-init ReadPos` still matched the
-  pre-power-off pose exactly after a full NVS reset on the ESP32 side,
-  demonstrating the set-point lives in the servo itself). When `VM_EN`
-  asserts at hardware power-on the servo restores torque and snaps
-  toward that retained target before any firmware-side speed limiting
-  can apply, audible as a mechanical end-stop impact when the previous
-  session ended near `pitch=0°`. Efficacy is observable in the serial
-  log via new `Boot snap-suppress yaw/pitch hold(pos=...): r=...`
-  lines; if `ReadPos` already captured an end-stop position the hold is
-  a no-op for that boot and a deeper fix (e.g. firmware-controlled
-  `VM_EN` sequencing through the PY32 IO-expander) would be required,
-  tracked separately. The pitch hold is additionally gated on the
-  `ReadPos` raw value falling inside the same `SAFE_PITCH_MIN..
-  SAFE_PITCH_MAX` range as every other pitch servo-write boundary in
-  the firmware: out-of-range reads (e.g. the head was hand-pushed past
-  an end-stop pre-boot, or the previous session's set-point fell
-  outside the safe range) skip the hold and let the subsequent
-  interpolating boot-init climb to `(yaw=0°, pitch=45°)` drive the
-  head back into the safe range through the existing speed-limited
-  path, instead of pinning the servo against an out-of-range raw
-  position. Refs
-  [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
-  Problem 1.
-
-- Extended the boot-time snap-suppress hold added for #121 Problem 1
-  (PR #137) so that it actually fires on the PMIC long-press OFF / ON
-  path, by retrying the pre-hold `ReadPos` long enough to absorb the
-  SCS0009 `~200 ms` startup latency after `VM_EN` HIGH. Each `ReadPos`
-  in `InitializeServo()` is now attempted up to 5 times at 50 ms
-  intervals (250 ms total budget per axis), well above the observed
-  wake-up latency window. The `Boot pre-init ReadPos` diagnostic line
-  now includes the attempt count taken
-  (`yaw_raw=N (attempts=K) pitch_raw=N (attempts=K)`). If all retries
-  still fail (e.g. a genuine SCS0009 bus hang per #100), the firmware
-  seeds `pitch_motion_.current_deg` with `BOOT_INIT_PITCH_DEG` (45°)
-  instead of leaving the struct-default `current_deg=0`, so the
-  subsequent boot-init `WriteHeadAngles(0, 45, 4000)` interpolation
-  becomes a near-no-op rather than walking `WritePos` calls upward
-  from `pos=620` (the lower mechanical end-stop) through
-  end-stop-adjacent positions. The `BOOT_INIT_YAW_DEG` /
-  `BOOT_INIT_PITCH_DEG` / `BOOT_INIT_MOVE_MS` constants are promoted
-  from local block scope to class-level `static constexpr` so the
-  safe-fallback branch can reference them. Closes
-  [#138](https://github.com/kisaragi-mochi/stackchan-mcp/issues/138).
-  Refs
-  [#121](https://github.com/kisaragi-mochi/stackchan-mcp/issues/121)
-  Problem 1.
-
-### Docs
-
-- Corrected the stack-chan project attribution in `README.md` and
-  `README.ja.md`. The hero blurb, the self-built-stack-chan note,
-  and the "Related projects" entry previously credited the project
-  to "Takawo-san" (mongonta0716 / Takao Akaki) and linked to a
-  personal fork; the project originator is **Shinya Ishikawa**
-  (ししかわ / 石川真也), with public release in 2021, and the
-  canonical upstream is `stack-chan/stack-chan`. The "Related
-  projects" section now also separately credits Takao Akaki
-  (mongonta0716) via the `stack-chan/stackchan-arduino` entry,
-  which is the implementation lineage actually referenced by this
-  firmware. A new `Trademarks` / `商標` section is appended to
-  both READMEs acknowledging that "StackChan" / "スタックチャン"
-  is a registered trademark of Shinya Ishikawa. Closes
-  [#184](https://github.com/kisaragi-mochi/stackchan-mcp/issues/184).
-
-## [0.8.0] - 2026-05-19
-
-### Gateway
-
-- Added the `set_auto_torque_release(enabled, timeout_ms)` MCP tool
-  exposure on the gateway, the runtime configuration surface for the
-  firmware-side Phase 4 auto-torque-release feature
-  ([#152](https://github.com/kisaragi-mochi/stackchan-mcp/issues/152)
-  Phase 4). `timeout_ms` is clamped by the firmware to `500..600000`
-  ms; the gateway forwards the request and returns the firmware's
-  response including the `clamped` flag and the
-  `torque_released_at_call` state. Refs
-  [#168](https://github.com/kisaragi-mochi/stackchan-mcp/issues/168).
-
-- Added the `set_servo_torque(yaw_enabled, pitch_enabled)` MCP tool
-  exposure on the gateway. The tool is a per-axis SCS0009 torque
-  toggle primitive originally introduced as a diagnostic probe for the
-  Phase 4 design work but also useful as a standalone power-management
-  primitive. The gateway forwards the request and returns the
-  firmware's response including the `short_circuited` flag indicating
-  whether the bus call was actually issued. Closes
-  [#163](https://github.com/kisaragi-mochi/stackchan-mcp/issues/163).
-
-- Added hardware-lane aware dispatch for ESP32 tool calls. Independent
-  hardware lanes (servo, LED, avatar/display, screen, audio, camera,
-  touch, status) now pipeline concurrently on the gateway side, while
-  ordering within the same lane is preserved. The existing
-  `ESP32Manager.call_tool()` API remains compatible. `tools/call`
-  send-failure handling is also hardened: WebSocket send failures now
-  mark the ESP32 connection disconnected and no longer leave
-  unobserved pending future exceptions. Refs
-  [#73](https://github.com/kisaragi-mochi/stackchan-mcp/issues/73)
-  (firmware-side `tools/call` execution remains serialized by
-  `Application::Schedule()`, so Issue #73 stays open as the
-  firmware-side follow-up).
-
-## [0.7.0] - 2026-05-14
-
-### Gateway
-
-- `listen()` now accepts optional visual/motion feedback arguments:
-  `motion="face-only"` shows the `thinking` avatar during capture and
-  restores `idle` at the end, while `motion="look-up"` preserves yaw,
-  tilts pitch to `look_up_pitch` (validated to 5..85 degrees), shows
-  `thinking`, and holds the pose on success so the caller's response
-  can continue from the attentive posture. The default
-  `motion="none"` preserves the existing behavior. Refs #96.
-
-- `move_head` MCP tool now constrains `pitch` to `5..85` — the
-  M5Stack-recommended operating range. Both the `inputSchema`
-  (`minimum: 5`, `maximum: 85` for `pitch`; `minimum: -90`, `maximum: 90`
-  for `yaw`) and the gateway `call_tool` handler enforce the bound as
-  belt-and-suspenders. The tool description now references
-  `set_head_angles` for callers that genuinely need the wider firmware
-  hard clamp (`0..88`). This also refuses `move_head(yaw=0, pitch=0)`
-  and other below-`5°` pitch requests at the MCP boundary, so an
-  LLM-driven agent cannot trigger the SCS0009 servo bus hang state
-  tracked in
-  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
-  from a default pose-reset call. See README "Y-axis (pitch) safe
-  range — two-tier guard" for the gateway-side restrictive vs
-  firmware-side permissive policy contrast, and the comment thread on
-  [#99](https://github.com/kisaragi-mochi/stackchan-mcp/issues/99) /
-  [#100](https://github.com/kisaragi-mochi/stackchan-mcp/issues/100)
-  for the on-device reproduction (2026-05-14). Closes
-  [#109](https://github.com/kisaragi-mochi/stackchan-mcp/issues/109).
 
 ## [0.6.0] - 2026-05-12
 
@@ -604,6 +647,7 @@ change is called out under a `Firmware` subsection of the release entry.
   silently raises sub-zero requests with an `ESP_LOGW` warning. README
   gains a new "Hardware safety notes" section. Refs #80.
 
+
 ## [0.5.0] - 2026-05-10
 
 ### Added
@@ -649,6 +693,7 @@ change is called out under a `Firmware` subsection of the release entry.
   state. All four tools no-op cleanly with an `available=false`
   reply when the PY32 init failed, so a flaky expander does not
   cascade into errors.
+
 
 ## [0.4.0] - 2026-05-09
 
@@ -761,6 +806,7 @@ change is called out under a `Firmware` subsection of the release entry.
 [#5]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/5
 [#43]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/43
 
+
 ## [0.3.0] - 2026-05-08
 
 ### Added
@@ -795,6 +841,7 @@ change is called out under a `Firmware` subsection of the release entry.
 [#53]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/53
 [#54]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/54
 
+
 ## [0.2.0] - 2026-05-08
 
 ### Added
@@ -818,6 +865,7 @@ change is called out under a `Firmware` subsection of the release entry.
 
 [#3]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/3
 [#25]: https://github.com/kisaragi-mochi/stackchan-mcp/issues/25
+
 
 ## [0.1.0] - 2026-05-07
 
@@ -860,10 +908,20 @@ uv tool install stackchan-mcp
   releases only and does not maintain a moving `@v8` major-version
   alias, so the previous floating pin no longer resolved. ([#47])
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.8.0...HEAD
+
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.8.0...HEAD
+[firmware-v1.8.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.7.0...firmware-v1.8.0
 [0.8.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.7.0...v0.8.0
+[firmware-v1.7.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.6.0...firmware-v1.7.0
+[firmware-v1.6.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.5.0...firmware-v1.6.0
+[firmware-v1.5.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.4.1...firmware-v1.5.0
 [0.7.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.6.0
+[firmware-v1.4.1]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.3.0...firmware-v1.4.1
+[0.6.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.5.0...v0.6.0
+[firmware-v1.3.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.2.0...firmware-v1.3.0
+[firmware-v1.2.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.1.0...firmware-v1.2.0
+[firmware-v1.1.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.0.0...firmware-v1.1.0
+[firmware-v1.0.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/firmware-v1.0.0
 [0.5.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/kisaragi-mochi/stackchan-mcp/releases/tag/v0.3.0
