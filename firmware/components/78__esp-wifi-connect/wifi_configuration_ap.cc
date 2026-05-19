@@ -871,45 +871,99 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     }
     
     is_connecting_ = true;
-    esp_wifi_scan_stop();
-    xEventGroupClearBits(event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
 
-    wifi_config_t wifi_config;
-    bzero(&wifi_config, sizeof(wifi_config));
-    strlcpy((char *)wifi_config.sta.ssid, ssid.c_str(), 32);
-    strlcpy((char *)wifi_config.sta.password, password.c_str(), 64);
-    wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-    wifi_config.sta.failure_retry_cnt = 1;
-    
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    auto ret = esp_wifi_connect();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to connect to WiFi: %d", ret);
-        is_connecting_ = false;
-        return false;
-    }
-    ESP_LOGI(TAG, "Connecting to WiFi %s", ssid.c_str());
+    // Upper-level retry loop with delay between attempts.
+    //
+    // Background: in APSTA mode the captive-portal session is on the AP
+    // beacon channel (typically 1), and the target home AP is on some
+    // other channel (e.g. 10). When ConnectToWifi triggers, esp-wifi
+    // performs a Channel Switch Announcement to move both AP and STA to
+    // the home AP's channel, then immediately issues an association
+    // request. The home AP frequently responds with "Association
+    // Response status=30 (Refused Temporarily)" + a Comeback Time in
+    // TUs (= ~1.1s for Buffalo routers, observed) because its own
+    // state hasn't settled yet for the new station.
+    //
+    // The ESP-IDF wifi driver's failure_retry_cnt issues re-association
+    // attempts back-to-back (within a few ms) and does not honor the
+    // 802.11 Comeback Time, so every driver-internal retry is refused
+    // the same way and the first ConnectToWifi() call returns failure.
+    // By the time the user clicks "submit" a second time (~8s later)
+    // the AP has fully settled and association succeeds on the first
+    // try — which is why users observe "it always fails the first
+    // time, then works".
+    //
+    // Fix: when an attempt fails, wait long enough for the comeback
+    // timer + AP state settle (~3s is safe), then retry once. This
+    // produces a single user-visible success path instead of forcing
+    // the user to resubmit. The driver-internal retries (set below
+    // via failure_retry_cnt) are kept as a secondary safety net.
+    constexpr int kMaxAttempts = 2;
+    constexpr int kRetryDelayMs = 3000;
+    bool connected = false;
 
-    // Wait for the connection to complete for 10 or 25 seconds
-    EventBits_t bits = xEventGroupWaitBits(
-        event_group_,
-        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-        pdTRUE,
-        pdFALSE,
+    for (int attempt = 1; attempt <= kMaxAttempts && !connected; ++attempt) {
+        if (attempt > 1) {
+            ESP_LOGI(TAG,
+                "WiFi attempt %d/%d after %d ms delay "
+                "(waiting for AP comeback timer + state settle)",
+                attempt, kMaxAttempts, kRetryDelayMs);
+            vTaskDelay(pdMS_TO_TICKS(kRetryDelayMs));
+        }
+
+        xEventGroupClearBits(event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+        esp_wifi_scan_stop();
+
+        wifi_config_t wifi_config;
+        bzero(&wifi_config, sizeof(wifi_config));
+        strlcpy((char *)wifi_config.sta.ssid, ssid.c_str(), 32);
+        strlcpy((char *)wifi_config.sta.password, password.c_str(), 64);
+        wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        wifi_config.sta.failure_retry_cnt = 1;
+
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+        auto ret = esp_wifi_connect();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG,
+                "esp_wifi_connect failed: %d (attempt %d/%d)",
+                ret, attempt, kMaxAttempts);
+            continue;
+        }
+        ESP_LOGI(TAG, "Connecting to WiFi %s (attempt %d/%d)",
+            ssid.c_str(), attempt, kMaxAttempts);
+
+        // Wait for the connection to complete for 10 or 25 seconds.
+        EventBits_t bits = xEventGroupWaitBits(
+            event_group_,
+            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+            pdTRUE,
+            pdFALSE,
 #ifdef CONFIG_SOC_WIFI_SUPPORT_5G
-        pdMS_TO_TICKS(25000)
+            pdMS_TO_TICKS(25000)
 #else
-        pdMS_TO_TICKS(10000)
+            pdMS_TO_TICKS(10000)
 #endif
-    );
+        );
+
+        if (bits & WIFI_CONNECTED_BIT) {
+            connected = true;
+        } else {
+            ESP_LOGW(TAG,
+                "Attempt %d/%d failed%s",
+                attempt, kMaxAttempts,
+                attempt < kMaxAttempts ? " — will retry" : "");
+        }
+    }
     is_connecting_ = false;
 
-    if (bits & WIFI_CONNECTED_BIT) {
+    if (connected) {
         ESP_LOGI(TAG, "Connected to WiFi %s", ssid.c_str());
         esp_wifi_disconnect();
         return true;
     } else {
-        ESP_LOGE(TAG, "Failed to connect to WiFi %s", ssid.c_str());
+        ESP_LOGE(TAG,
+            "Failed to connect to WiFi %s after %d attempts",
+            ssid.c_str(), kMaxAttempts);
         return false;
     }
 }
