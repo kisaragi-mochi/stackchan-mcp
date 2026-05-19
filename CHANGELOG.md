@@ -32,6 +32,25 @@ change is called out under a `Firmware` subsection of the release entry.
 
 ### Firmware
 
+- Fixed: STROKE-triggered touch wobble previously commanded
+  `target_pitch = 0` per step, forcing the SCS0009 pitch axis toward
+  the lower mechanical end-stop (raw `pos ≈ 620`) on every touch. The
+  wobble now preserves the pre-wobble pitch by reading
+  `pitch_motion_.current_deg` (already protected by the active
+  `motion_mutex_` hold at this point in `ServoWobbleStepAdvance()`);
+  yaw continues to oscillate `±SERVO_WOBBLE_AMPLITUDE_DEG`. This
+  eliminates the single-STROKE `#165` onset path that
+  [#146](https://github.com/kisaragi-mochi/stackchan-mcp/pull/146)
+  introduced by hardcoding the pitch target, which subsequently became
+  reachable on every touch once
+  [PR #173](https://github.com/kisaragi-mochi/stackchan-mcp/pull/173)
+  made `auto_idle → reengagement → wobble` a routine cycle. On-device
+  verification: single STROKE shows `target_deg=44` (pre-wobble pitch)
+  across all four wobble steps; eight strokes in 60 s and a 60-min
+  representative motion load each report zero `WritePos retries
+  exhausted` events. Closes
+  [#175](https://github.com/kisaragi-mochi/stackchan-mcp/issues/175).
+
 - Added `set_auto_torque_release(enabled, timeout_ms)` and automatic
   SCS0009 torque release after motion idle timeout for #152 Phase 4.
 
