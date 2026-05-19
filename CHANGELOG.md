@@ -57,6 +57,61 @@ change is called out under a `Firmware` subsection of the release entry.
 - Fixed: mitigated #165 cumulative WritePos protection-mode exposure by
   reducing session-wide WritePos accumulation during idle periods.
 
+- Added a `self.robot.set_servo_torque(yaw_enabled, pitch_enabled)`
+  MCP tool that toggles SCS0009 torque on each axis independently via
+  `ScsBus::EnableTorque(id, enable)`. Originally introduced as a
+  diagnostic probe for the #152 Phase 4 auto-torque-release design,
+  the tool also stands on its own as a power-management primitive.
+  On disable, the firmware cancels any in-flight MotionDriver
+  interpolation, marks the axis position unknown, bumps the per-axis
+  freshness token (via `InvalidateAxisToken`), and cancels any
+  in-flight wobble sequence before issuing the `EnableTorque` bus
+  frame; this narrows the window in which a stale `Tick` snapshot
+  could emit one last `WritePos`. On enable, the bus frame is the
+  only side effect; re-anchoring `current_deg` is left to the caller
+  (`get_head_angles` + a fresh `set_head_angles` is the documented
+  pattern). Closes
+  [#163](https://github.com/kisaragi-mochi/stackchan-mcp/issues/163).
+
+- Fixed the `ServoDelegatedMotionDriver` Phase 0' / `set_servo_torque`
+  cancellation boundary by adding an `InvalidateAxisToken(axis_id)`
+  override that both bumps the per-axis `request_token` and clears the
+  per-`AxisServo` private dispatch / retry state
+  (`pending_dispatch_`, `dispatch_failures_`,
+  `readmove_failures_`) atomically under the caller-held
+  `motion_mutex_`. Without the private-state reset, a pre-reset
+  `Stage()` could leave `pending_dispatch_=true`, causing the next
+  `Update()` tick to issue a `WritePos` for the stale staged target
+  even though the visible `AxisMotion` fields had been reset by
+  Phase 0' or by the `set_servo_torque` disable path. The host
+  interpolation path is unaffected (no equivalent private-state
+  surface), so this PR completes the cancellation boundary on the
+  delegated path. Closes
+  [#160](https://github.com/kisaragi-mochi/stackchan-mcp/issues/160).
+
+- Fixed a same-millisecond `StartMove` race in
+  `HostInterpolationMotionDriver` by replacing the `move_start_ms`
+  equality check used for `Tick()` write-back freshness with a
+  per-driver monotonic `next_request_token_` counter. The
+  `move_start_ms` field is sourced from
+  `esp_timer_get_time() / 1000` (1 ms resolution), so two `StartMove`
+  calls landing inside the same millisecond shared the guard value
+  and a stale `Tick` snapshot could overwrite the newer move's state.
+  The `next_request_token_` counter is incremented in `StartMove` and
+  written into `AxisMotion::request_token` (a struct field that has
+  existed since PR #154 / Phase 2 and was previously only consumed by
+  `ServoDelegatedMotionDriver`). To preserve the freshness invariant
+  across Phase 0' direct `AxisMotion` mutations, this PR also adds
+  a new `MotionDriver::InvalidateAxisToken(axis_id)` hook with a
+  base-class no-op default; `HostInterpolationMotionDriver` overrides
+  it to bump the per-driver counter, and `InitializeServo()` Phase 0'
+  calls the hook inside its existing `motion_mutex_` critical section
+  after every direct `AxisMotion` mutation. `move_start_ms` is
+  retained for its arithmetic role in `AdvanceAxisLinear`
+  (`elapsed = now_ms - move_start_ms`); only its identity / freshness
+  role is replaced. Closes
+  [#158](https://github.com/kisaragi-mochi/stackchan-mcp/issues/158).
+
 - #152 Phase 3 — replaced normal-runtime `HostInterpolationMotionDriver`
   linear interpolation with `smooth_ui_toolkit` spring physics
   (`AnimateValue` per axis, m5stack/StackChan-equivalent default spring,
