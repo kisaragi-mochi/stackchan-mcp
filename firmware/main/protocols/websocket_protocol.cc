@@ -60,7 +60,7 @@ WebsocketProtocol::WebsocketProtocol() {
                 }
 
                 ESP_LOGI(TAG, "Reconnecting to websocket server");
-                if (!protocol->OpenAudioChannelInternal(false)) {
+                if (!protocol->OpenAudioChannelInternal(false, false)) {
                     ESP_LOGW(TAG, "Reconnect attempt failed; rescheduling");
                     protocol->ScheduleReconnect();
                 }
@@ -143,41 +143,54 @@ bool WebsocketProtocol::SendText(const std::string& text) {
 }
 
 bool WebsocketProtocol::IsAudioChannelOpened() const {
-    return websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
+    return audio_channel_open_.load() && websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
 }
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
-    (void)send_goodbye;  // Websocket doesn't need to send goodbye message
-    // Mark the close as intentional so any reconnect job already
-    // re-posted from the timer callback aborts when it runs on the main
-    // task, then disarm the current socket's per-socket flag so the
-    // OnDisconnected lambda hits the early-return guard the moment the
-    // underlying close fires (the lambda runs on the WS task).
-    intentional_close_.store(true);
-    if (current_notify_disconnect_) {
-        current_notify_disconnect_->store(false);
+    (void)send_goodbye;
+    // Keep WebSocket alive — only notify the application that the audio
+    // channel is logically closed so it returns to idle state.
+    //
+    // The original implementation called websocket_.reset() here, which
+    // destroyed the WebSocket connection every time the device exited
+    // listening/speaking mode. This made it impossible to control the
+    // device (LEDs, avatar, head movement) outside of an active audio
+    // session, since all MCP tools rely on the same WebSocket.
+    //
+    // By skipping the teardown and directly invoking the closed callback,
+    // the app transitions back to idle while the WebSocket stays connected
+    // for continued MCP control.
+    audio_channel_open_.store(false);
+    // Keep session_id_ across a logical audio-session close; it belongs to the WebSocket connection lifetime.
+    ESP_LOGI(TAG, "CloseAudioChannel: keeping WebSocket alive for MCP");
+    if (on_audio_channel_closed_ != nullptr) {
+        on_audio_channel_closed_();
     }
-    StopReconnectTimer();
-    websocket_.reset();
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
-    return OpenAudioChannelInternal(true);
+    return OpenAudioChannelInternal(true, true);
 }
 
-bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
+bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_audio_channel) {
     // Resetting the previous websocket may invoke its OnDisconnected
     // callback synchronously. Disarm the previous socket's flag and
     // mark the teardown as intentional so neither the per-socket lambda
     // nor any deferred reconnect job triggers a spurious reconnect; the
     // new socket below installs a fresh token of its own and clears
     // intentional_close_ once the server hello has been acked.
+    audio_channel_open_.store(false);
     intentional_close_.store(true);
     if (current_notify_disconnect_) {
         current_notify_disconnect_->store(false);
     }
     StopReconnectTimer();
     websocket_.reset();
+    // Clear session_id_ at the start of a fresh socket attempt so a
+    // malformed or version-skewed server hello cannot leave the previous
+    // connection's id active as the tts/listen gate key. CloseAudioChannel
+    // intentionally keeps session_id_ alive across a logical audio-session
+    // close while the WebSocket stays connected.
     session_id_ = "";
     xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 
@@ -304,8 +317,14 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
         websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
         websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
 
-        websocket_->OnData([this, notify_disconnect](const char* data, size_t len, bool binary) {
+        websocket_->OnData([this, notify_disconnect, arm_audio_channel](const char* data, size_t len, bool binary) {
             if (binary) {
+                // Drop binary frames before parsing when the device is not
+                // speaking. This mirrors Application::OnIncomingAudio's
+                // downstream gate while avoiding stale-frame parse/allocation.
+                if (Application::GetInstance().GetDeviceState() != kDeviceStateSpeaking) {
+                    return;
+                }
                 if (on_incoming_audio_ != nullptr) {
                     if (version_ == 2) {
                         BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
@@ -346,7 +365,23 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
                 auto type = cJSON_GetObjectItem(root, "type");
                 if (cJSON_IsString(type)) {
                     if (strcmp(type->valuestring, "hello") == 0) {
-                        ParseServerHello(root, notify_disconnect);
+                        ParseServerHello(root, notify_disconnect, arm_audio_channel);
+                    } else if (strcmp(type->valuestring, "tts") == 0 ||
+                               strcmp(type->valuestring, "listen") == 0) {
+                        // Drop tts/listen messages whose session_id does not
+                        // match the current WebSocket session set by
+                        // ParseServerHello, while allowing the gateway's
+                        // current-session control messages through.
+                        auto session_id_obj = cJSON_GetObjectItem(root, "session_id");
+                        const char* incoming_sid = cJSON_IsString(session_id_obj) ? session_id_obj->valuestring : nullptr;
+                        bool session_match = incoming_sid != nullptr &&
+                                             !session_id_.empty() &&
+                                             strcmp(session_id_.c_str(), incoming_sid) == 0;
+                        if (!session_match) {
+                            ESP_LOGD(TAG, "Dropping %s message (session_id mismatch or missing)", type->valuestring);
+                        } else if (on_incoming_json_ != nullptr) {
+                            on_incoming_json_(root);
+                        }
                     } else {
                         if (on_incoming_json_ != nullptr) {
                             on_incoming_json_(root);
@@ -361,15 +396,14 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
         });
 
         websocket_->OnDisconnected([this, notify_disconnect]() {
+            audio_channel_open_.store(false);
             // notify_disconnect carries this socket's reconnect intent.
-            // ParseServerHello() flips it to true the moment the server
-            // hello arrives; an intentional teardown (CloseAudioChannel,
-            // OpenAudioChannelInternal prologue, or destructor) flips it
-            // back to false synchronously before invoking
-            // websocket_.reset(). A `false` reading here therefore means
-            // either the candidate failed before server hello or the
-            // firmware is tearing the socket down on purpose — neither
-            // case should schedule a reconnect.
+            // ParseServerHello() arms it (true) once the handshake
+            // completes; intentional teardown paths (CloseAudioChannel,
+            // OpenAudioChannelInternal, destructor) disarm it (false)
+            // before resetting the socket. A false reading here means
+            // either the candidate never completed handshake or the
+            // close was intentional — neither should reconnect.
             if (!notify_disconnect->load()) {
                 ESP_LOGI(TAG, "Websocket disconnected (no reconnect: candidate failed or intentional close)");
                 return;
@@ -427,7 +461,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error) {
             on_connected_();
         }
 
-        if (on_audio_channel_opened_ != nullptr) {
+        if (arm_audio_channel && on_audio_channel_opened_ != nullptr) {
             on_audio_channel_opened_();
         }
 
@@ -509,7 +543,8 @@ std::string WebsocketProtocol::GetHelloMessage() {
 }
 
 void WebsocketProtocol::ParseServerHello(const cJSON* root,
-                                         const std::shared_ptr<std::atomic<bool>>& notify_disconnect) {
+                                         const std::shared_ptr<std::atomic<bool>>& notify_disconnect,
+                                         bool arm_audio_channel) {
     auto transport = cJSON_GetObjectItem(root, "transport");
     if (transport == nullptr || !cJSON_IsString(transport)) {
         ESP_LOGE(TAG, "Server hello missing or non-string transport field");
@@ -521,10 +556,21 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
     }
 
     auto session_id = cJSON_GetObjectItem(root, "session_id");
-    if (cJSON_IsString(session_id)) {
-        session_id_ = session_id->valuestring;
-        ESP_LOGI(TAG, "Session ID: %s", session_id_.c_str());
+    if (!cJSON_IsString(session_id) ||
+        session_id->valuestring == nullptr ||
+        session_id->valuestring[0] == '\0') {
+        // session_id is the gate key for tts/listen messages (#187). A
+        // missing or empty session_id at hello time would leave session_id_
+        // empty after this PR's OpenAudioChannelInternal clear, causing
+        // every gateway-driven tts/listen to mismatch and silently drop.
+        // Reject the hello here so the candidate loop's xEventGroupWaitBits
+        // times out and the next candidate (or a failure) is surfaced
+        // instead of an unusable connection.
+        ESP_LOGE(TAG, "Server hello missing or empty session_id; rejecting candidate");
+        return;
     }
+    session_id_ = session_id->valuestring;
+    ESP_LOGI(TAG, "Session ID: %s", session_id_.c_str());
 
     auto audio_params = cJSON_GetObjectItem(root, "audio_params");
     if (cJSON_IsObject(audio_params)) {
@@ -564,6 +610,12 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
     // Reusing this protocol from a context that drives CloseAudioChannel
     // from a separate task would invalidate that assumption and would
     // also need a different mirror strategy (e.g. atomic_shared_ptr).
+    // Only arm the audio channel when the user explicitly opened it
+    // (OpenAudioChannel → arm_audio_channel=true). Reconnect-driven
+    // hellos (arm_audio_channel=false) restore the transport without
+    // re-arming audio — otherwise a network blip after
+    // CloseAudioChannel() would silently re-open the audio session.
+    audio_channel_open_.store(arm_audio_channel);
     intentional_close_.store(false);
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 }
