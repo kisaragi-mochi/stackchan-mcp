@@ -1,0 +1,3 @@
+[submodule "firmware/components/smooth_ui_toolkit"]
+	path = firmware/components/smooth_ui_toolkit
+	url = https://github.com/Forairaaaaa/smooth_ui_toolkit.git

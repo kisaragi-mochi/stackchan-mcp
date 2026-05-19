@@ -1046,6 +1046,7 @@ idf_component_register(SRCS ${SOURCES}
                         efuse
                         bt
                         fatfs
+                        smooth_ui_toolkit
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
 

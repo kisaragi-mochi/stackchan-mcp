@@ -297,6 +297,77 @@ def create_server() -> Server:
                 },
             ),
             Tool(
+                name="set_servo_torque",
+                description=(
+                    "Enable or disable SCS0009 servo torque on the yaw / "
+                    "pitch axes independently. Disabling torque stops motor "
+                    "current on that axis; the head holds via static "
+                    "friction (no motion is commanded). On disable, the "
+                    "firmware also cancels any in-flight MotionDriver "
+                    "interpolation and marks the axis position unknown so "
+                    "a subsequent same-target set_head_angles is re-"
+                    "dispatched rather than no-op-optimized. Re-enabling "
+                    "torque does NOT trigger a move; the next "
+                    "set_head_angles or wobble call will. Diagnostic / "
+                    "power-management primitive used to observe physical "
+                    "head behavior under torque-off (Issue #163; auto "
+                    "release on idle is Issue #152 Phase 4)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "yaw_enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True to enable yaw axis torque, false to "
+                                "disable."
+                            ),
+                        },
+                        "pitch_enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True to enable pitch axis torque, false "
+                                "to disable."
+                            ),
+                        },
+                    },
+                    "required": ["yaw_enabled", "pitch_enabled"],
+                },
+            ),
+            Tool(
+                name="set_auto_torque_release",
+                description=(
+                    "Enable or disable firmware-side automatic SCS0009 "
+                    "torque release after motion idle timeout. timeout_ms "
+                    "is clamped by the firmware to 500..600000 ms. "
+                    "Disabling this setting does not re-enable torque if "
+                    "it is already released; the next set_head_angles, "
+                    "wobble, or explicit set_servo_torque(true, true) call "
+                    "re-engages torque."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True to enable idle auto-release, false "
+                                "to disable it."
+                            ),
+                        },
+                        "timeout_ms": {
+                            "type": "integer",
+                            "description": (
+                                "Idle timeout in milliseconds. Values "
+                                "outside 500..600000 are clamped by the "
+                                "firmware handler."
+                            ),
+                        },
+                    },
+                    "required": ["enabled", "timeout_ms"],
+                },
+            ),
+            Tool(
                 name="get_touch_state",
                 description=(
                     "Read the head-touch (Si12T) sensor state and the most recent "
@@ -675,6 +746,14 @@ def create_server() -> Server:
             ),
             "set_blink": (
                 "self.display.set_blink",
+                arguments,
+            ),
+            "set_servo_torque": (
+                "self.robot.set_servo_torque",
+                arguments,
+            ),
+            "set_auto_torque_release": (
+                "self.robot.set_auto_torque_release",
                 arguments,
             ),
             "get_touch_state": (
