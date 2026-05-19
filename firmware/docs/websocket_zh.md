@@ -42,7 +42,7 @@
 
 4. **服务器回复 "hello"**  
    - 设备等待服务器返回一条包含 `"type": "hello"` 的 JSON 消息，并检查 `"transport": "websocket"` 是否匹配。  
-   - 服务器可选下发 `session_id` 字段，设备端收到后会自动记录。  
+   - 服务器**必须**下发非空字符串 `session_id` 字段，设备端会记录并用于后续 `tts.*` / `listen.*` 消息的会话匹配校验。缺失、空或非字符串的 `session_id` 会导致设备拒绝该握手并回退到下一个候选 URL（或在候选用尽时上报连接失败）。  
    - 示例：
    ```json
    {
@@ -221,9 +221,9 @@ WebSocket 文本帧以 JSON 方式传输，以下为常见的 `"type"` 字段及
 1. **Hello**  
    - 服务器端返回的握手确认消息。  
    - 必须包含 `"type": "hello"` 和 `"transport": "websocket"`。  
+   - 必须包含非空字符串 `session_id` 字段，设备端会记录；后续的 `tts.*` / `listen.*` 消息必须携带相同的 `session_id` 才能通过固件侧的会话匹配校验。  
    - 可能会带有 `audio_params`，表示服务器期望的音频参数，或与设备端对齐的配置。   
-   - 服务器可选下发 `session_id` 字段，设备端收到后会自动记录。  
-   - 成功接收后设备端会设置事件标志，表示 WebSocket 通道就绪。
+   - 成功接收（且 `session_id` 通过校验）后设备端会设置事件标志，表示 WebSocket 通道就绪。
 
 2. **STT**  
    - `{"session_id": "xxx", "type": "stt", "text": "..."}`
