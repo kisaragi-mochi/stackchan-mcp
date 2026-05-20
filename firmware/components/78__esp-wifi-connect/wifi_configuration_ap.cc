@@ -948,9 +948,22 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
         if (bits & WIFI_CONNECTED_BIT) {
             connected = true;
         } else {
+            const bool timed_out = (bits == 0);
+            if (timed_out) {
+                // Timeout — neither WIFI_CONNECTED_BIT nor WIFI_FAIL_BIT
+                // was set, so WIFI_EVENT_STA_DISCONNECTED has not fired
+                // and the driver may still be in `connecting` state.
+                // Cancel the in-flight attempt explicitly before the
+                // retry delay; without this the next esp_wifi_connect()
+                // can return ESP_ERR_WIFI_STATE on a connecting-state
+                // driver (per esp_wifi.h attention 3), making the retry
+                // a no-op on slow / event-dropping APs.
+                esp_wifi_disconnect();
+            }
             ESP_LOGW(TAG,
-                "Attempt %d/%d failed%s",
+                "Attempt %d/%d %s%s",
                 attempt, kMaxAttempts,
+                timed_out ? "timed out (driver may still be connecting)" : "failed",
                 attempt < kMaxAttempts ? " — will retry" : "");
         }
     }
