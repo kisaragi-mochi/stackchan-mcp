@@ -481,6 +481,71 @@ event for watchers. The `firmware-v1.4.0` release (yanked within ~12
 minutes on 2026-05-14, replaced by `firmware-v1.4.1`) is the historical
 example.
 
+## Development Philosophy
+
+These three principles guide labeling, milestoning, scoping, and issue / PR
+triage in this repository. When a decision feels ambiguous, check it against
+the three in order.
+
+### 1. LLM-User First
+
+The primary consumer of MCP tools is an LLM agent, not a human CLI user.
+Usability for AI is the top priority.
+
+- MCP tool signatures, error messages, and descriptions should be at a
+  granularity where an LLM can read them and form a correct call on the
+  first try
+- "A human can figure this out by reading carefully" is a deduction;
+  "an LLM nails the arguments first try" is the target
+- Example: `set_head_angles(yaw_deg, pitch_deg, duration_ms)` — the
+  `description` should spell out range, unit, recommended values, and
+  end-stop warnings (the human README is separate; the tool description
+  is for the LLM)
+- Issue bodies and PR descriptions should pass the same check: can a fresh
+  LLM session load context from this and decide what to do?
+
+### 2. Contributors Welcome
+
+External contributors should be able to read the repo and participate
+without insider context.
+
+- Issues / PRs / README / CONTRIBUTING / code comments should be
+  understandable to a cold-start contributor
+- Labels and milestones should not look "untriaged" or "abandoned"
+- Use `good first issue` / `help wanted` sparingly but meaningfully
+- The issue surface should make it easy for a new contributor to find an
+  issue they can pick up (Projects v2 view is planned for this)
+
+### 3. Give Back to the StackChan Community
+
+`stackchan-mcp` exists inside and contributes to the broader StackChan
+ecosystem originated by Shinya Ishikawa (ししかわ).
+
+- Attribution to upstream and related projects (`stack-chan/stack-chan`,
+  `stack-chan/stackchan-arduino`, `m5stack/m5stack-avatar`,
+  `78/xiaozhi-esp32`, `necobit/feetech_scs_esp_idf`, etc.) is carefully
+  preserved; misattribution gets corrected promptly
+- When a finding or fix is discovered upstream, return it as a PR or
+  Issue to the relevant project (example: filing on
+  `necobit/feetech_scs_esp_idf` on 2026-05-10)
+- "StackChan" and "スタックチャン" are registered trademarks of Shinya
+  Ishikawa — the `## Trademarks` section in `README.md` is required
+- Feedback to community contributions stays polite, in the desu/masu
+  register in Japanese contexts, with minimal emoji and a sincere
+  "thank you / good catch / let me look into it" reflex
+
+### When to apply
+
+- **Filing a new issue**: explicitly state which of the three the issue
+  improves. If none of the three are clearly served, don't file it
+  (comment on an existing issue or add to docs instead)
+- **Scoping a PR**: when scope creeps, draw the line on "which of the
+  three does this PR primarily serve"
+- **Priority decisions**: raising priority to `medium` or higher needs a
+  middling-or-higher impact on at least one of the three
+- **When uncertain**: ask the maintainer "which of the three do we
+  prioritize for this one?"
+
 ## Communication
 
 Be polite and concrete. This is a small hardware community, and clear technical
