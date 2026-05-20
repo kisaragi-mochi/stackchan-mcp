@@ -74,6 +74,7 @@ private:
     std::optional<PropertyElementType> element_type_;  // 配列要素型 (kPropertyTypeArray)
     std::optional<int> element_min_;  // 配列要素整数の最小値 (Array of Integer)
     std::optional<int> element_max_;  // 配列要素整数の最大値 (Array of Integer)
+    std::optional<int> max_items_;    // 配列の最大要素数 (kPropertyTypeArray、 set_max_items() で設定)
 
 public:
     // Required field constructor (Boolean / Integer / String)
@@ -84,10 +85,20 @@ public:
         }
     }
 
-    // Optional field constructor with default value (Boolean / Integer / String)
+    // Optional field constructor with default value (Boolean / Integer / String).
+    // Array properties cannot use this generic constructor — they require the
+    // element-type-aware constructor below, otherwise to_json() would emit an
+    // empty items schema and any later element-typed access would dereference
+    // an unset std::optional.
     template<typename T>
     Property(const std::string& name, PropertyType type, const T& default_value)
         : name_(name), type_(type), has_default_value_(true) {
+        if (type == kPropertyTypeArray) {
+            throw std::invalid_argument(
+                "Array properties cannot use the generic default-value constructor; "
+                "use the element-type-aware Property(name, type, element_type, ...) form"
+            );
+        }
         value_ = default_value;
     }
 
@@ -143,6 +154,22 @@ public:
     inline bool has_element_range() const { return element_min_.has_value() && element_max_.has_value(); }
     inline int element_min() const { return element_min_.value_or(0); }
     inline int element_max() const { return element_max_.value_or(0); }
+    inline bool has_max_items() const { return max_items_.has_value(); }
+    inline int max_items() const { return max_items_.value_or(0); }
+
+    // Optional maxItems cap for kPropertyTypeArray properties. Limits the
+    // accepted array length both in the emitted JSON Schema (`maxItems`) and
+    // in set_value() runtime validation. Keeps the firmware from allocating
+    // an unbounded std::vector for an oversized client payload.
+    inline void set_max_items(int max_items) {
+        if (type_ != kPropertyTypeArray) {
+            throw std::invalid_argument("max_items only applies to array properties");
+        }
+        if (max_items < 0) {
+            throw std::invalid_argument("max_items must be non-negative");
+        }
+        max_items_ = max_items;
+    }
 
     template<typename T>
     inline T value() const {
@@ -160,8 +187,11 @@ public:
                 throw std::invalid_argument("Value exceeds maximum allowed: " + std::to_string(max_value_.value()));
             }
         }
-        // Integer-array element range check
+        // Integer-array element range + size check
         if constexpr (std::is_same_v<T, std::vector<int>>) {
+            if (max_items_.has_value() && static_cast<int>(value.size()) > max_items_.value()) {
+                throw std::invalid_argument("Array size exceeds maxItems: " + std::to_string(max_items_.value()));
+            }
             if (element_min_.has_value() && element_max_.has_value()) {
                 for (int elem : value) {
                     if (elem < element_min_.value()) {
@@ -171,6 +201,12 @@ public:
                         throw std::invalid_argument("Array element exceeds maximum allowed: " + std::to_string(element_max_.value()));
                     }
                 }
+            }
+        }
+        // String-array size check
+        if constexpr (std::is_same_v<T, std::vector<std::string>>) {
+            if (max_items_.has_value() && static_cast<int>(value.size()) > max_items_.value()) {
+                throw std::invalid_argument("Array size exceeds maxItems: " + std::to_string(max_items_.value()));
             }
         }
         value_ = value;
@@ -215,6 +251,9 @@ public:
                 cJSON_AddStringToObject(items, "type", "string");
             }
             cJSON_AddItemToObject(json, "items", items);
+            if (max_items_.has_value()) {
+                cJSON_AddNumberToObject(json, "maxItems", max_items_.value());
+            }
         }
 
         char *json_str = cJSON_PrintUnformatted(json);
