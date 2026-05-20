@@ -5162,14 +5162,16 @@ private:
         mcp_server.AddTool(
             "self.i2c.read",
             "Read n_bytes from an I2C device at 7-bit address `addr` on Grove "
-            "Port A. Use this for protocols that read the device's current "
-            "register / output without a preceding write (e.g. sensors that "
-            "latch a measurement from a prior command). For typical 'write "
-            "register address, then read' patterns, use self.i2c.write_read "
-            "instead. Returns {\"ok\":true, \"bytes\":[...]} or "
+            "Port A. `addr` is restricted to 0x08..0x77 (I2C reserved ranges "
+            "excluded — matches the self.i2c.scan probe range). Use this for "
+            "protocols that read the device's current register / output "
+            "without a preceding write (e.g. sensors that latch a measurement "
+            "from a prior command). For typical 'write register address, "
+            "then read' patterns, use self.i2c.write_read instead. Returns "
+            "{\"ok\":true, \"bytes\":[...]} or "
             "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK.",
             PropertyList({
-                Property("addr", kPropertyTypeInteger, 0, 0x7F),
+                Property("addr", kPropertyTypeInteger, 0x08, 0x77),
                 Property("n_bytes", kPropertyTypeInteger, 1, 256)
             }),
             [this](const PropertyList& props) -> ReturnValue {
@@ -5212,17 +5214,24 @@ private:
                 return root;
             });
 
+        Property i2c_write_bytes_prop(
+            "bytes", kPropertyTypeArray, kPropertyElementTypeInteger, 0, 255
+        );
+        i2c_write_bytes_prop.set_max_items(256);  // 対称: n_bytes の read 上限と同じ
         mcp_server.AddTool(
             "self.i2c.write",
             "Write bytes to an I2C device at 7-bit address `addr` on Grove "
-            "Port A. `bytes` is an array of integers (0..255). This tool "
-            "operates on the external Port A bus only; on-board ICs (PMIC, "
-            "AW9523, touch, etc.) on the internal bus are not reachable. "
-            "Returns {\"ok\":true} on ACK or "
+            "Port A. `addr` is restricted to 0x08..0x77 (I2C reserved ranges "
+            "excluded — General-call address 0x00 etc. cannot accidentally "
+            "broadcast-write to all attached Units). `bytes` is an array of "
+            "integers (0..255, max 256 items). This tool operates on the "
+            "external Port A bus only; on-board ICs (PMIC, AW9523, touch, "
+            "etc.) on the internal bus are not reachable. Returns "
+            "{\"ok\":true} on ACK or "
             "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK.",
             PropertyList({
-                Property("addr", kPropertyTypeInteger, 0, 0x7F),
-                Property("bytes", kPropertyTypeArray, kPropertyElementTypeInteger, 0, 255)
+                Property("addr", kPropertyTypeInteger, 0x08, 0x77),
+                i2c_write_bytes_prop
             }),
             [this](const PropertyList& props) -> ReturnValue {
                 cJSON* root = cJSON_CreateObject();
@@ -5262,17 +5271,24 @@ private:
                 return root;
             });
 
+        Property i2c_wr_write_bytes_prop(
+            "write_bytes", kPropertyTypeArray, kPropertyElementTypeInteger, 0, 255
+        );
+        i2c_wr_write_bytes_prop.set_max_items(256);  // 対称: n_bytes の read 上限と同じ
         mcp_server.AddTool(
             "self.i2c.write_read",
             "Write `write_bytes` to an I2C device at 7-bit address `addr` on "
             "Grove Port A, then read n_bytes back in a single transaction "
-            "(Repeated Start). This is the common 'set register pointer, "
-            "then read' pattern: pass write_bytes=[reg_addr] to read from a "
-            "specific register. Returns {\"ok\":true, \"bytes\":[...]} or "
+            "(Repeated Start). `addr` is restricted to 0x08..0x77 (I2C "
+            "reserved ranges excluded). `write_bytes` is an array of "
+            "integers (0..255, max 256 items). This is the common 'set "
+            "register pointer, then read' pattern: pass write_bytes=[reg_addr] "
+            "to read from a specific register. Returns "
+            "{\"ok\":true, \"bytes\":[...]} or "
             "{\"ok\":false, \"error\":\"...\"} on failure.",
             PropertyList({
-                Property("addr", kPropertyTypeInteger, 0, 0x7F),
-                Property("write_bytes", kPropertyTypeArray, kPropertyElementTypeInteger, 0, 255),
+                Property("addr", kPropertyTypeInteger, 0x08, 0x77),
+                i2c_wr_write_bytes_prop,
                 Property("n_bytes", kPropertyTypeInteger, 1, 256)
             }),
             [this](const PropertyList& props) -> ReturnValue {
