@@ -321,6 +321,92 @@ names, or token-based upload steps back to upstream. The upstream
 pipeline is intentionally strict about the canonical project name and
 the OIDC-only path.
 
+## Releasing the firmware
+
+Maintainers publish firmware binaries (`merged-binary.bin`, `xiaozhi.bin`,
+`v*_stackchan.zip`) to GitHub Releases by tagging a release on `main`. The
+`.github/workflows/firmware-release.yml` workflow runs on every tag matching
+`firmware-v*`, builds the firmware via the ESP-IDF Docker image, and attaches
+the build artifacts to a GitHub Release.
+
+Firmware tags (`firmware-vX.Y.Z`) advance independently of the PyPI
+gateway tags (`vX.Y.Z`). Both can coexist on `main`; a single PR that
+touches both sides in a coupled way should cut both tags and mention
+the pairing in each release's notes.
+
+### Release gates
+
+The firmware-release workflow only succeeds if all of the following hold:
+
+- The tag has a `firmware-v` prefix.
+- `CHANGELOG.md` contains a matching dated section
+  `## [firmware-vX.Y.Z] - YYYY-MM-DD` for the new tag. Without this
+  section the workflow fails fast in the `Verify CHANGELOG.md ...`
+  step before any build runs, so promoting `[Unreleased]` Firmware
+  entries into a dated CHANGELOG section is **enforced**, not just
+  documented. (This gate was added after firmware-v1.4.1 / v1.5.0 /
+  v1.6.0 / v1.7.0 each shipped binaries without ever promoting the
+  matching CHANGELOG entries; firmware-v1.8.0 is the first release
+  cut under the enforced gate.)
+- The build job produces `firmware/build/merged-binary.bin`,
+  `firmware/build/xiaozhi.bin`, and `firmware/releases/v*_stackchan.zip`.
+
+### Per-release steps
+
+1. On a topic branch, promote the `[Unreleased]` Firmware entries
+   destined for the new release into a dated section in `CHANGELOG.md`:
+   - Add a new `## [firmware-vX.Y.Z] - YYYY-MM-DD` section and move the
+     applicable entries from `[Unreleased] > Firmware` into it. Place
+     the new section in chronological position relative to the other
+     dated sections (newer dates go higher in the file). Same idea for
+     a `Docs` subsection if the release also includes documentation
+     changes that are not specific to one side.
+   - Leave a fresh empty `## [Unreleased]` at the top so future merges
+     have a clear destination.
+   - Update the comparison-links block at the bottom of `CHANGELOG.md`:
+     ```
+     [Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-vX.Y.Z...HEAD
+     [firmware-vX.Y.Z]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v<PREV>...firmware-vX.Y.Z
+     ```
+     (the `[Unreleased]` link tracks whichever side just released, so it
+     may compare against either a firmware-v* or a v* tag depending on
+     which release went out last).
+   Open a PR with these changes.
+2. After the PR is merged, tag the resulting commit on `main`:
+   ```bash
+   git switch main
+   git pull
+   git tag firmware-v1.8.0
+   git push origin firmware-v1.8.0
+   ```
+3. The firmware-release workflow validates the gates above, builds the
+   firmware in the ESP-IDF Docker image, and attaches the binaries to a
+   fresh GitHub Release named after the tag. The default release body
+   is the standard flash-instructions template; maintainers can edit it
+   after the workflow finishes to add a release-specific `Highlights` /
+   `License` / `Migration notes` section. The natural source is the new
+   CHANGELOG dated section, which can be extracted with:
+   ```bash
+   # Extract the new section from CHANGELOG, dropping the section
+   # header and the trailing section-boundary line.
+   sed -n '/^## \[firmware-vX\.Y\.Z\]/,/^## \[/p' CHANGELOG.md \
+     | sed '1d;$d' > /tmp/firmware-release-notes.md
+   gh release edit firmware-vX.Y.Z --repo kisaragi-mochi/stackchan-mcp \
+     --notes-file /tmp/firmware-release-notes.md
+   ```
+4. Confirm the new release on
+   <https://github.com/kisaragi-mochi/stackchan-mcp/releases>.
+
+### Yank policy
+
+If a firmware release ships and a critical issue surfaces immediately,
+prefer cutting `firmware-vX.Y.(Z+1)` with a fix rather than deleting the
+tag — GitHub Releases preserves the activity feed event even if the
+release page is deleted, so a yank cannot retroactively retract the
+event for watchers. The `firmware-v1.4.0` release (yanked within ~12
+minutes on 2026-05-14, replaced by `firmware-v1.4.1`) is the historical
+example.
+
 ## Communication
 
 Be polite and concrete. This is a small hardware community, and clear technical

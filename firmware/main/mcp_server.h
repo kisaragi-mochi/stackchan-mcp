@@ -52,27 +52,53 @@ using ReturnValue = std::variant<bool, int, std::string, cJSON*, ImageContent*>;
 enum PropertyType {
     kPropertyTypeBoolean,
     kPropertyTypeInteger,
-    kPropertyTypeString
+    kPropertyTypeString,
+    kPropertyTypeArray
+};
+
+// Element type for kPropertyTypeArray properties.
+// Only meaningful when the surrounding Property has type kPropertyTypeArray.
+enum PropertyElementType {
+    kPropertyElementTypeInteger,
+    kPropertyElementTypeString
 };
 
 class Property {
 private:
     std::string name_;
     PropertyType type_;
-    std::variant<bool, int, std::string> value_;
+    std::variant<bool, int, std::string, std::vector<int>, std::vector<std::string>> value_;
     bool has_default_value_;
-    std::optional<int> min_value_;  // 新增：整数最小值
-    std::optional<int> max_value_;  // 新增：整数最大值
+    std::optional<int> min_value_;  // 整数最小值 (kPropertyTypeInteger)
+    std::optional<int> max_value_;  // 整数最大值 (kPropertyTypeInteger)
+    std::optional<PropertyElementType> element_type_;  // 配列要素型 (kPropertyTypeArray)
+    std::optional<int> element_min_;  // 配列要素整数の最小値 (Array of Integer)
+    std::optional<int> element_max_;  // 配列要素整数の最大値 (Array of Integer)
+    std::optional<int> max_items_;    // 配列の最大要素数 (kPropertyTypeArray、 set_max_items() で設定)
 
 public:
-    // Required field constructor
+    // Required field constructor (Boolean / Integer / String)
     Property(const std::string& name, PropertyType type)
-        : name_(name), type_(type), has_default_value_(false) {}
+        : name_(name), type_(type), has_default_value_(false) {
+        if (type == kPropertyTypeArray) {
+            throw std::invalid_argument("Array properties require an element type");
+        }
+    }
 
-    // Optional field constructor with default value
+    // Optional field constructor with default value (Boolean / Integer / String).
+    // Array properties cannot use this generic constructor — they require the
+    // element-type-aware constructor below, otherwise to_json() would emit an
+    // empty items schema and any later element-typed access would dereference
+    // an unset std::optional.
     template<typename T>
     Property(const std::string& name, PropertyType type, const T& default_value)
         : name_(name), type_(type), has_default_value_(true) {
+        if (type == kPropertyTypeArray) {
+            throw std::invalid_argument(
+                "Array properties cannot use the generic default-value constructor; "
+                "use the element-type-aware Property(name, type, element_type, ...) form"
+            );
+        }
         value_ = default_value;
     }
 
@@ -94,12 +120,56 @@ public:
         value_ = default_value;
     }
 
+    // Required field constructor for arrays (element type only)
+    Property(const std::string& name, PropertyType type, PropertyElementType element_type)
+        : name_(name), type_(type), has_default_value_(false), element_type_(element_type) {
+        if (type != kPropertyTypeArray) {
+            throw std::invalid_argument("Element type only applies to array properties");
+        }
+    }
+
+    // Required field constructor for integer arrays with per-element range
+    Property(const std::string& name, PropertyType type, PropertyElementType element_type, int element_min, int element_max)
+        : name_(name), type_(type), has_default_value_(false),
+          element_type_(element_type), element_min_(element_min), element_max_(element_max) {
+        if (type != kPropertyTypeArray) {
+            throw std::invalid_argument("Element type only applies to array properties");
+        }
+        if (element_type != kPropertyElementTypeInteger) {
+            throw std::invalid_argument("Element range only applies to integer array elements");
+        }
+        if (element_min > element_max) {
+            throw std::invalid_argument("Element min must not exceed element max");
+        }
+    }
+
     inline const std::string& name() const { return name_; }
     inline PropertyType type() const { return type_; }
     inline bool has_default_value() const { return has_default_value_; }
     inline bool has_range() const { return min_value_.has_value() && max_value_.has_value(); }
     inline int min_value() const { return min_value_.value_or(0); }
     inline int max_value() const { return max_value_.value_or(0); }
+    inline PropertyElementType element_type() const { return element_type_.value(); }
+    inline bool has_element_type() const { return element_type_.has_value(); }
+    inline bool has_element_range() const { return element_min_.has_value() && element_max_.has_value(); }
+    inline int element_min() const { return element_min_.value_or(0); }
+    inline int element_max() const { return element_max_.value_or(0); }
+    inline bool has_max_items() const { return max_items_.has_value(); }
+    inline int max_items() const { return max_items_.value_or(0); }
+
+    // Optional maxItems cap for kPropertyTypeArray properties. Limits the
+    // accepted array length both in the emitted JSON Schema (`maxItems`) and
+    // in set_value() runtime validation. Keeps the firmware from allocating
+    // an unbounded std::vector for an oversized client payload.
+    inline void set_max_items(int max_items) {
+        if (type_ != kPropertyTypeArray) {
+            throw std::invalid_argument("max_items only applies to array properties");
+        }
+        if (max_items < 0) {
+            throw std::invalid_argument("max_items must be non-negative");
+        }
+        max_items_ = max_items;
+    }
 
     template<typename T>
     inline T value() const {
@@ -108,7 +178,7 @@ public:
 
     template<typename T>
     inline void set_value(const T& value) {
-        // 添加对设置的整数值进行范围检查
+        // Integer range check
         if constexpr (std::is_same_v<T, int>) {
             if (min_value_.has_value() && value < min_value_.value()) {
                 throw std::invalid_argument("Value is below minimum allowed: " + std::to_string(min_value_.value()));
@@ -117,12 +187,34 @@ public:
                 throw std::invalid_argument("Value exceeds maximum allowed: " + std::to_string(max_value_.value()));
             }
         }
+        // Integer-array element range + size check
+        if constexpr (std::is_same_v<T, std::vector<int>>) {
+            if (max_items_.has_value() && static_cast<int>(value.size()) > max_items_.value()) {
+                throw std::invalid_argument("Array size exceeds maxItems: " + std::to_string(max_items_.value()));
+            }
+            if (element_min_.has_value() && element_max_.has_value()) {
+                for (int elem : value) {
+                    if (elem < element_min_.value()) {
+                        throw std::invalid_argument("Array element is below minimum allowed: " + std::to_string(element_min_.value()));
+                    }
+                    if (elem > element_max_.value()) {
+                        throw std::invalid_argument("Array element exceeds maximum allowed: " + std::to_string(element_max_.value()));
+                    }
+                }
+            }
+        }
+        // String-array size check
+        if constexpr (std::is_same_v<T, std::vector<std::string>>) {
+            if (max_items_.has_value() && static_cast<int>(value.size()) > max_items_.value()) {
+                throw std::invalid_argument("Array size exceeds maxItems: " + std::to_string(max_items_.value()));
+            }
+        }
         value_ = value;
     }
 
     std::string to_json() const {
         cJSON *json = cJSON_CreateObject();
-        
+
         if (type_ == kPropertyTypeBoolean) {
             cJSON_AddStringToObject(json, "type", "boolean");
             if (has_default_value_) {
@@ -144,13 +236,31 @@ public:
             if (has_default_value_) {
                 cJSON_AddStringToObject(json, "default", value<std::string>().c_str());
             }
+        } else if (type_ == kPropertyTypeArray) {
+            cJSON_AddStringToObject(json, "type", "array");
+            cJSON* items = cJSON_CreateObject();
+            if (element_type_ == kPropertyElementTypeInteger) {
+                cJSON_AddStringToObject(items, "type", "integer");
+                if (element_min_.has_value()) {
+                    cJSON_AddNumberToObject(items, "minimum", element_min_.value());
+                }
+                if (element_max_.has_value()) {
+                    cJSON_AddNumberToObject(items, "maximum", element_max_.value());
+                }
+            } else if (element_type_ == kPropertyElementTypeString) {
+                cJSON_AddStringToObject(items, "type", "string");
+            }
+            cJSON_AddItemToObject(json, "items", items);
+            if (max_items_.has_value()) {
+                cJSON_AddNumberToObject(json, "maxItems", max_items_.value());
+            }
         }
-        
+
         char *json_str = cJSON_PrintUnformatted(json);
         std::string result(json_str);
         cJSON_free(json_str);
         cJSON_Delete(json);
-        
+
         return result;
     }
 };

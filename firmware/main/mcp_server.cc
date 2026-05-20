@@ -535,6 +535,35 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
                 } else if (argument.type() == kPropertyTypeString && cJSON_IsString(value)) {
                     argument.set_value<std::string>(value->valuestring);
                     found = true;
+                } else if (argument.type() == kPropertyTypeArray && cJSON_IsArray(value)) {
+                    int array_size = cJSON_GetArraySize(value);
+                    if (argument.element_type() == kPropertyElementTypeInteger) {
+                        std::vector<int> int_array;
+                        int_array.reserve(array_size);
+                        for (int i = 0; i < array_size; i++) {
+                            auto item = cJSON_GetArrayItem(value, i);
+                            if (!cJSON_IsNumber(item)) {
+                                throw std::invalid_argument("Array element " + std::to_string(i) +
+                                                            " of '" + argument.name() + "' is not an integer");
+                            }
+                            int_array.push_back(item->valueint);
+                        }
+                        argument.set_value<std::vector<int>>(int_array);
+                        found = true;
+                    } else if (argument.element_type() == kPropertyElementTypeString) {
+                        std::vector<std::string> string_array;
+                        string_array.reserve(array_size);
+                        for (int i = 0; i < array_size; i++) {
+                            auto item = cJSON_GetArrayItem(value, i);
+                            if (!cJSON_IsString(item)) {
+                                throw std::invalid_argument("Array element " + std::to_string(i) +
+                                                            " of '" + argument.name() + "' is not a string");
+                            }
+                            string_array.push_back(item->valuestring);
+                        }
+                        argument.set_value<std::vector<std::string>>(string_array);
+                        found = true;
+                    }
                 }
             }
 
