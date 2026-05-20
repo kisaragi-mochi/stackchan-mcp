@@ -26,6 +26,7 @@ public:
     bool OpenAudioChannel() override;
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
+    bool IsTransportConnected() const override;
 
 private:
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
@@ -65,6 +66,13 @@ private:
     // MCP control does not make callers (ToggleChatState,
     // CanEnterSleepMode) believe an audio session is still active.
     std::atomic<bool> audio_channel_open_ = false;
+    // Physical WebSocket transport state, updated on the WS task (OnDisconnected)
+    // and the main task (OpenAudioChannelInternal prologue + success exit +
+    // destructor). IsTransportConnected() returns this flag and is read from
+    // Application::CanEnterSleepMode(), which runs on ESP_TIMER_TASK — atomic
+    // so the timer-task read does not race with main-task websocket_.reset()
+    // in OpenAudioChannelInternal / destructor / reconnect paths.
+    std::atomic<bool> transport_connected_ = false;
     int reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
     int version_ = 1;
 
