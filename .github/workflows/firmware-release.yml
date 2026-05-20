@@ -37,6 +37,76 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      - name: Verify CHANGELOG.md has a dated section for the firmware tag
+        # Re-publish gate that closes the documentation debt that the
+        # CHANGELOG `[Unreleased]` Firmware section accumulated under
+        # firmware-v1.4.1 / v1.5.0 / v1.6.0 / v1.7.0 — each of those
+        # releases shipped binaries to GitHub Releases without ever
+        # promoting the matching `[Unreleased]` entries into a dated
+        # CHANGELOG section, so the in-repo CHANGELOG diverged from the
+        # artifact-of-record. From firmware-v1.8.0 onward, this step
+        # refuses to build the release if CHANGELOG.md does not yet
+        # contain a `## [firmware-vX.Y.Z] - YYYY-MM-DD` line matching
+        # the tag being pushed. Promote the entries belonging to the new
+        # tag in a prep PR, merge it, then push the tag at the merged
+        # commit. See `CONTRIBUTING.md` `Releasing the firmware`.
+        #
+        # workflow_dispatch dry-runs skip this gate because there is no
+        # tag to validate; those runs are intended for smoke-testing the
+        # build pipeline from any branch.
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != refs/tags/firmware-v* ]]; then
+            echo "::error::Firmware release tags must start with 'firmware-v' (got: $GITHUB_REF)"
+            exit 1
+          fi
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          # Escape regex metacharacters in TAG so the version dots in
+          # tags like `firmware-v1.8.0` are matched literally rather
+          # than as ERE wildcards. Without this, a typo section header
+          # like `## [firmware-v1x8x0] - 2026-05-20` would falsely
+          # satisfy the gate for the tag `firmware-v1.8.0` (any single
+          # character at the dot positions would match).
+          TAG_ESC="${TAG//./\\.}"
+
+          # Count exact-match dated sections. Requires line layout
+          # `## [<TAG>] - YYYY-MM-DD` with no leading or trailing
+          # content. Uses `-c` so we can also fail on duplicates;
+          # `-q` would only check existence and would let a file with
+          # two matching sections pass, which leaves release-notes
+          # extraction ambiguous.
+          COUNT=$(grep -cE "^## \[${TAG_ESC}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md || true)
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::CHANGELOG.md is missing a dated section for ${TAG}."
+            echo ""
+            echo "Expected to find exactly one line matching:"
+            echo "    ## [${TAG}] - YYYY-MM-DD"
+            echo ""
+            echo "Promote the entries that belong to ${TAG} from [Unreleased] into a"
+            echo "dated section, update the comparison-links block at the bottom of"
+            echo "CHANGELOG.md, open a PR, merge it, and re-push the tag at the merged"
+            echo "commit. See CONTRIBUTING.md 'Releasing the firmware'."
+            exit 1
+          fi
+
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::CHANGELOG.md has ${COUNT} dated sections for ${TAG}, expected exactly 1."
+            echo ""
+            echo "Multiple dated sections for the same tag make the release-notes"
+            echo "extraction step (sed -n '/^## \[${TAG}\]/,/^## \[/p') ambiguous and"
+            echo "indicate either a copy-paste mistake during the release-prep PR or a"
+            echo "merge conflict that was resolved by keeping both sides. Collapse the"
+            echo "duplicates into a single section, open a PR, merge it, and re-push"
+            echo "the tag at the merged commit."
+            exit 1
+          fi
+
+          echo "CHANGELOG entry for ${TAG} verified (exactly 1 dated section)."
+
       - name: Build firmware with ESP-IDF Docker image
         # Same build command the regular CI Build workflow uses, so a
         # tag-driven release artifact is byte-identical to what the PR

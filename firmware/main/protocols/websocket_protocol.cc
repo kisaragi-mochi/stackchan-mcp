@@ -61,8 +61,14 @@ WebsocketProtocol::WebsocketProtocol() {
 
                 ESP_LOGI(TAG, "Reconnecting to websocket server");
                 if (!protocol->OpenAudioChannelInternal(false, false)) {
-                    ESP_LOGW(TAG, "Reconnect attempt failed; rescheduling");
-                    protocol->ScheduleReconnect();
+                    // OpenAudioChannelInternal's failure-exit path is now
+                    // the single source of reconnect-rescheduling. Calling
+                    // ScheduleReconnect() here too would double-advance
+                    // reconnect_interval_ms_ (two consecutive
+                    // StopReconnectTimer → start_once cycles per failed
+                    // retry), driving the backoff to its 60s cap faster
+                    // than intended.
+                    ESP_LOGW(TAG, "Reconnect attempt failed; OpenAudioChannelInternal will arm next retry");
                 }
             });
         },
@@ -77,6 +83,7 @@ WebsocketProtocol::WebsocketProtocol() {
 WebsocketProtocol::~WebsocketProtocol() {
     alive_->store(false);
     intentional_close_.store(true);
+    transport_connected_.store(false);
     if (current_notify_disconnect_) {
         current_notify_disconnect_->store(false);
     }
@@ -92,8 +99,20 @@ WebsocketProtocol::~WebsocketProtocol() {
 }
 
 bool WebsocketProtocol::Start() {
-    // Only connect to server when audio channel is needed
-    return true;
+    // Connect to the configured gateway at boot so MCP control is
+    // available before any user interaction (no touch / wake required).
+    // arm_audio_channel=false keeps the logical audio-session state
+    // separate from the physical WebSocket transport state — see PR #136
+    // (CloseAudioChannel keeps the WS alive) and PR #192 (audio_channel_open_
+    // is a logical-session flag, see websocket_protocol.h:60-67).
+    //
+    // If the gateway is unreachable at boot (gateway not started, network
+    // not yet stable, token mismatch, etc.), OpenAudioChannelInternal
+    // returns false with report_error=false suppressing UI feedback, and
+    // arms the reconnect timer via its failure-exit path so the device
+    // retries automatically once the gateway becomes reachable.
+    // Closes #169.
+    return OpenAudioChannelInternal(false, false);
 }
 
 bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
@@ -146,6 +165,18 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
     return audio_channel_open_.load() && websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
 }
 
+bool WebsocketProtocol::IsTransportConnected() const {
+    // Returns the cached atomic transport-state flag, which is updated on the
+    // WS task (OnDisconnected) and the main task (OpenAudioChannelInternal
+    // prologue + success exit, destructor). Read from ESP_TIMER_TASK via
+    // Application::CanEnterSleepMode(), so this read must not racily
+    // dereference websocket_ while main-task code is calling websocket_.reset().
+    // The flag also intentionally ignores Protocol::IsTimeout(), which tracks
+    // the audio-session inbound-frame deadline — an idle persistent MCP
+    // connection has no inbound audio frames but is still healthy transport.
+    return transport_connected_.load();
+}
+
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;
     // Keep WebSocket alive — only notify the application that the audio
@@ -180,6 +211,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
     // new socket below installs a fresh token of its own and clears
     // intentional_close_ once the server hello has been acked.
     audio_channel_open_.store(false);
+    transport_connected_.store(false);
     intentional_close_.store(true);
     if (current_notify_disconnect_) {
         current_notify_disconnect_->store(false);
@@ -397,6 +429,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
 
         websocket_->OnDisconnected([this, notify_disconnect]() {
             audio_channel_open_.store(false);
+            transport_connected_.store(false);
             // notify_disconnect carries this socket's reconnect intent.
             // ParseServerHello() arms it (true) once the handshake
             // completes; intentional teardown paths (CloseAudioChannel,
@@ -454,6 +487,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
         // synchronously when intentionally tearing this socket down.
         current_notify_disconnect_ = notify_disconnect;
         intentional_close_.store(false);
+        transport_connected_.store(true);
         reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
         StopReconnectTimer();
 
@@ -477,6 +511,14 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         }
     }
+    // Clear the intentional_close_ latch (set in the prologue at line ~183)
+    // on the failure exit path so ScheduleReconnect can arm a retry.
+    // Without this, any subsequent reconnect attempt — including the
+    // timer-driven retry the constructor's lambda installs below on
+    // recursive failure — would be silently refused because
+    // intentional_close_ remained latched at true.
+    intentional_close_.store(false);
+    ScheduleReconnect();
     return false;
 }
 

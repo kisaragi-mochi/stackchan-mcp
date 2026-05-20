@@ -67,6 +67,14 @@ public:
     virtual bool OpenAudioChannel() = 0;
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;
+    // Physical transport-level connection state, independent of the logical
+    // audio-session state reported by IsAudioChannelOpened(). For transports
+    // that maintain a persistent connection (e.g. WebSocket kept alive for
+    // MCP control after PR #136 / #169), this lets the application keep the
+    // power-save / sleep timer disengaged while the transport is live even
+    // when no audio session is currently armed. Default false so subclasses
+    // that lack a persistent-transport notion are unaffected.
+    virtual bool IsTransportConnected() const { return false; }
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);
