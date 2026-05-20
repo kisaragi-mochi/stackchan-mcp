@@ -58,6 +58,15 @@ documented-only.
   element-type-aware constructor. Contributed via
   [PR #195](https://github.com/kisaragi-mochi/stackchan-mcp/pull/195).
 
+- Fixed: WiFi association now retries with a brief delay and cancels
+  the in-flight `esp_wifi_connect()` on attempt timeout (via
+  `esp_wifi_disconnect()` on the `bits == 0` path), so access points
+  that respond slowly or drop the first 802.11 Association Comeback
+  frame no longer cause the device to fail WiFi at boot. The retry
+  log message also distinguishes timeout vs. driver-reported failure
+  to ease real slow-AP debugging. Contributed via
+  [PR #186](https://github.com/kisaragi-mochi/stackchan-mcp/pull/186).
+
 ### Gateway
 
 - Added: MCP tool surface for the firmware-side Grove Port A generic
