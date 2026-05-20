@@ -614,9 +614,13 @@ def create_server() -> Server:
                     "properties": {
                         "addr": {
                             "type": "integer",
-                            "description": "7-bit I2C address (0..127).",
-                            "minimum": 0,
-                            "maximum": 127,
+                            "description": (
+                                "7-bit I2C address; range 0x08..0x77 "
+                                "(I2C reserved ranges excluded — matches "
+                                "the i2c_scan probe range)."
+                            ),
+                            "minimum": 8,
+                            "maximum": 119,
                         },
                         "n_bytes": {
                             "type": "integer",
@@ -642,9 +646,13 @@ def create_server() -> Server:
                     "properties": {
                         "addr": {
                             "type": "integer",
-                            "description": "7-bit I2C address (0..127).",
-                            "minimum": 0,
-                            "maximum": 127,
+                            "description": (
+                                "7-bit I2C address; range 0x08..0x77 "
+                                "(I2C reserved ranges excluded — matches "
+                                "the i2c_scan probe range)."
+                            ),
+                            "minimum": 8,
+                            "maximum": 119,
                         },
                         "bytes": {
                             "type": "array",
@@ -674,9 +682,13 @@ def create_server() -> Server:
                     "properties": {
                         "addr": {
                             "type": "integer",
-                            "description": "7-bit I2C address (0..127).",
-                            "minimum": 0,
-                            "maximum": 127,
+                            "description": (
+                                "7-bit I2C address; range 0x08..0x77 "
+                                "(I2C reserved ranges excluded — matches "
+                                "the i2c_scan probe range)."
+                            ),
+                            "minimum": 8,
+                            "maximum": 119,
                         },
                         "write_bytes": {
                             "type": "array",

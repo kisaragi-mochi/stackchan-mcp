@@ -30,6 +30,20 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Fixed: MCP tool schemas for `i2c_read` / `i2c_write` / `i2c_write_read`
+  now constrain the `addr` parameter to the I2C 7-bit address range
+  `0x08..0x77`, matching the `i2c_scan` probe range and the firmware-side
+  `Property` range introduced in
+  [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196).
+  The previous JSON Schema advertised `0..127`, which let LLM callers
+  attempt reserved-range addresses (0x00 General Call, 0x78–0x7F
+  reserved); the firmware tool property still rejected these at the
+  request-handling layer, so this closes a tool-surface inconsistency
+  rather than a functional gap. Tool descriptions now state the
+  constraint explicitly.
+
 ## [firmware-v1.8.0] - 2026-05-20
 
 ### Firmware
