@@ -15,10 +15,23 @@
 #define AUDIO_I2S_GPIO_DIN  GPIO_NUM_14
 #define AUDIO_I2S_GPIO_DOUT GPIO_NUM_13
 
+// Internal I2C bus pins. AXP2101 (PMIC), AW9523 (IO ext.), FT6336 (touch),
+// PY32 (LED IO ext.), Si12T (head touch), AW88298 audio codec, ES7210 mic
+// codec, and the BMI270/BMM150 IMU all share this bus on the on-board side.
+// Generic self.i2c.* MCP tools deliberately DO NOT expose this bus; they
+// operate on the independent Port A bus below to prevent accidental writes
+// to safety-critical ICs (PMIC etc.).
 #define AUDIO_CODEC_I2C_SDA_PIN  GPIO_NUM_12
 #define AUDIO_CODEC_I2C_SCL_PIN  GPIO_NUM_11
 #define AUDIO_CODEC_AW88298_ADDR AW88298_CODEC_DEFAULT_ADDR
 #define AUDIO_CODEC_ES7210_ADDR  ES7210_CODEC_DEFAULT_ADDR
+
+// External I2C bus pins for Grove Port A (M5Stack HY2.0-4P connector).
+// Independent from the internal bus above; used by self.i2c.* MCP tools to
+// drive attached M5Stack Unit modules (ENV III, ToF, gas sensor, etc.)
+// without recompiling firmware per Unit.
+#define PORT_A_I2C_SDA_PIN       GPIO_NUM_2
+#define PORT_A_I2C_SCL_PIN       GPIO_NUM_1
 
 #define BUILTIN_LED_GPIO        GPIO_NUM_NC
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0

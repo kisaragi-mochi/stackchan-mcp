@@ -497,7 +497,13 @@ private:
 
 class StackChanBoard : public WifiBoard {
 private:
+    // Internal I2C bus (shared by AXP2101 / AW9523 / FT6336 / PY32 / Si12T /
+    // audio codec / IMU). Direct on-board ICs only; not exposed through
+    // self.i2c.* MCP tools.
     i2c_master_bus_handle_t i2c_bus_;
+    // External I2C bus dedicated to Grove Port A. Exposed through self.i2c.*
+    // MCP tools so the gateway can drive attached M5Stack Unit modules.
+    i2c_master_bus_handle_t port_a_i2c_bus_;
     Pmic* pmic_;
     Aw9523* aw9523_;
     Ft6336* ft6336_;
@@ -2013,6 +2019,26 @@ private:
             },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
+    }
+
+    void InitializePortAI2c() {
+        // Grove Port A bus. Uses I2C controller 0 (the internal bus above
+        // uses controller 1) so the two run independently. Attached Unit
+        // modules typically include their own 10 kΩ pull-ups in the Grove
+        // hub, but enable internal pull-ups as a fall-back for bare wiring.
+        i2c_master_bus_config_t port_a_cfg = {
+            .i2c_port = (i2c_port_t)0,
+            .sda_io_num = PORT_A_I2C_SDA_PIN,
+            .scl_io_num = PORT_A_I2C_SCL_PIN,
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .intr_priority = 0,
+            .trans_queue_depth = 0,
+            .flags = {
+                .enable_internal_pullup = 1,
+            },
+        };
+        ESP_ERROR_CHECK(i2c_new_master_bus(&port_a_cfg, &port_a_i2c_bus_));
     }
 
     void I2cDetect() {
@@ -5095,6 +5121,224 @@ private:
                 return root;
             });
 
+        // ---- Generic I2C bus tools (Grove Port A) ----
+        // Expose the external Port A I2C bus to the MCP client so that
+        // attached M5Stack Unit modules (ENV III, ToF, gas sensor, PaHub,
+        // etc.) can be driven from the gateway / host side without
+        // recompiling and re-flashing per Unit. The on-board IC bus (PMIC,
+        // touch, IMU, AW9523, audio codec) is on a physically separate I2C
+        // controller and is NOT reachable from these tools by construction.
+
+        mcp_server.AddTool(
+            "self.i2c.scan",
+            "Scan the external I2C bus on Grove Port A and return all 7-bit "
+            "addresses (probe range 0x08..0x77, excluding I2C reserved "
+            "ranges) that ACK a probe. Use this to discover attached "
+            "M5Stack Unit modules (ENV III, ToF, gas sensor, PaHub, etc.). "
+            "On-board ICs on the internal bus are NOT included (this tool "
+            "operates on a physically separate bus). Returns "
+            "{\"ok\":true, \"addresses\":[...]}.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON* addrs = cJSON_CreateArray();
+                int found = 0;
+                // Probe 0x08..0x77 (skip I2C reserved 0x00-0x07 / 0x78-0x7F).
+                // 200 ms per-probe timeout matches the boot-time I2cDetect()
+                // and reliably catches slower Units (RCWL-9620 etc.).
+                for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+                    esp_err_t ret = i2c_master_probe(port_a_i2c_bus_, addr, pdMS_TO_TICKS(200));
+                    if (ret == ESP_OK) {
+                        cJSON_AddItemToArray(addrs, cJSON_CreateNumber(addr));
+                        found++;
+                    }
+                }
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddItemToObject(root, "addresses", addrs);
+                ESP_LOGI(TAG, "i2c.scan: found %d device(s) on Port A", found);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.i2c.read",
+            "Read n_bytes from an I2C device at 7-bit address `addr` on Grove "
+            "Port A. `addr` is restricted to 0x08..0x77 (I2C reserved ranges "
+            "excluded — matches the self.i2c.scan probe range). Use this for "
+            "protocols that read the device's current register / output "
+            "without a preceding write (e.g. sensors that latch a measurement "
+            "from a prior command). For typical 'write register address, "
+            "then read' patterns, use self.i2c.write_read instead. Returns "
+            "{\"ok\":true, \"bytes\":[...]} or "
+            "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK.",
+            PropertyList({
+                Property("addr", kPropertyTypeInteger, 0x08, 0x77),
+                Property("n_bytes", kPropertyTypeInteger, 1, 256)
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                uint8_t addr = static_cast<uint8_t>(props["addr"].value<int>());
+                int n = props["n_bytes"].value<int>();
+
+                i2c_device_config_t cfg = {
+                    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+                    .device_address = addr,
+                    .scl_speed_hz = 400000,
+                };
+                i2c_master_dev_handle_t dev;
+                esp_err_t err = i2c_master_bus_add_device(port_a_i2c_bus_, &cfg, &dev);
+                if (err != ESP_OK) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                    ESP_LOGW(TAG, "i2c.read addr=0x%02X add_device failed: %s",
+                             addr, esp_err_to_name(err));
+                    return root;
+                }
+
+                std::vector<uint8_t> buf(static_cast<size_t>(n));
+                err = i2c_master_receive(dev, buf.data(), buf.size(), 100);
+                i2c_master_bus_rm_device(dev);
+
+                if (err == ESP_OK) {
+                    cJSON* bytes = cJSON_CreateArray();
+                    for (uint8_t b : buf) {
+                        cJSON_AddItemToArray(bytes, cJSON_CreateNumber(b));
+                    }
+                    cJSON_AddBoolToObject(root, "ok", true);
+                    cJSON_AddItemToObject(root, "bytes", bytes);
+                } else {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "i2c.read addr=0x%02X n=%d ok=%d",
+                         addr, n, err == ESP_OK);
+                return root;
+            });
+
+        Property i2c_write_bytes_prop(
+            "bytes", kPropertyTypeArray, kPropertyElementTypeInteger, 0, 255
+        );
+        i2c_write_bytes_prop.set_max_items(256);  // 対称: n_bytes の read 上限と同じ
+        mcp_server.AddTool(
+            "self.i2c.write",
+            "Write bytes to an I2C device at 7-bit address `addr` on Grove "
+            "Port A. `addr` is restricted to 0x08..0x77 (I2C reserved ranges "
+            "excluded — General-call address 0x00 etc. cannot accidentally "
+            "broadcast-write to all attached Units). `bytes` is an array of "
+            "integers (0..255, max 256 items). This tool operates on the "
+            "external Port A bus only; on-board ICs (PMIC, AW9523, touch, "
+            "etc.) on the internal bus are not reachable. Returns "
+            "{\"ok\":true} on ACK or "
+            "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK.",
+            PropertyList({
+                Property("addr", kPropertyTypeInteger, 0x08, 0x77),
+                i2c_write_bytes_prop
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                uint8_t addr = static_cast<uint8_t>(props["addr"].value<int>());
+                auto bytes_int = props["bytes"].value<std::vector<int>>();
+
+                i2c_device_config_t cfg = {
+                    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+                    .device_address = addr,
+                    .scl_speed_hz = 400000,
+                };
+                i2c_master_dev_handle_t dev;
+                esp_err_t err = i2c_master_bus_add_device(port_a_i2c_bus_, &cfg, &dev);
+                if (err != ESP_OK) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                    ESP_LOGW(TAG, "i2c.write addr=0x%02X add_device failed: %s",
+                             addr, esp_err_to_name(err));
+                    return root;
+                }
+
+                std::vector<uint8_t> buf;
+                buf.reserve(bytes_int.size());
+                for (int b : bytes_int) buf.push_back(static_cast<uint8_t>(b));
+
+                err = i2c_master_transmit(dev, buf.data(), buf.size(), 100);
+                i2c_master_bus_rm_device(dev);
+
+                if (err == ESP_OK) {
+                    cJSON_AddBoolToObject(root, "ok", true);
+                } else {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "i2c.write addr=0x%02X n=%d ok=%d",
+                         addr, (int)buf.size(), err == ESP_OK);
+                return root;
+            });
+
+        Property i2c_wr_write_bytes_prop(
+            "write_bytes", kPropertyTypeArray, kPropertyElementTypeInteger, 0, 255
+        );
+        i2c_wr_write_bytes_prop.set_max_items(256);  // 対称: n_bytes の read 上限と同じ
+        mcp_server.AddTool(
+            "self.i2c.write_read",
+            "Write `write_bytes` to an I2C device at 7-bit address `addr` on "
+            "Grove Port A, then read n_bytes back in a single transaction "
+            "(Repeated Start). `addr` is restricted to 0x08..0x77 (I2C "
+            "reserved ranges excluded). `write_bytes` is an array of "
+            "integers (0..255, max 256 items). This is the common 'set "
+            "register pointer, then read' pattern: pass write_bytes=[reg_addr] "
+            "to read from a specific register. Returns "
+            "{\"ok\":true, \"bytes\":[...]} or "
+            "{\"ok\":false, \"error\":\"...\"} on failure.",
+            PropertyList({
+                Property("addr", kPropertyTypeInteger, 0x08, 0x77),
+                i2c_wr_write_bytes_prop,
+                Property("n_bytes", kPropertyTypeInteger, 1, 256)
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                uint8_t addr = static_cast<uint8_t>(props["addr"].value<int>());
+                auto write_bytes_int = props["write_bytes"].value<std::vector<int>>();
+                int n = props["n_bytes"].value<int>();
+
+                i2c_device_config_t cfg = {
+                    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+                    .device_address = addr,
+                    .scl_speed_hz = 400000,
+                };
+                i2c_master_dev_handle_t dev;
+                esp_err_t err = i2c_master_bus_add_device(port_a_i2c_bus_, &cfg, &dev);
+                if (err != ESP_OK) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                    ESP_LOGW(TAG, "i2c.write_read addr=0x%02X add_device failed: %s",
+                             addr, esp_err_to_name(err));
+                    return root;
+                }
+
+                std::vector<uint8_t> write_buf;
+                write_buf.reserve(write_bytes_int.size());
+                for (int b : write_bytes_int) write_buf.push_back(static_cast<uint8_t>(b));
+
+                std::vector<uint8_t> read_buf(static_cast<size_t>(n));
+                err = i2c_master_transmit_receive(dev,
+                                                   write_buf.data(), write_buf.size(),
+                                                   read_buf.data(), read_buf.size(),
+                                                   100);
+                i2c_master_bus_rm_device(dev);
+
+                if (err == ESP_OK) {
+                    cJSON* bytes = cJSON_CreateArray();
+                    for (uint8_t b : read_buf) {
+                        cJSON_AddItemToArray(bytes, cJSON_CreateNumber(b));
+                    }
+                    cJSON_AddBoolToObject(root, "ok", true);
+                    cJSON_AddItemToObject(root, "bytes", bytes);
+                } else {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "i2c.write_read addr=0x%02X w=%d r=%d ok=%d",
+                         addr, (int)write_buf.size(), n, err == ESP_OK);
+                return root;
+            });
+
         ESP_LOGI(TAG, "StackChan MCP tools registered");
     }
 
@@ -5102,6 +5346,7 @@ public:
     StackChanBoard() {
         InitializePowerSaveTimer();
         InitializeI2c();
+        InitializePortAI2c();
         InitializeAxp2101();
         InitializeAw9523();
         // I2cDetect() moved AFTER all I2C device initializations.
