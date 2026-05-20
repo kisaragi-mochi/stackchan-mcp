@@ -78,3 +78,193 @@ jobs:
       - name: Run pytest
         working-directory: gateway
         run: uv run pytest
+
+  changelog-check:
+    name: CHANGELOG check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify [Unreleased] subsection entry for each touched component
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # List paths changed between the PR base and head.
+          CHANGED=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          echo "Changed files between $BASE_SHA and $HEAD_SHA:"
+          printf '%s\n' "$CHANGED"
+          echo "---"
+
+          firmware_touched=0
+          gateway_touched=0
+
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              # Machine-generated lockfile sync — does not require a
+              # CHANGELOG entry on its own. If a PR is purely a lockfile
+              # bump and nothing else under firmware/ or gateway/ changes,
+              # this check passes.
+              gateway/uv.lock | gateway/poetry.lock)
+                continue
+                ;;
+              firmware/*)
+                firmware_touched=1
+                ;;
+              gateway/*)
+                gateway_touched=1
+                ;;
+            esac
+          done <<EOF
+          $CHANGED
+          EOF
+
+          if [ "$firmware_touched" -eq 0 ] && [ "$gateway_touched" -eq 0 ]; then
+            echo "No firmware/ or gateway/ source changes detected; CHANGELOG check skipped."
+            exit 0
+          fi
+
+          # Verify the [Unreleased] section gained content via Python
+          # (portable parsing logic, identical between CI and local).
+          #
+          # Mission: catch the common miss case — a source-touching PR
+          # that forgets to add a CHANGELOG entry. This is the floor;
+          # finer judgement on the content of the entries belongs to
+          # maintainer review of the diff at merge time, and to the
+          # release-time gate in `firmware-release.yml` at promotion
+          # time.
+          #
+          # NOT in scope (intentionally hands off to maintainer review):
+          #   - Cross-subsection bullet moves
+          #   - Wholesale restructuring (deletions, replacements,
+          #     consolidating duplicates)
+          #   - Typo-polish that incidentally changes [Unreleased]
+          #
+          # Rationale: this repository's priority is to welcome
+          # contributors and LLM users. CI should keep the floor
+          # honest (entry present, structure sound) without micromanaging
+          # CHANGELOG diff shape — over-strict CI blocks legitimate
+          # contributor workflows (mixing a new entry with a small
+          # polish, consolidating duplicates) for no end-user benefit.
+          BASE_TEXT="$(git show "$BASE_SHA:CHANGELOG.md")" \
+          HEAD_TEXT="$(git show "$HEAD_SHA:CHANGELOG.md")" \
+          python3 - <<'PY'
+          import os
+          import sys
+
+          base_text = os.environ["BASE_TEXT"]
+          head_text = os.environ["HEAD_TEXT"]
+
+          UNRELEASED_HEADING = "## [Unreleased]"
+
+
+          def extract_unreleased_body(text: str) -> str:
+              """Return the body of the first [Unreleased] section,
+              starting right after the heading and ending just before
+              the next '## ' heading. Leading/trailing whitespace is
+              stripped so cosmetic blank-line-only diffs do not pass."""
+              lines = []
+              in_section = False
+              for line in text.split("\n"):
+                  if line == UNRELEASED_HEADING:
+                      in_section = True
+                      continue
+                  if in_section and line.startswith("## "):
+                      break
+                  if in_section:
+                      lines.append(line)
+              return "\n".join(lines).strip()
+
+
+          def validate_structure(text: str):
+              """Return None if valid, otherwise an error string.
+
+              Enforces:
+                1. Exactly one '## [Unreleased]' heading
+                2. The [Unreleased] heading appears before the first
+                   dated release heading (e.g.
+                   '## [1.0.0] - 2025-01-01' or
+                   '## [firmware-v1.8.0] - 2026-05-20')
+
+              Both invariants matter because release-prep tooling
+              (`firmware-release.yml` sed extraction, the
+              CONTRIBUTING.md promotion flow) operates on the active
+              top [Unreleased] section.
+              """
+              lines = text.split("\n")
+              unreleased_idx = None
+              first_dated_idx = None
+              for i, line in enumerate(lines):
+                  if line == UNRELEASED_HEADING:
+                      if unreleased_idx is not None:
+                          return (
+                              "duplicate '## [Unreleased]' heading "
+                              f"(at lines {unreleased_idx + 1} and "
+                              f"{i + 1})"
+                          )
+                      unreleased_idx = i
+                  elif line.startswith("## ") and " - " in line:
+                      if first_dated_idx is None:
+                          first_dated_idx = i
+              if unreleased_idx is None:
+                  return "no '## [Unreleased]' heading found"
+              if (
+                  first_dated_idx is not None
+                  and unreleased_idx > first_dated_idx
+              ):
+                  return (
+                      "'## [Unreleased]' heading must appear before "
+                      "the first dated release heading "
+                      f"(at line {unreleased_idx + 1}, after a dated "
+                      f"release at line {first_dated_idx + 1})"
+                  )
+              return None
+
+          head_err = validate_structure(head_text)
+          if head_err:
+              print(
+                  "::error title=Invalid CHANGELOG.md structure (HEAD)::"
+                  f"{head_err}. The gate cannot validate per-PR entries "
+                  "against a malformed [Unreleased] section; fix the "
+                  "structure before merging."
+              )
+              sys.exit(1)
+
+          base_body = extract_unreleased_body(base_text)
+          head_body = extract_unreleased_body(head_text)
+
+          if base_body == head_body:
+              print(
+                  "::error title=Missing [Unreleased] entry::"
+                  "Source changes detected under firmware/ or gateway/, "
+                  "but the [Unreleased] section of CHANGELOG.md is "
+                  "unchanged between base and head."
+              )
+              print()
+              print(
+                  "Add an entry under the matching subsection of "
+                  "[Unreleased] before merging:"
+              )
+              print("  * [Unreleased] > ### Firmware  for firmware/ changes")
+              print("  * [Unreleased] > ### Gateway   for gateway/ changes")
+              print()
+              print(
+                  "Touching CHANGELOG.md outside [Unreleased] (e.g. a "
+                  "typo fix on an older release section) does not "
+                  "satisfy this gate. See CONTRIBUTING.md > 'Changelog "
+                  "entries per PR' for the auto-skip list and the "
+                  "relationship to the release-time gate in "
+                  "firmware-release.yml."
+              )
+              sys.exit(1)
+
+          print("CHANGELOG check passed ([Unreleased] body changed).")
+          PY

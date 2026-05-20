@@ -53,6 +53,11 @@ not apply, and explain anything you could not test.
 - Hardware notes: required for firmware changes
 - Breaking changes: MCP tool API, NVS schema, build flags, or `None`
 - Related issues: `Closes #N` or `Refs #N` when applicable
+- CHANGELOG entry: add an `[Unreleased]` line under the matching
+  subsection (`### Firmware` for `firmware/` changes, `### Gateway` for
+  `gateway/` changes, `### Docs` for cross-cutting docs that ship with a
+  release). See "Changelog entries per PR" below for the enforcing CI
+  gate and the list of paths that automatically skip the check.
 
 Small, focused PRs are easier to review. Prefer one issue per PR, or one small
 maintenance purpose per PR.
@@ -65,10 +70,79 @@ pushes to `main`. It currently verifies:
 - Firmware: `python ./scripts/release.py stackchan` inside
   `espressif/idf:v5.5.2`
 - Gateway: `uv sync --frozen`, `uv run ruff check .`, and `uv run pytest`
+- CHANGELOG: PR-level enforcement that `CHANGELOG.md` is updated when
+  `firmware/` or `gateway/` paths change (see "Changelog entries per PR"
+  below)
 
 CI is the shared baseline. For firmware changes, real hardware testing is still
 needed before merge, but contributors without hardware are welcome to open PRs
 and ask for maintainer verification.
+
+## Changelog entries per PR
+
+`CHANGELOG.md` is the source of truth for user-visible changes between
+releases. Every PR that touches `firmware/` or `gateway/` must add an
+entry under the matching `[Unreleased]` subsection:
+
+- `[Unreleased] > ### Firmware` for `firmware/` changes
+- `[Unreleased] > ### Gateway`  for `gateway/` changes
+- `[Unreleased] > ### Docs`     for cross-cutting documentation that
+  ships alongside a release
+
+The `Build` workflow runs a `CHANGELOG check` job on every PR. When
+the PR touches `firmware/` or `gateway/`, the gate verifies that the
+`[Unreleased]` section of `CHANGELOG.md` changed between the PR base
+and head. A `CHANGELOG.md` edit somewhere else in the file (typo
+fix on an older release section, comparison-link adjustments, blank
+lines) does **not** satisfy the gate — the change has to land
+inside `[Unreleased]`.
+
+The gate also runs a light structure check: there must be exactly
+one `## [Unreleased]` heading at HEAD, and it must appear before the
+first dated release heading. These are zero-cost invariants that
+keep release-prep tooling (`firmware-release.yml` extraction,
+promotion flow) working reliably.
+
+### Scope of this gate (and what it leaves to humans)
+
+The gate's mission is the **common miss case**: a source-touching
+PR that forgets to add a CHANGELOG entry. It is intentionally
+lenient about everything else — mixing a typo polish with a new
+entry, consolidating duplicates, reclassifying a bullet between
+`### Firmware` and `### Gateway`, large reorderings. Those are
+legitimate maintainer workflows and CI should not block them.
+
+Content judgement on whether the entries are accurate, appropriately
+worded, or in the right subsection belongs to maintainer review of
+the CHANGELOG diff at merge time — and is double-checked at
+release-prep time, when the maintainer promotes `[Unreleased]`
+entries into the new dated section. Over-strict CI here would only
+slow contributors down without giving end users a tangible win.
+
+**Automatic skip** (no CHANGELOG entry required):
+
+- Machine-generated lockfile sync only (`gateway/uv.lock`,
+  `gateway/poetry.lock`)
+
+If your PR is purely a docs-only / housekeeping change that does not
+touch `firmware/` or `gateway/` at all, the gate does not fire and no
+CHANGELOG entry is needed.
+
+### Why this gate exists
+
+Without this gate, the prior workflow was that contributors would land
+source changes without an `[Unreleased]` entry, and the gap was only
+discovered during release prep — at which point a maintainer had to file
+a back-fill PR for every missing entry before the release could go out
+(this happened across firmware-v1.4.1, v1.5.0, v1.6.0, v1.7.0, and again
+during the v1.8.0 prep). Catching the missed entry on each PR avoids
+that back-fill cycle and keeps `CHANGELOG.md` accurate as commits land,
+rather than being reconstructed retroactively.
+
+This gate complements the `firmware-release.yml` release-time gate that
+enforces promotion of `[Unreleased]` entries into a dated
+`## [firmware-vX.Y.Z]` section at tag-push time. Both gates target the
+same accuracy invariant from different ends of the lifecycle.
 
 ## Gateway Checks
 

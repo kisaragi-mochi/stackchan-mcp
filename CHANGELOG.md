@@ -30,7 +30,44 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- Added: generic Grove Port A I2C bus and four `self.i2c.*` MCP tools
+  (`scan` / `read` / `write` / `write_read`) so attached M5Stack Unit
+  modules (ENV III, ToF, gas sensor, PaHub, etc.) can be driven from
+  the gateway without recompiling firmware per Unit. Port A runs on
+  I2C controller 0, physically independent from the controller-1
+  internal bus (PMIC, AW9523, touch, audio codec, IMU), so the generic
+  tools cannot accidentally reach safety-critical ICs. `addr` is
+  constrained to 0x08..0x77 (I2C reserved ranges excluded), and
+  `bytes` / `write_bytes` payloads are capped at 256 items (matching
+  the `n_bytes` read cap). Contributed via
+  [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196).
+
+- Added: `kPropertyTypeArray` for MCP tool parameters, supporting
+  integer arrays (with optional per-element range) and string arrays.
+  An optional `set_max_items` setter caps the array length in the
+  emitted JSON Schema (`maxItems`) and rejects oversized arrays in
+  `set_value()` validation before they reach the tool callback. (The
+  parse-time `std::vector::reserve(array_size)` in `DoToolCall` still
+  runs before the cap is checked, so the cap acts as a
+  payload-acceptance guard rather than a pre-allocation guard;
+  tightening to a pre-allocation guard is tracked separately.) The
+  generic default-value constructor explicitly rejects
+  `kPropertyTypeArray` so future array tools must use the
+  element-type-aware constructor. Contributed via
+  [PR #195](https://github.com/kisaragi-mochi/stackchan-mcp/pull/195).
+
 ### Gateway
+
+- Added: MCP tool surface for the firmware-side Grove Port A generic
+  I2C bus introduced in
+  [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196) —
+  `i2c_scan` (discover attached Units), `i2c_read` (raw read at a 7-bit
+  address), `i2c_write` (raw write), and `i2c_write_read`
+  (Repeated-Start write-then-read for the register-pointer idiom).
+  Exposes the firmware tools so LLM clients can drive attached
+  M5Stack Unit modules from the gateway side.
 
 - Fixed: MCP tool schemas for `i2c_read` / `i2c_write` / `i2c_write_read`
   now constrain the `addr` parameter to the I2C 7-bit address range
