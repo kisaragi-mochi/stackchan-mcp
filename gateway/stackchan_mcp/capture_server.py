@@ -63,6 +63,15 @@ CAPTURE_TOKEN_KEY = web.AppKey("capture_token", str)
 PCM_TOKEN_KEY = web.AppKey("pcm_token", str)
 GATEWAY_KEY: web.AppKey = web.AppKey("gateway", object)
 
+# Per-route upload cap for the JPEG capture endpoint. The PCM endpoint
+# intentionally streams arbitrarily long payloads (multi-minute TTS),
+# so the application-wide ``client_max_size`` is disabled and each
+# route enforces its own limit. JPEG captures from the ESP32 camera
+# top out around 200 KB at full resolution; 8 MiB is generous headroom
+# against a misbehaving / malicious uploader without inviting unbounded
+# disk consumption on the gateway host.
+CAPTURE_MAX_BYTES = 8 * 1024 * 1024
+
 
 def _is_authorized(auth_header: str, expected_token: str) -> bool:
     """Return whether the bearer auth header matches the expected token."""
@@ -82,11 +91,31 @@ async def handle_capture(request: web.Request) -> web.Response:
             content_type="application/json",
         )
 
+    # Per-route body cap. The application-wide client_max_size is
+    # disabled because /pcm streams arbitrary-length audio, so
+    # /capture's defense lives here. Reject up front based on the
+    # advertised Content-Length when available, and enforce again
+    # while streaming so a misadvertised header cannot bypass the cap.
+    content_length = request.content_length
+    if content_length is not None and content_length > CAPTURE_MAX_BYTES:
+        logger.warning(
+            "Capture upload rejected: Content-Length %d exceeds %d",
+            content_length, CAPTURE_MAX_BYTES,
+        )
+        return web.Response(
+            text=json.dumps(
+                {"error": f"Upload exceeds {CAPTURE_MAX_BYTES} bytes"}
+            ),
+            status=413,
+            content_type="application/json",
+        )
+
     os.makedirs(CAPTURE_DIR, exist_ok=True)
 
     reader = await request.multipart()
     question = ""
     image_path = ""
+    bytes_written = 0
 
     async for part in reader:
         if part.name == "question":
@@ -100,6 +129,27 @@ async def handle_capture(request: web.Request) -> web.Response:
                     chunk = await part.read_chunk(8192)
                     if not chunk:
                         break
+                    bytes_written += len(chunk)
+                    if bytes_written > CAPTURE_MAX_BYTES:
+                        # Overran the cap mid-stream — delete the
+                        # partial file and bail out with 413 so the
+                        # gateway host disk does not fill up.
+                        f.close()
+                        try:
+                            os.remove(image_path)
+                        except OSError:
+                            pass
+                        logger.warning(
+                            "Capture upload truncated at %d bytes (cap %d)",
+                            bytes_written, CAPTURE_MAX_BYTES,
+                        )
+                        return web.Response(
+                            text=json.dumps(
+                                {"error": f"Upload exceeds {CAPTURE_MAX_BYTES} bytes"}
+                            ),
+                            status=413,
+                            content_type="application/json",
+                        )
                     f.write(chunk)
 
     if image_path and os.path.exists(image_path):
