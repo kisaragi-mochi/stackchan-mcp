@@ -247,12 +247,17 @@ async def test_stream_default_source_label(fake_opuslib):
 async def test_stream_resamples_chunks_when_source_rate_differs(
     fake_opuslib, monkeypatch,
 ):
-    """Each chunk at a non-device rate is resampled before encoding.
+    """Source-rate PCM is buffered and resampled per source-rate frame.
 
-    Linear interpolation is stateless across chunks, so per-chunk
-    resampling is correct even when chunks are misaligned to frame
-    boundaries — a property the docstring promises external producers
-    can rely on.
+    Per-chunk resampling was replaced with source-rate buffering after
+    PR review (#213) noted two bugs: (a) per-chunk resample accumulated
+    rounding errors with small chunks (e.g., 1-sample chunks at 48 kHz
+    stretched audio ~3x), and (b) the resampler raised ValueError on
+    odd-byte chunks because transport chunk boundaries can split a
+    16-bit sample. The new buffer-then-resample loop calls
+    ``resample_pcm16_linear`` once per whole source-rate frame, so the
+    call count matches the number of complete source-rate frames the
+    stream contains rather than the number of transport chunks.
     """
     import stackchan_mcp.tts.orchestrator as orchestrator
 
@@ -268,8 +273,11 @@ async def test_stream_resamples_chunks_when_source_rate_differs(
 
     monkeypatch.setattr(orchestrator, "resample_pcm16_linear", spy_resample)
 
-    # Two chunks at 32 kHz, each producing roughly half a frame at 16 kHz.
-    chunk_32k = b"\x01\x00" * SAMPLES_PER_FRAME  # 32 kHz, ~30ms
+    # Two chunks at 32 kHz. Each chunk carries SAMPLES_PER_FRAME (a
+    # device-frame worth of samples). At 32 kHz that's half a
+    # source-frame each, so the buffer needs both chunks before it can
+    # emit one full source-frame -> one resample call.
+    chunk_32k = b"\x01\x00" * SAMPLES_PER_FRAME
     esp32 = _FakeESP32(connected=True)
     gateway = _FakeGateway(esp32)
 
@@ -277,8 +285,40 @@ async def test_stream_resamples_chunks_when_source_rate_differs(
         gateway, _aiter([chunk_32k, chunk_32k]), source_rate=32000,
     )
 
-    # Each chunk is resampled independently.
-    assert call_count == 2
+    # 32 kHz / DEVICE_FRAME_DURATION_MS frames live in 2 * SAMPLES_PER_FRAME
+    # samples, which is exactly one source-rate frame at 32 kHz =>
+    # exactly one resample call from the streaming loop. (The EOS flush
+    # path can add one more if the trailing buffer is non-empty; here
+    # both chunks together fill exactly one source frame, so no
+    # trailing remainder.)
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_handles_odd_byte_chunk_boundaries(fake_opuslib):
+    """Odd-byte chunks at a non-device rate do not crash the resampler.
+
+    Regression for PR review on #213: ``resample_pcm16_linear`` raises
+    ``ValueError`` on odd-length input because it parses bytes as 16-bit
+    samples (``array('h').frombytes``). HTTP / aiohttp chunk boundaries
+    are arbitrary and can split a 16-bit sample, so the stream loop now
+    buffers raw source-rate bytes and only resamples whole source-rate
+    frames. This test feeds three odd-length chunks that recombine to
+    an even byte count and confirms playback completes without error.
+    """
+    # 32 kHz so source_rate != DEVICE_SAMPLE_RATE and resample runs.
+    # Total bytes: 1 + 3 + 4 = 8 bytes = 4 samples at 32 kHz. Below one
+    # whole source-rate frame, so the EOS flush handles it.
+    odd_chunks = [b"\x01", b"\x00\x02\x00", b"\x03\x00\x04\x00"]
+    esp32 = _FakeESP32(connected=True)
+    gateway = _FakeGateway(esp32)
+
+    await send_pcm_stream(
+        gateway, _aiter(odd_chunks), source_rate=32000,
+    )
+    # Should reach normal completion (no exception raised); at least the
+    # EOS-flush frame was pushed.
+    assert len(esp32.frames) >= 1
 
 
 @pytest.mark.asyncio

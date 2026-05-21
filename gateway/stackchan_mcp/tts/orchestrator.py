@@ -485,6 +485,21 @@ async def send_pcm_stream(
         DEVICE_SAMPLE_RATE * DEVICE_FRAME_DURATION_MS // 1000
     )
     bytes_per_frame = samples_per_frame * 2  # 16-bit
+    # Number of source-rate samples that produce exactly one device-rate
+    # opus frame after resampling. When the input is already at the device
+    # rate this equals ``samples_per_frame`` and the resample step is a
+    # no-op; otherwise we drain whole source-rate frames into the
+    # resampler, which avoids the rounding-error and odd-byte issues that
+    # per-chunk resampling has when transport chunk sizes are arbitrary.
+    src_samples_per_frame = (
+        source_rate * DEVICE_FRAME_DURATION_MS // 1000
+    )
+    if src_samples_per_frame <= 0:
+        raise RuntimeError(
+            f"source_rate {source_rate} is too low for "
+            f"{DEVICE_FRAME_DURATION_MS} ms frames"
+        )
+    bytes_per_src_frame = src_samples_per_frame * 2  # 16-bit
     encoder = opuslib.Encoder(
         DEVICE_SAMPLE_RATE, DEVICE_CHANNELS, opuslib.APPLICATION_VOIP
     )
@@ -494,6 +509,10 @@ async def send_pcm_stream(
 
     sent = 0
     push_error: ConnectionError | None = None
+    # ``buffer`` accumulates source-rate PCM bytes. Chunks may be odd-byte
+    # (HTTP chunked uploads can split a 16-bit sample across two transport
+    # chunks), so we accumulate raw bytes here and only resample / encode
+    # when the buffer holds at least one full source-rate frame's worth.
     buffer = bytearray()
 
     async def _push(opus_frame: bytes) -> bool:
@@ -532,23 +551,41 @@ async def send_pcm_stream(
                     # the loop alive without advancing the audio.
                     continue
 
-                # Resample each chunk independently. Linear interpolation
-                # introduces no chunk-boundary state, so this is correct
-                # even when chunks are misaligned to frame boundaries.
-                if source_rate != DEVICE_SAMPLE_RATE:
-                    chunk = resample_pcm16_linear(
-                        chunk, source_rate, DEVICE_SAMPLE_RATE
-                    )
-
+                # Accumulate raw source-rate bytes. Resampling per chunk
+                # used to live here but produced two bugs noted in PR
+                # review: (a) ``resample_pcm16_linear`` raises ValueError
+                # on odd-byte chunks because transport chunk boundaries
+                # can split a 16-bit sample, and (b) rounding inside
+                # ``resample_pcm16_linear`` (``n_dst = max(1, n_src *
+                # dst_rate // src_rate)``) accumulates duration error
+                # when called on small chunks repeatedly. Accumulating
+                # to whole source-rate frames before resampling fixes
+                # both.
                 buffer.extend(chunk)
 
-                # Drain as many full frames as the buffer now holds. Any
-                # tail shorter than ``bytes_per_frame`` stays in the
-                # buffer until the next chunk arrives (or until the
-                # stream ends and gets flushed).
-                while len(buffer) >= bytes_per_frame:
-                    pcm_frame = bytes(buffer[:bytes_per_frame])
-                    del buffer[:bytes_per_frame]
+                # Drain as many full source-rate frames as the buffer
+                # now holds. Each whole source frame resamples to
+                # exactly ``samples_per_frame`` device samples, so the
+                # rounding stays consistent across chunks regardless of
+                # transport chunking.
+                while len(buffer) >= bytes_per_src_frame:
+                    src_frame = bytes(buffer[:bytes_per_src_frame])
+                    del buffer[:bytes_per_src_frame]
+                    if source_rate != DEVICE_SAMPLE_RATE:
+                        pcm_frame = resample_pcm16_linear(
+                            src_frame, source_rate, DEVICE_SAMPLE_RATE
+                        )
+                        # Resampler should produce exactly one device
+                        # frame; pad / truncate defensively so the
+                        # opus encoder gets the size it expects.
+                        if len(pcm_frame) > bytes_per_frame:
+                            pcm_frame = pcm_frame[:bytes_per_frame]
+                        elif len(pcm_frame) < bytes_per_frame:
+                            pcm_frame = pcm_frame + b"\x00" * (
+                                bytes_per_frame - len(pcm_frame)
+                            )
+                    else:
+                        pcm_frame = src_frame
                     try:
                         opus_frame = encoder.encode(
                             pcm_frame, samples_per_frame
@@ -566,18 +603,43 @@ async def send_pcm_stream(
 
             # Stream ended cleanly: flush any trailing partial frame as
             # zero-padded audio so the last few milliseconds of speech
-            # aren't silently dropped.
+            # aren't silently dropped. We zero-pad in the source rate
+            # space first (down to 16-bit sample alignment, then up to
+            # one source-rate frame), then resample once to a device
+            # frame, mirroring the per-frame logic above.
             if push_error is None and len(buffer) > 0:
-                tail = bytes(buffer) + b"\x00" * (
-                    bytes_per_frame - len(buffer)
-                )
-                try:
-                    opus_frame = encoder.encode(tail, samples_per_frame)
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"Opus encoding failed: {exc}"
-                    ) from exc
-                await _push(opus_frame)
+                tail_src = bytes(buffer)
+                if len(tail_src) % 2 != 0:
+                    # Drop a stray byte rather than crash. The producer
+                    # protocol expects 16-bit aligned PCM; a half sample
+                    # at EOS has no defined interpretation.
+                    tail_src = tail_src[:-1]
+                if len(tail_src) > 0:
+                    if len(tail_src) < bytes_per_src_frame:
+                        tail_src = tail_src + b"\x00" * (
+                            bytes_per_src_frame - len(tail_src)
+                        )
+                    if source_rate != DEVICE_SAMPLE_RATE:
+                        tail = resample_pcm16_linear(
+                            tail_src, source_rate, DEVICE_SAMPLE_RATE
+                        )
+                        if len(tail) > bytes_per_frame:
+                            tail = tail[:bytes_per_frame]
+                        elif len(tail) < bytes_per_frame:
+                            tail = tail + b"\x00" * (
+                                bytes_per_frame - len(tail)
+                            )
+                    else:
+                        tail = tail_src
+                    try:
+                        opus_frame = encoder.encode(
+                            tail, samples_per_frame
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Opus encoding failed: {exc}"
+                        ) from exc
+                    await _push(opus_frame)
         finally:
             try:
                 await gateway.esp32.send_tts_state("stop")
