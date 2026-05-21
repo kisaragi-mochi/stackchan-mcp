@@ -169,6 +169,17 @@ documented-only.
   non-device rates work without manual resampling. Contributed via
   [PR #TBD-A1](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A1).
 
+- Fixed: `pip install stackchan-mcp[tts]` did not work out-of-the-box on
+  Windows because `opuslib` calls `find_library("opus")`, which on
+  Windows requires a discoverable `opus.dll` — but pip-installable
+  upstream opus binaries do not exist for Windows. The wheel now bundles
+  a `gateway/stackchan_mcp/_libs/opus.dll` (PyOgg-derived, license
+  documented in `_libs/SOURCES.md`) and the package init prepends the
+  `_libs/` directory to `PATH` so `find_library` resolves it. macOS /
+  Linux installs are unaffected — the package init only manipulates
+  `PATH` on Windows. Contributed via
+  [PR #TBD-C](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-C).
+
 - Added: MCP tool surface for the firmware-side Grove Port A generic
   I2C bus introduced in
   [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196) —
