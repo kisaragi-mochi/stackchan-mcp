@@ -32,6 +32,22 @@ documented-only.
 
 ### Firmware
 
+- Fixed: every boot, `Application::ActivationTask()` called
+  `Ota::CheckVersion()`, which posts the device descriptor to the
+  upstream xiaozhi OTA endpoint (`api.tenclass.net` by default). The
+  response handler in `ota.cc::CheckVersion()` then writes every
+  `websocket` and `mqtt` key from the response back into NVS,
+  overwriting the gateway URL the user just saved through the WiFi
+  config UI's "Advanced > WebSocket Gateway URL" field. stackchan-mcp
+  is designed to speak to a self-hosted gateway —
+  `InitializeProtocol()` already forces `WebsocketProtocol`, and
+  `websocket_protocol.cc` has its own NVS-backed URL field with
+  primary+fallback support — so the xiaozhi OTA-config payload was
+  never meant to be consumed in this fork. `CheckVersion()` is now
+  skipped (early-returns with a single log line) so the user-
+  configured gateway URL survives reboot. Contributed via
+  [PR #TBD-B](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-B).
+
 - Fixed: WebSocket candidate fallback is now fail-fast when a server
   hello is malformed (missing/non-string `transport`, missing/empty
   `session_id`, or unsupported `transport`). A new
