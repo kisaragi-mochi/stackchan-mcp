@@ -2076,29 +2076,105 @@ private:
     void PollTouchpad() {
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
-        const int64_t TOUCH_THRESHOLD_MS = 500;  // 触摸时长阈值，超过500ms视为长按
-        
+        static int64_t last_release_ms = 0;       // デバウンス用 (= 直前 release 時刻)
+        static int64_t listening_started_ms = 0;  // タイムアウト用 (= listening 突入時刻)
+        static bool was_listening = false;        // listening 突入のエッジ検出
+        const int64_t TOUCH_THRESHOLD_MS = 500;   // 触摸时长阈值，超过500ms视为长按
+        const int64_t DEBOUNCE_MS = 300;          // 直前 release から N ms 以内の press は無視
+        const int64_t LISTEN_TIMEOUT_MS = 30000;  // listening 状態に N ms 以上滞在で auto stop
+
+        auto& app = Application::GetInstance();
+        int64_t now_ms = esp_timer_get_time() / 1000;
+
+        // --- listening 状態の上界 (タイムアウト) 管理 ---
+        // 状態遷移のエッジ検出で突入時刻を記録、 滞在時間が LISTEN_TIMEOUT_MS を
+        // 超えたら StopListening を自動発火する。 タッチ忘れ放置で listen が
+        // 無限持続するのを防ぐ。 StopListening 後は listening_started_ms を 0 に
+        // 戻して再発火を抑止 (次に listening 突入したら再セット)。
+        bool is_listening = (app.GetDeviceState() == kDeviceStateListening);
+        if (is_listening && !was_listening) {
+            listening_started_ms = now_ms;
+            ESP_LOGI(TAG, "Listening entered at %d ms (timeout in %d ms)",
+                     (int)now_ms, (int)LISTEN_TIMEOUT_MS);
+        }
+        was_listening = is_listening;
+        if (is_listening && listening_started_ms != 0 &&
+            (now_ms - listening_started_ms) > LISTEN_TIMEOUT_MS) {
+            ESP_LOGI(TAG, "Listening timeout reached (%d ms) -> StopListening",
+                     (int)(now_ms - listening_started_ms));
+            SetAllRgbLeds(0, 0, 0);
+            app.StopListening();
+            listening_started_ms = 0;
+        }
+
         ft6336_->UpdateTouchPoint();
         auto& touch_point = ft6336_->GetTouchPoint();
-        
+
         // 检测触摸开始
         if (touch_point.num > 0 && !was_touched) {
+            // デバウンス: 直前 release から DEBOUNCE_MS 以内の press は無視。
+            // FT6336 のチャタリングや「タッチした直後にもう一度触れてしまう」
+            // 連打事故を防止。
+            if (last_release_ms != 0 && (now_ms - last_release_ms) < DEBOUNCE_MS) {
+                // was_touched は更新しない。 次の poll でも press 判定を再評価
+                // するが、 デバウンス期間を超えれば通常 press として処理される。
+                return;
+            }
             was_touched = true;
-            touch_start_time = esp_timer_get_time() / 1000; // 转换为毫秒
-        } 
+            touch_start_time = now_ms;
+            // タッチ瞬時の PlaySound 直接呼び出しは行わない。 直後に
+            // StartListening → EnableVoiceProcessing(true) → ResetDecoder で
+            // playback queue がクリアされて音が消えるため。 代わりに
+            // Application::StartListening 側で play_popup_on_listening_ flag を
+            // 立てて、 HandleStateChangedEvent の Listening 分岐後半 (ResetDecoder
+            // の後) で OGG_POPUP を鳴らす経路に乗せる (= xiaozhi 標準の WakeWord
+            // 経路と同じ仕組み)。
+        }
         // 检测触摸释放
         else if (touch_point.num == 0 && was_touched) {
             was_touched = false;
-            int64_t touch_duration = (esp_timer_get_time() / 1000) - touch_start_time;
-            
+            int64_t touch_duration = now_ms - touch_start_time;
+            last_release_ms = now_ms;
+
             // 只有短触才触发
             if (touch_duration < TOUCH_THRESHOLD_MS) {
-                auto& app = Application::GetInstance();
                 if (app.GetDeviceState() == kDeviceStateStarting) {
                     EnterWifiConfigMode();
                     return;
                 }
-                app.ToggleChatState();
+                // listening 中の2回目タッチは Application::HandleToggleChatEvent
+                // の既定経路 (CloseAudioChannel = WS 切断 → gateway の recording
+                // slot が aborted_mid_capture として buffer 破棄) ではなく
+                // StopListening (= SendStopListening) に分岐させる。これで
+                // device-driven audio capture push 経路 (gateway 側
+                // audio_input_hook) が listen.stop を受けて buffer を Ogg 化 +
+                // 外部 hook へ POST できる。Vessel UX として「タッチで listen
+                // 開始 → 発話 → タッチで送信」を成立させるための fork 専用分岐。
+                if (app.GetDeviceState() == kDeviceStateListening) {
+                    // 録音終了のフィードバック (= 全 LED 消灯)。 デバッグ目的、
+                    // MCP self.led.set_* 経由で上書き可能。
+                    SetAllRgbLeds(0, 0, 0);
+                    app.StopListening();
+                } else {
+                    // listening 開始は ToggleChatState ではなく StartListening
+                    // を使う。 ToggleChatState 経由は SetListeningMode に
+                    // GetDefaultListeningMode() (= AutoStop) を渡すため、
+                    // ペルソナ発話終了 (tts.stop) の Schedule 内で device が
+                    // 自動的に Listening 状態に再復帰してしまい (= xiaozhi の
+                    // 連続会話モデル、 application.cc:565)、 「タッチ駆動」 が
+                    // 破綻する (= 次のタッチが listen.stop 経路に入って即送信)。
+                    // StartListening 経由は HandleStartListeningEvent で
+                    // SetListeningMode(ManualStop) を強制するので、 tts.stop 後
+                    // は Idle に留まり、 次のタッチで明示的に listen 開始する
+                    // Vessel UX が成立する。 Idle 以外 (Speaking 等) でも
+                    // HandleStartListeningEvent が AbortSpeaking → ManualStop で
+                    // 適切に処理する。
+                    // 録音開始想定のフィードバック (= 全 LED 緑点灯、 控えめ
+                    // な輝度)。 実際の listen 起動は StartListening 経由で
+                    // 非同期処理。 タッチが取れたかどうかの体感を優先。
+                    SetAllRgbLeds(0, 32, 0);
+                    app.StartListening();
+                }
             }
         }
     }
@@ -2337,6 +2413,26 @@ private:
         uint16_t v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
         out[0] = (uint8_t)(v & 0xFF);
         out[1] = (uint8_t)((v >> 8) & 0xFF);
+    }
+
+    // 全 RGB LED を同じ色にする helper。 self.led.set_all MCP tool と同じ I2C 経路
+    // (PY32 経由 WS2812)。 PollTouchpad のタッチフィードバック等、 MCP 以外の
+    // 経路から LED を駆動するときに使う。 PY32 init 失敗時 (rgb_ok_ == false)
+    // は no-op で安全に抜ける。
+    void SetAllRgbLeds(uint8_t r, uint8_t g, uint8_t b) {
+        if (!rgb_ok_ || io_expander_ == nullptr) {
+            return;
+        }
+        uint8_t buf[RGB_LED_COUNT * 2];
+        uint8_t pair[2];
+        PackRgb565(r, g, b, pair);
+        for (int i = 0; i < RGB_LED_COUNT; i++) {
+            buf[i * 2 + 0] = pair[0];
+            buf[i * 2 + 1] = pair[1];
+        }
+        if (io_expander_->SetLedData(buf, sizeof(buf))) {
+            io_expander_->RefreshLeds();
+        }
     }
 
     void InitializeServo() {
