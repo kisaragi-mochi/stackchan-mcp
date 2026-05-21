@@ -95,6 +95,33 @@ documented-only.
   and timing constants are unchanged. Contributed via
   [PR #206](https://github.com/kisaragi-mochi/stackchan-mcp/pull/206).
 
+- Added: dynamic avatar-set transfer pipeline. A new `AvatarSet`
+  scaffold (layered face / eyes / mouth, ~537 KB total in RGB565)
+  can be staged on the gateway and fetched into PSRAM at runtime via
+  a new `avatar_set_fetch` WebSocket protocol, replacing the old
+  build-time `avatar_images.cc` table. The fetch path uses a small
+  `AvatarSetFetcher` HTTP client that streams the raw payload
+  straight into a PSRAM staging buffer, validates SHA256, then hands
+  the buffer over to `AvatarSet::AdoptOwnedBuffer()` (an
+  ownership-transfer load, no memcpy). This caps the load-time
+  PSRAM peak at `old + new_size` instead of the pre-fix `old +
+  staging + new_size`, which was overshooting the 8 MB PSRAM budget
+  in matrix-mode (~3.3 MB) loads and producing `Load: PSRAM
+  allocation failed (size=3456000)`. Expression-change commands
+  arriving during a fetch are deferred until completion so the
+  display does not flicker between the old set and the partially
+  loaded new set. A small `%zu` → `%u` adjustment in two ESP_LOG
+  call-sites keeps nano-printf from crashing on those format
+  specifiers. Contributed via
+  [PR #210](https://github.com/kisaragi-mochi/stackchan-mcp/pull/210).
+
+- Fixed: `Protocol::SendText` was protected, so board-side code that
+  wants to push a board-initiated WS message (e.g. an `avatar_set_loaded`
+  reply from the AvatarSet fetcher) had no clean entry point.
+  Exposed as public; no behavioral change for existing callers.
+  Contributed via
+  [PR #210](https://github.com/kisaragi-mochi/stackchan-mcp/pull/210).
+
 - Fixed: a server-side close arriving between the WebSocket server
   hello and the main task resuming no longer cancels the reconnect
   timer that the per-socket `OnDisconnected` lambda just armed.
@@ -179,6 +206,7 @@ documented-only.
 
 ### Gateway
 
+<<<<<<< HEAD
 - Added: `send_pcm_audio(gateway, pcm, source_rate=...)` helper
   extracted from `synthesize_and_send`'s encode-and-push back-half.
   External producers — HTTP PCM bridges, sound-effect players,
@@ -190,6 +218,18 @@ documented-only.
   the existing `resample_pcm16_linear` helper, so producers at
   non-device rates work without manual resampling. Contributed via
   [PR #TBD-A1](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A1).
+||||||| parent of bb37747 (docs(changelog): add Unreleased entries for PR-E1 (dynamic AvatarSet))
+=======
+- Added: `load_avatar_set` MCP tool + supporting HTTP staging /
+  WebSocket fetch protocol for the firmware's dynamic AvatarSet
+  pipeline (PR-E1 firmware side). The gateway stages a raw RGB565
+  payload on its capture HTTP server (one-time fetch, Bearer-token
+  auth, GC'd after 120 s), notifies the device over WebSocket, and
+  awaits the device's `avatar_set_loaded` reply. The tool takes a
+  filesystem `archive_path` rather than inline bytes so the MCP JSON
+  transport stays free of multi-MB base64 payloads. Contributed via
+  [PR #210](https://github.com/kisaragi-mochi/stackchan-mcp/pull/210).
+>>>>>>> bb37747 (docs(changelog): add Unreleased entries for PR-E1 (dynamic AvatarSet))
 
 - Fixed: `pip install stackchan-mcp[tts]` did not work out-of-the-box
   on Windows because `opuslib` calls `find_library("opus")`, which on
