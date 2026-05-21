@@ -703,6 +703,10 @@ void Application::ToggleChatState() {
 }
 
 void Application::StartListening() {
+    // Thin event setter. The popup-on-listening flag is armed inside
+    // HandleStartListeningEvent (main task) so all writes to
+    // play_popup_on_listening_ converge to the same task that reads
+    // and clears it in HandleStateChangedEvent.
     xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
 }
 
@@ -780,7 +784,25 @@ void Application::HandleStartListeningEvent() {
         ESP_LOGE(TAG, "Protocol not initialized");
         return;
     }
-    
+
+    if (state == kDeviceStateIdle || state == kDeviceStateSpeaking) {
+        // Arm the OGG_POPUP cue that HandleStateChangedEvent plays after
+        // the kDeviceStateListening branch resets the decoder
+        // (~line 980). Previously this flag was set only on wake-word
+        // activation paths (HandleWakeWordDetectedEvent /
+        // ContinueWakeWordInvoke), so callers of the public
+        // StartListening() API — board-level touch buttons,
+        // server-driven listen, etc. — silently lost the cue.
+        //
+        // Setting it here (main task, after the Activating /
+        // WifiConfiguring / null-protocol early returns and gated on
+        // the states that actually transition toward Listening) avoids
+        // latching the flag for a no-op StartListening so an unrelated
+        // future Listening transition doesn't unexpectedly play the
+        // popup.
+        play_popup_on_listening_ = true;
+    }
+
     if (state == kDeviceStateIdle) {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
