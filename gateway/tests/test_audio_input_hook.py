@@ -155,6 +155,46 @@ def test_pack_opus_frames_multi_page():
     assert audio[2]["granule"] == 120 * GRANULE_PER_FRAME
 
 
+def test_pack_opus_frames_large_packet_lacing():
+    """Packets > 255 bytes are split into 255-byte lacing segments.
+
+    Regression for PR review on #209: ``_build_ogg_page`` rejected any
+    segment over 255 bytes with ``ValueError``, but valid VBR opus
+    frames at higher bitrate can exceed 255 bytes. The packer now
+    splits long packets via ``_packet_to_segments`` before assembling
+    pages.
+    """
+    # 600-byte packet: 255 + 255 + 90 -> 3 segments
+    long_packet = bytes(range(256)) * 2 + bytes(range(88))
+    assert len(long_packet) == 600
+    blob = pack_opus_frames_to_ogg([long_packet], serial=7)
+    pages = _parse_ogg_pages(blob)
+    # OpusHead + OpusTags + one audio page with 3 segments totalling 600 bytes.
+    audio = [p for p in pages if p["page_seq"] >= 2]
+    assert len(audio) == 1
+    assert audio[0]["segments"] == [255, 255, 90]
+    assert len(audio[0]["body"]) == 600
+
+
+def test_pack_opus_frames_exact_255_boundary():
+    """Packets whose length is an exact multiple of 255 get a 0-byte terminator.
+
+    Regression for PR review on #209: without the terminator the Ogg
+    decoder treats the packet as continuing into the next page, so a
+    standalone 255-byte packet was being mis-framed.
+    """
+    # Exactly 255 bytes -> packet needs a 0-byte terminating segment
+    # so the parser knows it ended on this page.
+    packet_255 = bytes(range(255))
+    blob = pack_opus_frames_to_ogg([packet_255], serial=8)
+    pages = _parse_ogg_pages(blob)
+    audio = [p for p in pages if p["page_seq"] >= 2]
+    assert len(audio) == 1
+    # One 255-byte segment + one zero-byte terminating segment.
+    assert audio[0]["segments"] == [255, 0]
+    assert len(audio[0]["body"]) == 255
+
+
 def test_pack_opus_frames_crc_matches():
     """Recompute each page's CRC and verify the packer wrote the right value."""
     frames = [b"\xff\xee\xdd\xcc" for _ in range(10)]

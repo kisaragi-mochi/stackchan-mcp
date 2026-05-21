@@ -124,6 +124,33 @@ def _ogg_crc32(data: bytes) -> int:
     return crc
 
 
+def _packet_to_segments(packet: bytes) -> list[bytes]:
+    """Split an Ogg packet into 255-byte lacing segments (RFC 3533 §6).
+
+    Packets longer than 255 bytes are split into 255-byte runs; packets
+    whose length is exactly a multiple of 255 are terminated with a
+    zero-length segment so the parser knows the packet ended there
+    (otherwise it would expect a continuation into the next page).
+    Variable-bitrate Opus frames can exceed 255 bytes in practice, so
+    this split must happen before page assembly.
+    """
+    segments: list[bytes] = []
+    if not packet:
+        # An empty packet is itself a single zero-length segment.
+        return [b""]
+    pos = 0
+    n = len(packet)
+    while pos < n:
+        chunk = packet[pos:pos + 255]
+        segments.append(chunk)
+        pos += 255
+    if len(packet) % 255 == 0:
+        # Packet ends exactly on a 255-byte boundary — append a
+        # terminating zero-length segment per RFC 3533.
+        segments.append(b"")
+    return segments
+
+
 def _build_ogg_page(
     *,
     header_type: int,
@@ -278,14 +305,38 @@ def pack_opus_frames_to_ogg(
         page_frames = frames[start:end]
         granule += len(page_frames) * GRANULE_PER_FRAME
         is_last_page = end == total_frames
-        out += _build_ogg_page(
-            header_type=_HEADER_EOS if is_last_page else 0,
-            granule_position=granule,
-            serial=serial,
-            page_sequence=page_seq,
-            segments=list(page_frames),
-        )
-        page_seq += 1
+        # Split each opus packet into Ogg lacing segments. VBR opus can
+        # produce packets > 255 bytes, which Ogg encodes as multiple
+        # 255-byte segments plus a trailing remainder; packets whose
+        # length is an exact multiple of 255 need a zero-length
+        # terminator (RFC 3533 §6). _build_ogg_page expects ≤ 255
+        # segments per page, so a page's segment count can exceed
+        # _FRAMES_PER_PAGE when individual frames have to be split.
+        # Flush mid-batch when the segment table is about to overflow
+        # so each emitted page stays inside the 255-segment limit.
+        segments: list[bytes] = []
+        for frame in page_frames:
+            frame_segs = _packet_to_segments(frame)
+            if len(segments) + len(frame_segs) > 255:
+                out += _build_ogg_page(
+                    header_type=0,  # continuation page
+                    granule_position=granule,
+                    serial=serial,
+                    page_sequence=page_seq,
+                    segments=segments,
+                )
+                page_seq += 1
+                segments = []
+            segments.extend(frame_segs)
+        if segments:
+            out += _build_ogg_page(
+                header_type=_HEADER_EOS if is_last_page else 0,
+                granule_position=granule,
+                serial=serial,
+                page_sequence=page_seq,
+                segments=segments,
+            )
+            page_seq += 1
 
     return bytes(out)
 
