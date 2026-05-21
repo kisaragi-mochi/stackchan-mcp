@@ -159,6 +159,29 @@ documented-only.
   true there before this function ran). Contributed via
   [PR #207](https://github.com/kisaragi-mochi/stackchan-mcp/pull/207).
 
+- Added (stackchan): touch-driven listen UX overhaul. The FT6336
+  short-tap behavior now models stack-chan as a single-shot
+  push-to-talk device (touch → listen → touch → submit) rather than
+  xiaozhi's default continuous-conversation model. Concretely: (a) a
+  short tap while in `kDeviceStateListening` now calls
+  `StopListening()` instead of `CloseAudioChannel()`, so the gateway
+  receives `listen.stop` (= record-then-flush) instead of a transport
+  teardown that aborts the in-flight capture; (b) a short tap from
+  idle / speaking now calls `StartListening()` (which forces
+  `ManualStop`) instead of `ToggleChatState()` (which uses
+  `AutoStop`), so the device does not re-arm listening immediately
+  after `tts.stop` and the next tap is reliably interpreted as a new
+  `listen.start`; (c) 300 ms press-after-release debounce on
+  FT6336 chatter; (d) 30-second auto-`StopListening` for users who
+  start a listen and then walk away; (e) RGB LED tap feedback (green
+  on activation, off on submit) via a small `SetAllRgbLeds` helper
+  that shares the I2C path used by the `set_all_leds` MCP tool;
+  (f) `%lld` → `%d (int)cast` for the existing duration log,
+  matching the nano-printf-safe pattern already used in this file's
+  motion driver. Stack-chan-only — other board UX is unchanged.
+  Contributed via
+  [PR #208](https://github.com/kisaragi-mochi/stackchan-mcp/pull/208).
+
 - Fixed: WebSocket candidate fallback is now fail-fast when a server
   hello is malformed (missing/non-string `transport`, missing/empty
   `session_id`, or unsupported `transport`). A new
