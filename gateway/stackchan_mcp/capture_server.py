@@ -1,11 +1,46 @@
-"""HTTP capture server for receiving photos from ESP32.
+"""HTTP capture server for receiving photos from ESP32 and PCM from external producers.
 
-ESP32's camera.Explain() POSTs multipart/form-data with:
-- field 'question' (text)
-- field 'file' (camera.jpg, JPEG image)
+Two POST endpoints share this server:
 
-This server saves the JPEG and returns the file path so MCP client
-can view the image via the Read tool.
+- ``POST /capture``: ESP32's camera.Explain() uploads JPEG photos as
+  multipart/form-data (fields: ``question`` text + ``file`` JPEG).
+  Authenticated via ``CAPTURE_TOKEN_KEY`` (the gateway's ``vision_token``).
+  The server saves the JPEG to ``~/.stackchan/captures/`` and returns the
+  file path so the MCP client can view the image via the Read tool.
+
+- ``POST /pcm``: External producers (the SAIVerse voice-tts addon, etc.)
+  upload PCM audio for the device's speaker as a streaming body
+  (Content-Type: application/octet-stream, Transfer-Encoding: chunked).
+  Authenticated separately via ``PCM_TOKEN_KEY``. The request body is
+  fed directly into :func:`stackchan_mcp.tts.send_pcm_stream` so the
+  audio reaches the device with low latency, without buffering the
+  whole utterance.
+
+The PCM endpoint is the entry point of the gateway's "external PCM
+input" path — the receiving counterpart of the stdio ``say()`` MCP tool.
+``say()`` synthesises audio with a registered TTS engine inside the
+gateway; ``POST /pcm`` lets external producers (which already did the
+synthesis themselves, e.g. with a voice-cloning model the gateway does
+not host) push the finished PCM through the same back-half pipeline
+(:func:`send_pcm_stream`).
+
+Required PCM request headers:
+
+- ``Authorization: Bearer <PCM_TOKEN>`` — token comparison against
+  ``PCM_TOKEN_KEY`` (gateway's ``pcm_token`` property)
+- ``X-Sample-Rate: <int>`` — sample rate of the source PCM (e.g. 32000).
+  The gateway resamples to the device's 16 kHz before Opus encoding.
+- ``X-Channels: 1`` (optional, defaults to 1) — only mono is supported
+  for now (the device decoder is configured for mono).
+- ``X-Message-Id: <str>`` (optional) — opaque identifier echoed back in
+  the log line so the producer can correlate uploads with downstream
+  device state.
+
+The handler stores the active :class:`Gateway` instance in the
+application's ``GATEWAY_KEY`` so it can dispatch to ``send_pcm_stream``
+without coupling :mod:`capture_server` to the gateway module at import
+time (lazy import inside the handler keeps the optional ``[tts]``
+extra unnecessary for capture-only deployments).
 """
 
 from __future__ import annotations
@@ -14,13 +49,28 @@ import json
 import logging
 import os
 import time
+from typing import TYPE_CHECKING, AsyncIterator
 
 from aiohttp import web
+
+if TYPE_CHECKING:
+    from .gateway import Gateway
 
 logger = logging.getLogger(__name__)
 
 CAPTURE_DIR = os.path.expanduser("~/.stackchan/captures")
 CAPTURE_TOKEN_KEY = web.AppKey("capture_token", str)
+PCM_TOKEN_KEY = web.AppKey("pcm_token", str)
+GATEWAY_KEY: web.AppKey = web.AppKey("gateway", object)
+
+# Per-route upload cap for the JPEG capture endpoint. The PCM endpoint
+# intentionally streams arbitrarily long payloads (multi-minute TTS),
+# so the application-wide ``client_max_size`` is disabled and each
+# route enforces its own limit. JPEG captures from the ESP32 camera
+# top out around 200 KB at full resolution; 8 MiB is generous headroom
+# against a misbehaving / malicious uploader without inviting unbounded
+# disk consumption on the gateway host.
+CAPTURE_MAX_BYTES = 8 * 1024 * 1024
 
 
 def _is_authorized(auth_header: str, expected_token: str) -> bool:
@@ -41,11 +91,31 @@ async def handle_capture(request: web.Request) -> web.Response:
             content_type="application/json",
         )
 
+    # Per-route body cap. The application-wide client_max_size is
+    # disabled because /pcm streams arbitrary-length audio, so
+    # /capture's defense lives here. Reject up front based on the
+    # advertised Content-Length when available, and enforce again
+    # while streaming so a misadvertised header cannot bypass the cap.
+    content_length = request.content_length
+    if content_length is not None and content_length > CAPTURE_MAX_BYTES:
+        logger.warning(
+            "Capture upload rejected: Content-Length %d exceeds %d",
+            content_length, CAPTURE_MAX_BYTES,
+        )
+        return web.Response(
+            text=json.dumps(
+                {"error": f"Upload exceeds {CAPTURE_MAX_BYTES} bytes"}
+            ),
+            status=413,
+            content_type="application/json",
+        )
+
     os.makedirs(CAPTURE_DIR, exist_ok=True)
 
     reader = await request.multipart()
     question = ""
     image_path = ""
+    bytes_written = 0
 
     async for part in reader:
         if part.name == "question":
@@ -59,6 +129,27 @@ async def handle_capture(request: web.Request) -> web.Response:
                     chunk = await part.read_chunk(8192)
                     if not chunk:
                         break
+                    bytes_written += len(chunk)
+                    if bytes_written > CAPTURE_MAX_BYTES:
+                        # Overran the cap mid-stream — delete the
+                        # partial file and bail out with 413 so the
+                        # gateway host disk does not fill up.
+                        f.close()
+                        try:
+                            os.remove(image_path)
+                        except OSError:
+                            pass
+                        logger.warning(
+                            "Capture upload truncated at %d bytes (cap %d)",
+                            bytes_written, CAPTURE_MAX_BYTES,
+                        )
+                        return web.Response(
+                            text=json.dumps(
+                                {"error": f"Upload exceeds {CAPTURE_MAX_BYTES} bytes"}
+                            ),
+                            status=413,
+                            content_type="application/json",
+                        )
                     f.write(chunk)
 
     if image_path and os.path.exists(image_path):
@@ -83,9 +174,175 @@ async def handle_capture(request: web.Request) -> web.Response:
     )
 
 
-def create_capture_app(capture_token: str = "") -> web.Application:
-    """Create the HTTP capture application."""
-    app = web.Application()
+async def _pcm_chunks_from_request(
+    request: web.Request,
+) -> AsyncIterator[bytes]:
+    """Yield PCM byte chunks from the request body.
+
+    ``request.content`` is an :class:`aiohttp.StreamReader` that delivers
+    raw bytes as the chunked transfer arrives. ``iter_chunked(size)``
+    breaks the stream into ``<= size`` byte pieces, matching the
+    ``send_pcm_stream`` contract (any chunk size, internally re-aligned
+    to Opus frame boundaries).
+
+    Empty chunks (= heartbeat / cancellation tick) reach
+    ``send_pcm_stream`` unchanged and are handled as no-ops there.
+    """
+    async for chunk in request.content.iter_chunked(8192):
+        yield chunk
+
+
+async def handle_pcm(request: web.Request) -> web.Response:
+    """Stream PCM bytes from an external producer to the connected device.
+
+    See the module docstring for the request shape (headers, token,
+    body framing). The handler authenticates, validates the sample
+    rate header, then hands the body off to
+    :func:`stackchan_mcp.tts.send_pcm_stream`.
+
+    Returns 200 with a JSON summary on success (frame count, duration,
+    source label), 401 on token mismatch, 400 on missing /
+    malformed sample-rate header, 503 when no device is connected, or
+    500 with a clean error string on encoding / push failures (mirrors
+    the error-class discipline of the stdio ``say()`` tool).
+    """
+    expected_token = request.app[PCM_TOKEN_KEY]
+    if expected_token and not _is_authorized(
+        request.headers.get("Authorization", ""), expected_token
+    ):
+        logger.warning("PCM upload auth rejected")
+        return web.Response(
+            text='{"error": "Unauthorized"}',
+            status=401,
+            content_type="application/json",
+        )
+
+    rate_header = request.headers.get("X-Sample-Rate", "")
+    try:
+        source_rate = int(rate_header)
+    except (TypeError, ValueError):
+        return web.Response(
+            text=json.dumps(
+                {"error": f"Missing or invalid X-Sample-Rate header: {rate_header!r}"}
+            ),
+            status=400,
+            content_type="application/json",
+        )
+    if source_rate <= 0:
+        # Non-positive rates would crash resample_pcm16_linear with a
+        # ZeroDivisionError (which the RuntimeError handler below does
+        # not translate) and never produce a valid frame anyway. Reject
+        # at the boundary so the caller gets a clean 400 instead of
+        # an internal server error trail.
+        return web.Response(
+            text=json.dumps(
+                {"error": f"X-Sample-Rate must be a positive integer: {rate_header!r}"}
+            ),
+            status=400,
+            content_type="application/json",
+        )
+
+    channels_header = request.headers.get("X-Channels", "1")
+    try:
+        channels = int(channels_header)
+    except (TypeError, ValueError):
+        channels = 1
+    if channels != 1:
+        # send_pcm_stream is configured for mono via DEVICE_CHANNELS. Multi-
+        # channel sources would need downmix before they get here; rejecting
+        # them up front is clearer than silently mixing.
+        return web.Response(
+            text=json.dumps(
+                {"error": f"Only mono PCM is supported, got channels={channels}"}
+            ),
+            status=400,
+            content_type="application/json",
+        )
+
+    message_id = request.headers.get("X-Message-Id", "")
+    source_label = f"http_pcm:{message_id}" if message_id else "http_pcm"
+
+    gateway = request.app[GATEWAY_KEY]
+    if gateway is None:
+        return web.Response(
+            text='{"error": "Gateway not available"}',
+            status=503,
+            content_type="application/json",
+        )
+
+    # Lazy import: tts.send_pcm_stream pulls in opuslib, which is in the
+    # ``[tts]`` extra. Capture-only deployments must keep working
+    # without the extra, so we only require it when /pcm is actually
+    # used.
+    try:
+        from .tts import send_pcm_stream
+    except ImportError as exc:
+        return web.Response(
+            text=json.dumps(
+                {
+                    "error": f"PCM endpoint requires the [tts] extra: {exc}",
+                }
+            ),
+            status=500,
+            content_type="application/json",
+        )
+
+    try:
+        result = await send_pcm_stream(
+            gateway,
+            _pcm_chunks_from_request(request),
+            source_rate=source_rate,
+            source_label=source_label,
+        )
+    except RuntimeError as exc:
+        # send_pcm_stream raises RuntimeError on no-device / protocol
+        # mismatch / opuslib missing / disconnect mid-stream. Translate
+        # to a clean HTTP error rather than letting the traceback leak.
+        message = str(exc)
+        status = 503 if "no esp32" in message.lower() else 500
+        return web.Response(
+            text=json.dumps({"error": message}),
+            status=status,
+            content_type="application/json",
+        )
+
+    return web.Response(text=json.dumps(result), content_type="application/json")
+
+
+def create_capture_app(
+    capture_token: str = "",
+    pcm_token: str = "",
+    gateway: "Gateway | None" = None,
+) -> web.Application:
+    """Create the HTTP server application hosting /capture and /pcm.
+
+    ``capture_token`` authenticates ESP32 photo uploads (legacy single-
+    arg form is kept so existing tests keep working). ``pcm_token``
+    authenticates external PCM producers; if omitted the gateway will
+    accept any /pcm request, which matches the "no STACKCHAN_TOKEN set"
+    fallback behaviour the rest of the gateway already uses for ad-hoc
+    local development.
+
+    ``gateway`` is the active :class:`Gateway` instance the /pcm handler
+    dispatches to. May be ``None`` for tests of /capture alone; /pcm
+    will return 503 in that case.
+    """
+    # ``client_max_size=0`` disables aiohttp's per-request body size
+    # cap (default 1 MiB). The /pcm endpoint legitimately streams
+    # arbitrarily long PCM utterances (multi-minute TTS, live audio
+    # mixes); a 1 MiB cap would silently cut a chunked-transfer
+    # producer off mid-stream once its cumulative body exceeded that
+    # limit — observed in practice with a 200-second TTS push, which
+    # aborted around 36 s in (~2 MiB of source-rate PCM through the
+    # transfer-encoding pipe). The handler itself enforces no separate
+    # cap; back-pressure comes from the device-side Opus push rate
+    # inside ``send_pcm_stream``, which is the right place for it.
+    # /capture only receives JPEG snapshots from the ESP32 (well under
+    # 1 MiB each) so removing the cap costs it nothing.
+    app = web.Application(client_max_size=0)
     app[CAPTURE_TOKEN_KEY] = capture_token
+    app[PCM_TOKEN_KEY] = pcm_token
+    app[GATEWAY_KEY] = gateway
     app.router.add_post("/capture", handle_capture)
+    app.router.add_post("/pcm", handle_pcm)
     return app

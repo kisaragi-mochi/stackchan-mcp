@@ -97,6 +97,49 @@ documented-only.
 
 ### Gateway
 
+- Fixed: aiohttp's default 1 MiB `client_max_size` cap on the capture
+  `web.Application` was aborting `POST /pcm` requests mid-stream for
+  long PCM uploads (multi-minute TTS, live mixes, persistent audio
+  feeds). The cap is meaningful only as a body-size limit for buffered
+  request bodies, and `/pcm` is intentionally a streaming endpoint —
+  the byte total of an utterance is bounded by the producer, not by
+  what fits in a single buffer. Setting `client_max_size=0` on the
+  capture app disables the cap. Other endpoints on the same app
+  (image / vision uploads) are unaffected because they impose their
+  own size checks in handlers. Contributed via
+  [PR #TBD-A4](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A4).
+
+- Added: `POST /pcm` HTTP endpoint on the capture server that consumes
+  external PCM uploads and pipes them through `send_pcm_stream` to the
+  device. Lets non-MCP producers (sound-effect players, alternative TTS
+  stacks, browser bridges) hand audio to stack-chan over plain HTTP
+  without registering a `TTSEngine`. Accepts `audio/L16` or raw PCM with
+  query-string sample-rate, requires Bearer-token auth, streams chunks
+  to the device as they arrive so latency stays low for long uploads.
+  Contributed via
+  [PR #TBD-A3](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A3).
+
+- Added: `send_pcm_stream(gateway, async_iter, source_rate=...)`
+  incremental variant of `send_pcm_audio`. Consumes an async
+  iterable of PCM chunks, opus-encodes and pushes them frame-by-frame
+  to the device as they arrive, with the same protocol gating /
+  concurrency lock as the buffered variant. Lets producers start
+  playback before the full audio is synthesised (HTTP streaming
+  upload, real-time TTS engines, etc.). Contributed via
+  [PR #TBD-A2](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A2).
+
+- Added: `send_pcm_audio(gateway, pcm, source_rate=...)` helper
+  extracted from `synthesize_and_send`'s encode-and-push back-half.
+  External producers — HTTP PCM bridges, sound-effect players,
+  alternative voice stacks that already produce PCM — can now push
+  pre-synthesised audio to the device without registering a
+  `TTSEngine`. `synthesize_and_send` is unchanged from the caller's
+  perspective; it now delegates to `send_pcm_audio` after running
+  the engine. Resampling to the device's 16 kHz mono is done via
+  the existing `resample_pcm16_linear` helper, so producers at
+  non-device rates work without manual resampling. Contributed via
+  [PR #TBD-A1](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A1).
+
 - Added: MCP tool surface for the firmware-side Grove Port A generic
   I2C bus introduced in
   [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196) —
