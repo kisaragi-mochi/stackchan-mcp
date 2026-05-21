@@ -79,6 +79,70 @@ jobs:
         working-directory: gateway
         run: uv run pytest
 
+  gateway-windows-smoke:
+    name: Gateway windows-smoke
+    runs-on: windows-latest
+    # Catch regressions in the Windows-only DLL bundling path
+    # (`stackchan_mcp/__init__.py` arch gate + `add_dll_directory` +
+    # PATH update, `pyproject.toml` artifacts list) at PR time rather
+    # than at PyPI publish time. The Ubuntu `gateway-test` job runs
+    # ruff + pytest; this job covers what that one cannot reach
+    # because libopus on Linux ships through `apt`, not the bundled
+    # `opus.dll`.
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Bootstrap vcpkg + install libopus
+        shell: pwsh
+        run: |
+          if (Test-Path "$env:RUNNER_TEMP\vcpkg") {
+            Remove-Item -Recurse -Force "$env:RUNNER_TEMP\vcpkg"
+          }
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install opus:x64-windows
+          $dll = "$env:RUNNER_TEMP\vcpkg\installed\x64-windows\bin\opus.dll"
+          if (-not (Test-Path $dll)) {
+            Write-Error "vcpkg did not produce $dll"
+            exit 1
+          }
+          $dest_dir = "$env:GITHUB_WORKSPACE\gateway\stackchan_mcp\_libs"
+          New-Item -ItemType Directory -Force -Path $dest_dir | Out-Null
+          Copy-Item -Force $dll "$dest_dir\opus.dll"
+          $hash = (Get-FileHash "$dest_dir\opus.dll" -Algorithm SHA256).Hash.ToLower()
+          Write-Output "opus.dll SHA256: $hash"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install gateway with TTS extras from source
+        working-directory: gateway
+        run: uv sync --frozen --extra tts
+
+      - name: Verify bundled DLL is on disk
+        working-directory: gateway
+        shell: pwsh
+        run: |
+          uv run python -c "import stackchan_mcp, pathlib; p = pathlib.Path(stackchan_mcp.__file__).parent / '_libs' / 'opus.dll'; assert p.is_file(), f'missing {p}'; print(f'opus.dll size: {p.stat().st_size}')"
+
+      - name: Verify PATH prepend and add_dll_directory registration
+        working-directory: gateway
+        shell: pwsh
+        run: |
+          uv run python -c "import stackchan_mcp, os, pathlib; libs = str(pathlib.Path(stackchan_mcp.__file__).parent / '_libs'); assert libs in os.environ['PATH'].split(os.pathsep), 'libs/ not in PATH'; assert stackchan_mcp._dll_dir_handle is not None, 'add_dll_directory handle was not retained'; print('PATH and add_dll_directory: OK')"
+
+      - name: Verify find_library + opus encode round-trip
+        working-directory: gateway
+        shell: pwsh
+        run: |
+          uv run python -c "import stackchan_mcp; from ctypes.util import find_library; lib = find_library('opus'); assert lib is not None, 'find_library(opus) returned None'; print(f'find_library opus: {lib}'); import opuslib; enc = opuslib.Encoder(48000, 1, opuslib.APPLICATION_VOIP); _ = enc.encode(b'\x00' * 960 * 2, 960); print('opus encode round-trip: OK')"
+
   changelog-check:
     name: CHANGELOG check
     runs-on: ubuntu-latest
