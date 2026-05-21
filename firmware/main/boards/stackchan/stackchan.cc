@@ -2273,6 +2273,16 @@ private:
                     EnterWifiConfigMode();
                     return;
                 }
+                // kDeviceStateAudioTesting は WiFi config 完了直後の audio test
+                // モードに居る状態。 ここから WifiConfiguring に戻る経路は
+                // ToggleChatState() しか持っていない (= HandleStartListeningEvent
+                // は AudioTesting を扱わない)。 StartListening にだけ分岐すると
+                // タッチで設定モードに復帰できなくなるので、 AudioTesting だけ
+                // は従来通り ToggleChatState() に流して状態機械任せにする。
+                if (app.GetDeviceState() == kDeviceStateAudioTesting) {
+                    app.ToggleChatState();
+                    return;
+                }
                 // listening 中の2回目タッチは Application::HandleToggleChatEvent
                 // の既定経路 (CloseAudioChannel = WS 切断 → gateway の recording
                 // slot が aborted_mid_capture として buffer 破棄) ではなく
