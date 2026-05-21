@@ -83,6 +83,17 @@ def is_recording() -> bool:
     return _recording_session_id is not None
 
 
+def is_recording_session(session_id: str) -> bool:
+    """Return ``True`` when the recording slot belongs to ``session_id``.
+
+    Used by per-session disconnect cleanup paths to confirm they still
+    own the recording before tearing it down. A stale handler whose
+    session was replaced by a fresh reconnection (or by an MCP-driven
+    ``listen()``) must not clear the active buffer.
+    """
+    return _recording_session_id == session_id
+
+
 async def handle_audio_frame(data: bytes, session_id: str) -> None:
     """Process an incoming binary Opus frame from the device.
 

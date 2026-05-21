@@ -22,6 +22,7 @@ from .audio_input_hook import push_audio_capture
 from .audio_stream import (
     handle_audio_frame,
     is_recording,
+    is_recording_session,
     start_recording,
     stop_recording,
 )
@@ -397,7 +398,14 @@ class ESP32Manager:
         # and protocol details.
         self._audio_hook_url: str = ""
         self._audio_hook_token: str = ""
-        self._device_driven_recording: bool = False
+        # session_id (when device-driven listen has the recording slot
+        # open) or None. Storing the session_id rather than a plain bool
+        # lets the per-handler disconnect cleanup confirm it still owns
+        # the recording before tearing it down — otherwise a stale
+        # disconnect can clobber the active buffer of an unrelated
+        # session (e.g., a fresh reconnection or an MCP-driven listen()
+        # that already took the slot).
+        self._device_driven_session_id: str | None = None
         self._tool_lane_locks = {
             "servo": asyncio.Lock(),
             "led": asyncio.Lock(),
@@ -626,15 +634,15 @@ class ESP32Manager:
                             )
                         else:
                             start_recording(session_id)
-                            self._device_driven_recording = True
+                            self._device_driven_session_id = session_id
                             logger.info(
                                 "device-driven listen started: "
                                 "session=%s mode=%s",
                                 session_id, data.get("mode", ""),
                             )
                     elif state == "stop":
-                        if self._device_driven_recording:
-                            self._device_driven_recording = False
+                        if self._device_driven_session_id == session_id:
+                            self._device_driven_session_id = None
                             frames = stop_recording()
                             logger.info(
                                 "device-driven listen stopped: "
@@ -672,8 +680,17 @@ class ESP32Manager:
             # connection's recording slot (mirrors the discard logic in
             # audio_stream.handle_audio_frame for session-mismatched
             # frames).
-            if self._device_driven_recording:
-                self._device_driven_recording = False
+            #
+            # Guard the cleanup by session_id: a stale disconnect must
+            # not tear down the active buffer of an unrelated session
+            # that may have grabbed the recording slot since (a fresh
+            # reconnection or an MCP-driven listen() that took over).
+            # The audio_stream layer also tracks the recording session,
+            # so we double-check via is_recording_session().
+            if self._device_driven_session_id == session_id and (
+                is_recording_session(session_id)
+            ):
+                self._device_driven_session_id = None
                 discarded = stop_recording()
                 if discarded:
                     logger.warning(
@@ -681,6 +698,11 @@ class ESP32Manager:
                         "session=%s discarded %d frames",
                         session_id, len(discarded),
                     )
+            elif self._device_driven_session_id == session_id:
+                # Our handler thought it owned the slot, but audio_stream
+                # disagrees — clear our local flag without tearing down
+                # the slot, then keep going.
+                self._device_driven_session_id = None
             connection.disconnect()
             async with self._lock:
                 if self._connection is connection:
