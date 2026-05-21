@@ -324,11 +324,31 @@ void Application::ActivationTask() {
     // Create OTA object for activation process
     ota_ = std::make_unique<Ota>();
 
-    // Check for new assets version
+    // Check for new assets version (uses NVS only, does not contact any
+    // external server)
     CheckAssetsVersion();
 
-    // Check for new firmware version
-    CheckNewVersion();
+    // NOTE: The legacy xiaozhi-cloud OTA check is intentionally skipped.
+    // ota.cc::CheckVersion() has a side effect of overwriting the NVS
+    // "websocket" and "mqtt" namespaces with whatever the OTA response
+    // carries, which clobbers the gateway URL the user sets via the WiFi
+    // config UI (Advanced > WebSocket Gateway URL). The stackchan-mcp
+    // firmware always speaks to a custom gateway directly (see
+    // InitializeProtocol() below and websocket_protocol.cc), so the
+    // OTA-config payload is never consumed; skipping the call is the
+    // simplest way to keep the user-configured URL intact across reboots.
+    // current_version_ is populated in the Ota constructor from the
+    // ESP-IDF app description so GetCurrentVersion() still works for the
+    // UI notification path.
+    //
+    // However, the OTA rollback-confirmation half of CheckVersion() — the
+    // ota_->MarkCurrentVersionValid() call after the cloud probe — is NOT
+    // optional. On ESP-IDF OTA boots the running partition starts as
+    // ESP_OTA_IMG_PENDING_VERIFY; if it is never marked valid, a later
+    // reboot can roll back to the previous firmware. We still need that
+    // half, just without the cloud probe. MarkCurrentVersionValid is a
+    // pure local esp_ota_* call (no HTTP), so it is safe to invoke here.
+    ota_->MarkCurrentVersionValid();
 
     // Initialize the protocol
     InitializeProtocol();
