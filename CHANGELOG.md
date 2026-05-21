@@ -32,6 +32,18 @@ documented-only.
 
 ### Firmware
 
+- Fixed: WebSocket candidate fallback is now fail-fast when a server
+  hello is malformed (missing/non-string `transport`, missing/empty
+  `session_id`, or unsupported `transport`). A new
+  `WEBSOCKET_PROTOCOL_SERVER_HELLO_FAILED` event bit is set by
+  `ParseServerHello()` on each rejection path, and
+  `OpenAudioChannelInternal()` now distinguishes the three outcomes
+  (success, rejection, full timeout). Rejected candidates fall back
+  to the next URL within ~100 ms instead of waiting out the full
+  10 s server-hello timeout. Happy path and no-hello timeout path
+  are byte-for-byte unchanged. Contributed via
+  [PR #205](https://github.com/kisaragi-mochi/stackchan-mcp/pull/205).
+
 - Added: generic Grove Port A I2C bus and four `self.i2c.*` MCP tools
   (`scan` / `read` / `write` / `write_read`) so attached M5Stack Unit
   modules (ENV III, ToF, gas sensor, PaHub, etc.) can be driven from
