@@ -242,6 +242,22 @@ documented-only.
 
 ### Gateway
 
+- Added: optional device-driven listen audio capture forwarding via
+  `STACKCHAN_AUDIO_HOOK_URL`. When set, inbound device-initiated
+  listen captures (wake-word, button, LCD touch — any path that calls
+  `Application::ToggleChatState` / `WakeWordInvoke` / `StartListening`
+  on the firmware) are buffered through the existing `audio_stream`
+  recording slot, packed into an Ogg/Opus container, and POST'd as
+  `Content-Type: audio/ogg` (with optional `Authorization: Bearer`
+  from `STACKCHAN_AUDIO_HOOK_TOKEN` / `STACKCHAN_TOKEN`) to the
+  configured URL. Default-OFF and opt-in: with the env var unset,
+  inbound device-driven listen frames are still logged at debug and
+  discarded as before. Coexists with MCP-driven `listen()` by sharing
+  the same single recording slot — if `listen()` is already
+  capturing, the device-driven branch defers. Pure-Python RFC 7845 /
+  RFC 3533 Ogg packing, no new runtime dependencies. Contributed via
+  [PR #TBD-F](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-F).
+
 - Fixed: mDNS now advertises the host's IPv4 addresses ordered by LAN
   reachability instead of in interface-enumeration order. On a host with
   multiple interfaces (a CGNAT `100.64.0.0/10` overlay address, several LAN
