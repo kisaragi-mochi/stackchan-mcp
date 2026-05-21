@@ -48,6 +48,25 @@ documented-only.
   close) is unchanged. Closes
   [#189](https://github.com/kisaragi-mochi/stackchan-mcp/issues/189).
 
+- Fixed: the `OGG_POPUP` listening cue was only triggered on wake-word
+  activation paths (`HandleWakeWordDetectedEvent` /
+  `ContinueWakeWordInvoke`), so callers of the public
+  `Application::StartListening()` API — board-level touch buttons,
+  server-driven listen, etc. — silently lost the audible "listening
+  started" feedback. `HandleStartListeningEvent` now arms
+  `play_popup_on_listening_` itself, after the early-return branches
+  for `kDeviceStateActivating` / `kDeviceStateWifiConfiguring` /
+  null-protocol but before the Idle / Speaking-abort listening
+  dispatches, so the flag is only latched when the function is
+  actually going to transition the device toward listening. The
+  public `Application::StartListening()` stays a thin event setter
+  (`xEventGroupSetBits` + return) so the write happens entirely on
+  the main task, matching the wake-word path that already flips the
+  flag from the main task before calling `ContinueWakeWordInvoke`.
+  No behaviour change for the wake-word path (the flag was already
+  true there before this function ran). Contributed via
+  [PR #207](https://github.com/kisaragi-mochi/stackchan-mcp/pull/207).
+
 - Fixed: WebSocket candidate fallback is now fail-fast when a server
   hello is malformed (missing/non-string `transport`, missing/empty
   `session_id`, or unsupported `transport`). A new
