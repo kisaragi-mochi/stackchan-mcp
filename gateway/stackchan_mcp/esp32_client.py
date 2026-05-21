@@ -18,7 +18,14 @@ import websockets
 import websockets.exceptions
 from websockets.asyncio.server import ServerConnection
 
-from .audio_stream import handle_audio_frame
+from .audio_input_hook import push_audio_capture
+from .audio_stream import (
+    handle_audio_frame,
+    is_recording,
+    is_recording_session,
+    start_recording,
+    stop_recording,
+)
 from .protocol import HelloResponse, make_mcp_message, parse_jsonrpc_response
 
 logger = logging.getLogger(__name__)
@@ -318,6 +325,25 @@ class ESP32Manager:
         # observable from gateway code; if a full-duplex contract
         # ever lands later the lock can split again.
         self._listen_lock = self._tts_lock
+        # Device-driven listen capture (= wake word / button / LCD touch
+        # paths on the firmware side that call ToggleChatState /
+        # WakeWordInvoke / StartListening without an MCP-driven
+        # ``listen()`` tool call). When ``_audio_hook_url`` is set, we
+        # open the shared audio_stream recording slot on inbound
+        # ``{"type":"listen","state":"start"}`` and forward the buffered
+        # Opus frames to the hook on the matching ``"stop"`` message.
+        # See :mod:`stackchan_mcp.audio_input_hook` for the rationale
+        # and protocol details.
+        self._audio_hook_url: str = ""
+        self._audio_hook_token: str = ""
+        # session_id (when device-driven listen has the recording slot
+        # open) or None. Storing the session_id rather than a plain bool
+        # lets the per-handler disconnect cleanup confirm it still owns
+        # the recording before tearing it down — otherwise a stale
+        # disconnect can clobber the active buffer of an unrelated
+        # session (e.g., a fresh reconnection or an MCP-driven listen()
+        # that already took the slot).
+        self._device_driven_session_id: str | None = None
         self._tool_lane_locks = {
             "servo": asyncio.Lock(),
             "led": asyncio.Lock(),
@@ -364,10 +390,19 @@ class ESP32Manager:
         port: int = 8765,
         vision_url: str = "",
         vision_token: str = "",
+        audio_hook_url: str = "",
+        audio_hook_token: str = "",
     ) -> None:
         """Start the WebSocket server for ESP32 connections."""
         self._vision_url = vision_url
         self._vision_token = vision_token
+        self._audio_hook_url = audio_hook_url
+        self._audio_hook_token = audio_hook_token
+        if audio_hook_url:
+            logger.info(
+                "Device-driven listen capture enabled (audio hook %s)",
+                audio_hook_url,
+            )
         logger.info("ESP32 WebSocket server starting on ws://%s:%d", host, port)
         self._server = await websockets.serve(
             self._handler,
@@ -497,12 +532,108 @@ class ESP32Manager:
                     payload = data.get("payload", {})
                     connection.handle_response(payload)
 
+                elif msg_type == "listen":
+                    # Device-driven listening start/stop notification
+                    # (wake word, button press, LCD touch — anything
+                    # that calls Application::ToggleChatState /
+                    # WakeWordInvoke / StartListening on the firmware
+                    # side). The MCP-driven listen() tool sends the
+                    # same wire format in the reverse direction and
+                    # already opens its own recording slot via the STT
+                    # orchestrator, so we only act when the device
+                    # initiated the capture AND an audio hook URL is
+                    # configured to receive the result. See
+                    # :mod:`stackchan_mcp.audio_input_hook` for the
+                    # forwarding pipeline.
+                    state = data.get("state", "")
+                    if state == "start":
+                        if not self._audio_hook_url:
+                            logger.debug(
+                                "device-driven listen.start session=%s "
+                                "ignored (STACKCHAN_AUDIO_HOOK_URL not "
+                                "configured)",
+                                session_id,
+                            )
+                        elif is_recording():
+                            # An MCP-driven listen() already owns the
+                            # recording slot; let it complete rather
+                            # than corrupting its buffer.
+                            logger.debug(
+                                "device-driven listen.start session=%s "
+                                "ignored (MCP-driven recording active)",
+                                session_id,
+                            )
+                        else:
+                            start_recording(session_id)
+                            self._device_driven_session_id = session_id
+                            logger.info(
+                                "device-driven listen started: "
+                                "session=%s mode=%s",
+                                session_id, data.get("mode", ""),
+                            )
+                    elif state == "stop":
+                        if self._device_driven_session_id == session_id:
+                            self._device_driven_session_id = None
+                            frames = stop_recording()
+                            logger.info(
+                                "device-driven listen stopped: "
+                                "session=%s frames=%d",
+                                session_id, len(frames),
+                            )
+                            # Push asynchronously so the WebSocket read
+                            # loop is not blocked by the HTTP POST
+                            # round-trip. The task is fire-and-forget;
+                            # failures are logged inside
+                            # push_audio_capture and do not propagate.
+                            asyncio.create_task(
+                                push_audio_capture(
+                                    self._audio_hook_url,
+                                    self._audio_hook_token,
+                                    frames,
+                                    session_id=session_id,
+                                )
+                            )
+                    else:
+                        logger.debug(
+                            "listen message with unknown state=%r "
+                            "session=%s",
+                            state, session_id,
+                        )
+
                 else:
                     logger.debug("ESP32 message type=%s (ignored)", msg_type)
 
         except websockets.exceptions.ConnectionClosed:
             logger.info("ESP32 disconnected: device=%s", device_id)
         finally:
+            # If the device disconnected mid-capture, drop any partial
+            # buffer rather than letting it leak into the next
+            # connection's recording slot (mirrors the discard logic in
+            # audio_stream.handle_audio_frame for session-mismatched
+            # frames).
+            #
+            # Guard the cleanup by session_id: a stale disconnect must
+            # not tear down the active buffer of an unrelated session
+            # that may have grabbed the recording slot since (a fresh
+            # reconnection or an MCP-driven listen() that took over).
+            # The audio_stream layer also tracks the recording session,
+            # so we double-check via is_recording_session().
+            if self._device_driven_session_id == session_id and (
+                is_recording_session(session_id)
+            ):
+                self._device_driven_session_id = None
+                discarded = stop_recording()
+                if discarded:
+                    logger.warning(
+                        "device-driven listen aborted mid-capture: "
+                        "session=%s discarded %d frames",
+                        session_id, len(discarded),
+                    )
+            elif self._device_driven_session_id == session_id:
+                # Our handler thought it owned the slot, but audio_stream
+                # disagrees — clear our local flag without tearing down
+                # the slot, then keep going.
+                self._device_driven_session_id = None
             connection.disconnect()
             async with self._lock:
                 if self._connection is connection:

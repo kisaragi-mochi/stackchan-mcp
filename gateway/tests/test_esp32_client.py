@@ -774,3 +774,162 @@ async def _complete_handshake(ws, tools=None):
         },
     }
     await ws.send(json.dumps(tools_resp))
+
+
+# --- Device-driven listen capture --------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def manager_with_hook(monkeypatch):
+    """ESP32Manager started with a configured audio hook URL.
+
+    ``push_audio_capture`` is patched to record invocations into a
+    shared list so tests can assert the hook was triggered without
+    starting a real HTTP server. The recorded payload is the actual
+    ``frames`` list the gateway captured for that listen window.
+    """
+    calls: list[dict] = []
+
+    async def _fake_push(hook_url, token, frames, *, session_id="", timeout_s=10.0):
+        calls.append(
+            {
+                "hook_url": hook_url,
+                "token": token,
+                "frames": list(frames),
+                "session_id": session_id,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(
+        "stackchan_mcp.esp32_client.push_audio_capture", _fake_push
+    )
+
+    mgr = ESP32Manager()
+    await mgr.start(
+        "127.0.0.1",
+        0,
+        audio_hook_url="http://test/hook",
+        audio_hook_token="test-token",
+    )
+    server = mgr._server
+    mgr._test_port = server.sockets[0].getsockname()[1]
+
+    try:
+        yield mgr, calls
+    finally:
+        await mgr.stop()
+
+
+@pytest.mark.asyncio
+async def test_device_driven_listen_pushes_to_hook(manager_with_hook):
+    """device → gateway listen.start/stop sequence forwards frames
+    captured between the two messages to the audio hook."""
+    from stackchan_mcp.audio_stream import is_recording
+
+    mgr, calls = manager_with_hook
+    port = mgr._test_port
+
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        await _complete_handshake(ws)
+
+        # Device-initiated listen.start
+        await ws.send(json.dumps({
+            "session_id": "",  # device fills its own; ignored on receive
+            "type": "listen",
+            "state": "start",
+            "mode": "manual",
+        }))
+
+        # Wait for gateway to open the recording slot. We can't observe
+        # the gateway's internals through the WS, so poll the module
+        # state for a short bounded time.
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            if is_recording():
+                break
+        assert is_recording(), "gateway did not open the recording slot"
+
+        # Stream a couple of binary "audio" frames
+        await ws.send(b"\xaa\xbb\xcc")
+        await ws.send(b"\xdd\xee\xff")
+
+        # Give the gateway a moment to buffer the frames
+        await asyncio.sleep(0.1)
+
+        # Device-initiated listen.stop
+        await ws.send(json.dumps({
+            "session_id": "",
+            "type": "listen",
+            "state": "stop",
+        }))
+
+        # Wait for the push task to fire (asyncio.create_task in the
+        # handler dispatches it eagerly; one event-loop tick is enough,
+        # but we give it a few to absorb scheduling jitter).
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            if calls:
+                break
+
+    assert len(calls) == 1
+    assert calls[0]["hook_url"] == "http://test/hook"
+    assert calls[0]["token"] == "test-token"
+    assert calls[0]["frames"] == [b"\xaa\xbb\xcc", b"\xdd\xee\xff"]
+
+
+@pytest.mark.asyncio
+async def test_device_driven_listen_disabled_when_no_hook(manager):
+    """Without STACKCHAN_AUDIO_HOOK_URL the gateway ignores inbound
+    listen.start (no recording slot opens, no push fires)."""
+    from stackchan_mcp.audio_stream import is_recording
+
+    port = manager._test_port
+
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        await _complete_handshake(ws)
+
+        await ws.send(json.dumps({
+            "type": "listen",
+            "state": "start",
+            "mode": "manual",
+        }))
+        # Give the gateway time to NOT do anything.
+        await asyncio.sleep(0.2)
+        assert not is_recording()
+
+
+@pytest.mark.asyncio
+async def test_device_driven_listen_cleanup_on_disconnect(manager_with_hook):
+    """Disconnecting mid-capture drops the partial buffer rather than
+    leaking it into the next connection's recording slot."""
+    from stackchan_mcp.audio_stream import is_recording
+
+    mgr, calls = manager_with_hook
+    port = mgr._test_port
+
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        await _complete_handshake(ws)
+        await ws.send(json.dumps({
+            "type": "listen",
+            "state": "start",
+            "mode": "manual",
+        }))
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            if is_recording():
+                break
+        assert is_recording()
+        await ws.send(b"\x11\x22\x33")
+        await asyncio.sleep(0.05)
+        # Drop the connection without sending listen.stop.
+
+    # Give the server-side handler's finally clause time to run.
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        if not is_recording():
+            break
+    assert not is_recording(), "recording slot was leaked across connections"
+    # No push should have fired for the aborted capture.
+    assert calls == []
+
