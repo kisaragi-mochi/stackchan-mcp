@@ -81,6 +81,15 @@ documented-only.
 
 ### Gateway
 
+- Added: `send_pcm_stream(gateway, async_iter, source_rate=...)`
+  incremental variant of `send_pcm_audio`. Consumes an async
+  iterable of PCM chunks, opus-encodes and pushes them frame-by-frame
+  to the device as they arrive, with the same protocol gating /
+  concurrency lock as the buffered variant. Lets producers start
+  playback before the full audio is synthesised (HTTP streaming
+  upload, real-time TTS engines, etc.). Contributed via
+  [PR #TBD-A2](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A2).
+
 - Added: `send_pcm_audio(gateway, pcm, source_rate=...)` helper
   extracted from `synthesize_and_send`'s encode-and-push back-half.
   External producers — HTTP PCM bridges, sound-effect players,
