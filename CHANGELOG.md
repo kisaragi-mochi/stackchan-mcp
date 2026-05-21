@@ -392,6 +392,22 @@ documented-only.
   latency stays low for long uploads. Contributed via
   [PR #214](https://github.com/kisaragi-mochi/stackchan-mcp/pull/214).
 
+- Fixed: aiohttp's default 1 MiB `client_max_size` cap on the capture
+  `web.Application` was aborting `POST /pcm` requests mid-stream for
+  long PCM uploads (multi-minute TTS, live mixes, persistent audio
+  feeds). The cap is meaningful only as a body-size limit for buffered
+  request bodies, and `/pcm` is intentionally a streaming endpoint —
+  the byte total of an utterance is bounded by the producer, not by
+  what fits in a single buffer. Setting `client_max_size=0` on the
+  capture app disables the cap. A per-route 8 MiB cap
+  (`CAPTURE_MAX_BYTES`) is added to `/capture` to retain a body-size
+  guard there, since that endpoint streams JPEG uploads to disk;
+  oversized uploads are rejected with `413 Payload Too Large` (with
+  partial files cleaned up). The PCM route remains uncapped because
+  external producers intentionally stream arbitrarily long audio
+  there. Contributed via
+  [PR #215](https://github.com/kisaragi-mochi/stackchan-mcp/pull/215).
+
 - Added: `send_pcm_stream(gateway, async_iter, source_rate=...)`
   incremental variant of `send_pcm_audio`. Consumes an async
   iterable of PCM chunks, opus-encodes and pushes them frame-by-frame
