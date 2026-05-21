@@ -712,6 +712,52 @@ def create_server() -> Server:
                     "required": ["addr", "write_bytes", "n_bytes"],
                 },
             ),
+            Tool(
+                name="load_avatar_set",
+                description=(
+                    "Load a dynamic avatar set onto the connected ESP32 "
+                    "(Phase 4.5 avatar pipeline). The gateway stages the "
+                    "payload on its HTTP server, notifies the device via "
+                    "WebSocket, and the device fetches + SHA256-verifies + "
+                    "loads it into PSRAM. ``archive_path`` must point to a "
+                    "raw RGB565 file on the gateway host: layered mode = "
+                    "14 frames (face 6 + eyes 3 + mouth 5) totalling "
+                    "537,600 bytes; matrix mode = 90 frames (6 × 3 × 5) "
+                    "totalling 3,456,000 bytes. Returns ok / checksum / "
+                    "bytes_transferred / error."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "archive_path": {
+                            "type": "string",
+                            "description": (
+                                "Filesystem path on the gateway host to "
+                                "the raw RGB565 payload."
+                            ),
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["layered", "matrix"],
+                            "description": (
+                                "'layered' (14 frames, ~525 KB) or "
+                                "'matrix' (90 frames, ~3.3 MB)."
+                            ),
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": (
+                                "Max seconds to wait for the device's "
+                                "avatar_set_loaded reply."
+                            ),
+                            "default": 60.0,
+                            "minimum": 5.0,
+                            "maximum": 300.0,
+                        },
+                    },
+                    "required": ["archive_path", "mode"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -760,6 +806,32 @@ def create_server() -> Server:
                         text=json.dumps({"error": str(exc)}),
                     )
                 ]
+            return [TextContent(type="text", text=json.dumps(result))]
+
+        if name == "load_avatar_set":
+            # Phase 4.5 avatar: stage the raw RGB565 payload and notify
+            # the device via WS avatar_set_fetch; the device performs the
+            # HTTP fetch + SHA256 verify + AvatarSet::Load and replies
+            # with avatar_set_loaded. All orchestration lives in
+            # Gateway.load_avatar_set; this branch is a thin wrapper that
+            # parses arguments and returns the dict-result as MCP JSON.
+            archive_path = arguments.get("archive_path", "")
+            mode = arguments.get("mode", "")
+            try:
+                timeout = float(arguments.get("timeout", 60.0))
+            except (TypeError, ValueError):
+                timeout = 60.0
+            if not archive_path or not isinstance(archive_path, str):
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"ok": False, "error": "archive_path is required"}),
+                )]
+            if mode not in ("layered", "matrix"):
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"ok": False, "error": f"unknown mode: {mode}"}),
+                )]
+            result = await gw.load_avatar_set(archive_path, mode, timeout)
             return [TextContent(type="text", text=json.dumps(result))]
 
         if not gw.esp32.device_connected:

@@ -82,6 +82,12 @@ public:
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
 
+    // Phase 4.5 avatar: expose SendText so boards / Application can send
+    // ad-hoc JSON notifications (e.g. avatar_set_loaded) without going
+    // through the MCP wrapper. Concrete subclasses already implement this
+    // for the audio / MCP paths; making it public is a no-op for them.
+    virtual bool SendText(const std::string& text) = 0;
+
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;
     std::function<void(std::unique_ptr<AudioStreamPacket> packet)> on_incoming_audio_;
@@ -97,7 +103,6 @@ protected:
     std::string session_id_;
     std::chrono::time_point<std::chrono::steady_clock> last_incoming_time_;
 
-    virtual bool SendText(const std::string& text) = 0;
     virtual void SetError(const std::string& message);
     virtual bool IsTimeout() const;
 };
