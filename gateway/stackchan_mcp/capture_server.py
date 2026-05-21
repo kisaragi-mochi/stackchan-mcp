@@ -160,19 +160,30 @@ async def handle_avatar_set_fetch(request: web.Request) -> web.Response:
         return web.Response(status=400, text="missing short_id")
 
     sets = request.app[AVATAR_SETS_KEY]
+    # Validate the request fully (existence, TTL, auth) before consuming
+    # the staged entry. An unauthenticated probe must not be able to
+    # invalidate a legitimate transfer just by guessing the short_id,
+    # and a real fetch that fails auth due to a transient header issue
+    # must still find the entry on retry.
     async with request.app[AVATAR_SETS_LOCK_KEY]:
-        staging = sets.pop(short_id, None)
+        staging = sets.get(short_id)
+        if staging is None:
+            return web.Response(status=404, text="not_found_or_consumed")
 
-    if staging is None:
-        return web.Response(status=404, text="not_found_or_consumed")
+        if time.time() - staging.created_at > AVATAR_SET_STAGING_TTL_SEC:
+            # Expired — drop the slot so it doesn't linger.
+            sets.pop(short_id, None)
+            return web.Response(status=410, text="staging_expired")
 
-    if time.time() - staging.created_at > AVATAR_SET_STAGING_TTL_SEC:
-        return web.Response(status=410, text="staging_expired")
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {staging.token}":
+            logger.warning(
+                "Avatar set fetch auth rejected for short_id=%s", short_id
+            )
+            return web.Response(status=401, text="unauthorized")
 
-    auth = request.headers.get("Authorization", "")
-    if auth != f"Bearer {staging.token}":
-        logger.warning("Avatar set fetch auth rejected for short_id=%s", short_id)
-        return web.Response(status=401, text="unauthorized")
+        # Auth confirmed: consume the one-time entry now.
+        sets.pop(short_id, None)
 
     logger.info(
         "Serving avatar set: short_id=%s mode=%s bytes=%d",
