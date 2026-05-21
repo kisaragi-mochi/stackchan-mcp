@@ -224,7 +224,9 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
     // intentionally keeps session_id_ alive across a logical audio-session
     // close while the WebSocket stays connected.
     session_id_ = "";
-    xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
+    xEventGroupClearBits(event_group_handle_,
+                         WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT |
+                         WEBSOCKET_PROTOCOL_SERVER_HELLO_FAILED);
 
     Settings settings("websocket", false);
     // Read the gateway URL from NVS (set via the WiFi config UI's "websocket
@@ -334,7 +336,9 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
     for (size_t i = 0; i < gateway_candidates.size(); ++i) {
         const auto& candidate_url = gateway_candidates[i];
 
-        xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
+        xEventGroupClearBits(event_group_handle_,
+                             WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT |
+                             WEBSOCKET_PROTOCOL_SERVER_HELLO_FAILED);
         websocket_ = network->CreateWebSocket(1);
         if (websocket_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create websocket");
@@ -469,8 +473,30 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             continue;
         }
 
-        // Wait for server hello
-        EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+        // Wait for either a successful server hello or an explicit
+        // ParseServerHello rejection (#191). Without the FAILED bit, a
+        // hello whose transport/session_id is malformed would silently
+        // wait out the full 10s timeout per candidate before falling
+        // back; with it, we proceed to the next candidate within ~100 ms.
+        // The third outcome (neither bit set within 10s — server sent
+        // nothing at all) retains the existing timeout-handling path.
+        EventBits_t bits = xEventGroupWaitBits(event_group_handle_,
+                                               WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT |
+                                               WEBSOCKET_PROTOCOL_SERVER_HELLO_FAILED,
+                                               pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+        if (bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_FAILED) {
+            ESP_LOGW(TAG, "Server hello rejected by candidate %d/%d; falling back to next candidate",
+                     static_cast<int>(i + 1), static_cast<int>(gateway_candidates.size()));
+            // Disarm this candidate's reconnect-intent token so the
+            // synchronous OnDisconnected fired by websocket_.reset() does
+            // not schedule a reconnect for a candidate we are explicitly
+            // abandoning. Mirrors the intentional-teardown disarm pattern
+            // used in OpenAudioChannelInternal's prologue / destructor /
+            // CloseAudioChannel paths.
+            notify_disconnect->store(false);
+            websocket_.reset();
+            continue;
+        }
         if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
             ESP_LOGE(TAG, "Failed to receive server hello from websocket server candidate %d/%d",
                      static_cast<int>(i + 1), static_cast<int>(gateway_candidates.size()));
@@ -589,11 +615,16 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
                                          bool arm_audio_channel) {
     auto transport = cJSON_GetObjectItem(root, "transport");
     if (transport == nullptr || !cJSON_IsString(transport)) {
+        // Surface the rejection to OpenAudioChannelInternal's wait so the
+        // candidate loop can fall back to the next URL immediately instead
+        // of waiting out the 10s server-hello timeout (#191).
         ESP_LOGE(TAG, "Server hello missing or non-string transport field");
+        xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_FAILED);
         return;
     }
     if (strcmp(transport->valuestring, "websocket") != 0) {
         ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
+        xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_FAILED);
         return;
     }
 
@@ -605,10 +636,11 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
         // missing or empty session_id at hello time would leave session_id_
         // empty after this PR's OpenAudioChannelInternal clear, causing
         // every gateway-driven tts/listen to mismatch and silently drop.
-        // Reject the hello here so the candidate loop's xEventGroupWaitBits
-        // times out and the next candidate (or a failure) is surfaced
-        // instead of an unusable connection.
+        // Reject the hello here and signal the failure bit so the candidate
+        // loop falls back to the next URL within ~100 ms instead of waiting
+        // the full 10s server-hello timeout (#191).
         ESP_LOGE(TAG, "Server hello missing or empty session_id; rejecting candidate");
+        xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_FAILED);
         return;
     }
     session_id_ = session_id->valuestring;
