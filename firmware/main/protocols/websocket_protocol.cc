@@ -505,6 +505,21 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             continue;
         }
 
+        // A server-side close arriving between ParseServerHello() setting the
+        // wait bit and this main-task resume runs the OnDisconnected lambda on
+        // the WS task with notify_disconnect already armed, so the lambda has
+        // already called ScheduleReconnect() to arm the reconnect timer.
+        // Returning into the success path below would unconditionally call
+        // StopReconnectTimer() and cancel that just-armed retry, returning
+        // true to the reconnect-timer caller and leaving the transport dead
+        // with no retry scheduled (#189). Bail out early instead and let the
+        // already-armed timer drive the next attempt; the reconnect-timer
+        // caller logs the false return and waits for the timer fire.
+        if (websocket_ == nullptr || !websocket_->IsConnected()) {
+            ESP_LOGW(TAG, "Connection dropped between hello and main-task resume; leaving reconnect scheduled");
+            return false;
+        }
+
         // ParseServerHello() already armed notify_disconnect on the WS
         // task (before setting the wait bit) so a near-simultaneous close
         // is handled by the lambda's reconnect path. Mirror it into the

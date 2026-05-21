@@ -32,6 +32,17 @@ documented-only.
 
 ### Firmware
 
+- Fixed: a server-side close arriving between the WebSocket server
+  hello and the main task resuming no longer cancels the reconnect
+  timer that the per-socket `OnDisconnected` lambda just armed.
+  `OpenAudioChannelInternal()` now re-checks `websocket_->IsConnected()`
+  immediately after `xEventGroupWaitBits()` returns the server-hello
+  event, and bails out with `return false` before the success-path
+  `StopReconnectTimer()`. The reconnect-timer caller observes the
+  false return and waits for the already-armed retry. Happy path
+  (no concurrent close) is unchanged. Closes
+  [#189](https://github.com/kisaragi-mochi/stackchan-mcp/issues/189).
+
 - Fixed: WebSocket candidate fallback is now fail-fast when a server
   hello is malformed (missing/non-string `transport`, missing/empty
   `session_id`, or unsupported `transport`). A new
