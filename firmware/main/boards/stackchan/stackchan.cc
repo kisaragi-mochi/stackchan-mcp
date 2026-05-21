@@ -4095,8 +4095,10 @@ private:
             ESP_LOGW(TAG, "SetMouthShape('%s') ignored: display_ not ready", shape);
             return false;
         }
-        const int idx = MouthShapeToIndex(shape);
-        if (idx < 0) return false;
+        const lv_image_dsc_t* dsc = MouthImageFor(shape);
+        if (dsc == nullptr) {
+            return false;
+        }
         if (DeferAvatarMouthIfFetching(shape)) {
             return true;
         }
