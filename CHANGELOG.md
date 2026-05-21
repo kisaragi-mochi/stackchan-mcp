@@ -97,6 +97,18 @@ documented-only.
 
 ### Gateway
 
+- Added: `send_pcm_audio(gateway, pcm, source_rate=...)` helper
+  extracted from `synthesize_and_send`'s encode-and-push back-half.
+  External producers — HTTP PCM bridges, sound-effect players,
+  alternative voice stacks that already produce PCM — can now push
+  pre-synthesised audio to the device without registering a
+  `TTSEngine`. `synthesize_and_send` is unchanged from the caller's
+  perspective; it now delegates to `send_pcm_audio` after running
+  the engine. Resampling to the device's 16 kHz mono is done via
+  the existing `resample_pcm16_linear` helper, so producers at
+  non-device rates work without manual resampling. Contributed via
+  [PR #TBD-A1](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A1).
+
 - Added: MCP tool surface for the firmware-side Grove Port A generic
   I2C bus introduced in
   [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196) —
