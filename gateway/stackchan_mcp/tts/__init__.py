@@ -17,7 +17,12 @@ import logging
 from typing import Callable
 
 from .base import EngineRegistry, TTSEngine, get_registry
-from .orchestrator import DEFAULT_VOICE, synthesize_and_send
+from .orchestrator import (
+    DEFAULT_VOICE,
+    send_pcm_audio,
+    send_pcm_stream,
+    synthesize_and_send,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -51,5 +56,7 @@ __all__ = [
     "EngineRegistry",
     "TTSEngine",
     "get_registry",
+    "send_pcm_audio",
+    "send_pcm_stream",
     "synthesize_and_send",
 ]
