@@ -81,6 +81,18 @@ documented-only.
 
 ### Gateway
 
+- Fixed: aiohttp's default 1 MiB `client_max_size` cap on the capture
+  `web.Application` was aborting `POST /pcm` requests mid-stream for
+  long PCM uploads (multi-minute TTS, live mixes, persistent audio
+  feeds). The cap is meaningful only as a body-size limit for buffered
+  request bodies, and `/pcm` is intentionally a streaming endpoint —
+  the byte total of an utterance is bounded by the producer, not by
+  what fits in a single buffer. Setting `client_max_size=0` on the
+  capture app disables the cap. Other endpoints on the same app
+  (image / vision uploads) are unaffected because they impose their
+  own size checks in handlers. Contributed via
+  [PR #TBD-A4](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A4).
+
 - Added: `POST /pcm` HTTP endpoint on the capture server that consumes
   external PCM uploads and pipes them through `send_pcm_stream` to the
   device. Lets non-MCP producers (sound-effect players, alternative TTS
