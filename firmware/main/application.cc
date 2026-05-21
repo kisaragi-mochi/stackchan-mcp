@@ -340,6 +340,15 @@ void Application::ActivationTask() {
     // current_version_ is populated in the Ota constructor from the
     // ESP-IDF app description so GetCurrentVersion() still works for the
     // UI notification path.
+    //
+    // However, the OTA rollback-confirmation half of CheckVersion() — the
+    // ota_->MarkCurrentVersionValid() call after the cloud probe — is NOT
+    // optional. On ESP-IDF OTA boots the running partition starts as
+    // ESP_OTA_IMG_PENDING_VERIFY; if it is never marked valid, a later
+    // reboot can roll back to the previous firmware. We still need that
+    // half, just without the cloud probe. MarkCurrentVersionValid is a
+    // pure local esp_ota_* call (no HTTP), so it is safe to invoke here.
+    ota_->MarkCurrentVersionValid();
 
     // Initialize the protocol
     InitializeProtocol();
