@@ -32,6 +32,17 @@ documented-only.
 
 ### Firmware
 
+- Added: AvatarSet matrix mode (90 pre-rendered frames totalling
+  ~3.3 MB in PSRAM) on top of the PR-E1 layered pipeline.
+  `set_avatar_expression(name)` indexes into the matrix table to
+  blend face / eyes / mouth into a single full-screen frame rather
+  than compositing three regions at draw time, which removes the
+  layered-mode draw-call cost for boards / personas where the
+  artistic style is best expressed as full hand-drawn frames. Mode
+  is per-AvatarSet (= a persona's set declares one or the other),
+  switched only at `load_avatar_set` time. Contributed via
+  [PR #211](https://github.com/kisaragi-mochi/stackchan-mcp/pull/211).
+
 - Added: dynamic avatar-set transfer pipeline. A new `AvatarSet`
   scaffold (layered face / eyes / mouth, ~537 KB total in RGB565)
   can be staged on the gateway and fetched into PSRAM at runtime via
