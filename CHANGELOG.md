@@ -32,6 +32,29 @@ documented-only.
 
 ### Firmware
 
+- Fixed: the Si12T head-touch driver's TAP / STROKE log line printed
+  `duration=lums raw=0xNNNN` instead of human-readable values, because
+  ESP-IDF's nano-printf cannot parse the `%llums` specifier and the
+  failed parse stops `va_arg` from advancing past `duration_ms` — so
+  the following `%02X` consumed the long-long's bytes rather than the
+  Si12T Output1 register. `zones=000 raw=0x00` was also misleading
+  because the snapshot fields were overwritten every poll tick and
+  read the post-release zero state by the time the falling-edge
+  handler logged. The log line now uses `%u ms`, captures the
+  rising-edge sensor state separately into `press_start_*`, and reports
+  it as
+  `start_zones=NNN start_raw=0xNN ch=CCCC release_raw=0xNN duration=NN ms`,
+  with `ch=CCCC` decoding Output1's four 2-bit channel levels as
+  `0/L/M/H` (CH4 should always be `0`; a non-`0` CH4 character flags
+  wiring noise / EMI). `HandleTap` also receives the duration so the
+  400-600 ms grey-zone TAPs print their timing. The rising-edge
+  capture also fires on the cooldown-suppressed branch so a touch
+  whose press started during the post-reaction cooldown but released
+  after cooldown expired logs its own start state instead of the
+  previous touch's. Purely a logging change — touch detection logic
+  and timing constants are unchanged. Contributed via
+  [PR #206](https://github.com/kisaragi-mochi/stackchan-mcp/pull/206).
+
 - Fixed: a server-side close arriving between the WebSocket server
   hello and the main task resuming no longer cancels the reconnect
   timer that the per-socket `OnDisconnected` lambda just armed.
