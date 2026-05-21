@@ -252,6 +252,20 @@ async def send_pcm_audio(
             f"send_pcm_audio: PCM payload was empty (source={source_label!r})."
         )
 
+    # Validate source_rate before it reaches resample_pcm16_linear.
+    # The resampler computes ``n_dst = n_src * dst_rate // src_rate``,
+    # which raises ZeroDivisionError on 0 and produces nonsense for
+    # negatives — neither of which the caller's narrow ``RuntimeError``
+    # filter translates cleanly to an MCP-facing error. Catch invalid
+    # rates here so non-engine producers (HTTP /pcm bridges,
+    # external voice stacks) that forward unvalidated request params
+    # get a deterministic error instead of a raw stack trace.
+    if not isinstance(source_rate, int) or source_rate <= 0:
+        raise RuntimeError(
+            f"send_pcm_audio: source_rate must be a positive integer, "
+            f"got {source_rate!r}."
+        )
+
     if gateway is None:
         raise RuntimeError(
             "send_pcm_audio requires a 'gateway' argument to push audio "
