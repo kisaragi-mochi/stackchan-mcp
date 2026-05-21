@@ -295,6 +295,19 @@ async def handle_pcm(request: web.Request) -> web.Response:
             status=400,
             content_type="application/json",
         )
+    if source_rate <= 0:
+        # Non-positive rates would crash resample_pcm16_linear with a
+        # ZeroDivisionError (which the RuntimeError handler below does
+        # not translate) and never produce a valid frame anyway. Reject
+        # at the boundary so the caller gets a clean 400 instead of
+        # an internal server error trail.
+        return web.Response(
+            text=json.dumps(
+                {"error": f"X-Sample-Rate must be a positive integer: {rate_header!r}"}
+            ),
+            status=400,
+            content_type="application/json",
+        )
 
     channels_header = request.headers.get("X-Channels", "1")
     try:
