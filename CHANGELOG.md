@@ -81,6 +81,16 @@ documented-only.
 
 ### Gateway
 
+- Added: `POST /pcm` HTTP endpoint on the capture server that consumes
+  external PCM uploads and pipes them through `send_pcm_stream` to the
+  device. Lets non-MCP producers (sound-effect players, alternative TTS
+  stacks, browser bridges) hand audio to stack-chan over plain HTTP
+  without registering a `TTSEngine`. Accepts `audio/L16` or raw PCM with
+  query-string sample-rate, requires Bearer-token auth, streams chunks
+  to the device as they arrive so latency stays low for long uploads.
+  Contributed via
+  [PR #TBD-A3](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A3).
+
 - Added: `send_pcm_stream(gateway, async_iter, source_rate=...)`
   incremental variant of `send_pcm_audio`. Consumes an async
   iterable of PCM chunks, opus-encodes and pushes them frame-by-frame
