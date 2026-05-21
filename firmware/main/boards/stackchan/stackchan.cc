@@ -6036,10 +6036,17 @@ public:
         auto checksum = cJSON_GetObjectItem(root, "checksum");
         auto size_j   = cJSON_GetObjectItem(root, "expected_size");
 
+        // The gateway correlates avatar_set_loaded replies by checksum
+        // (see ESP32Connection._avatar_set_waiters). Reply with the
+        // requested checksum on every error path so a failure can wake
+        // the waiter promptly instead of timing out.
+        const std::string req_checksum =
+            cJSON_IsString(checksum) ? checksum->valuestring : "";
+
         if (!cJSON_IsString(url) || !cJSON_IsString(token) ||
             !cJSON_IsString(mode_j) || !cJSON_IsNumber(size_j)) {
             ESP_LOGW(TAG, "OnAvatarSetFetch: missing required fields");
-            SendAvatarSetLoadedError("", "missing_fields");
+            SendAvatarSetLoadedError(req_checksum, "missing_fields");
             return;
         }
 
@@ -6050,7 +6057,7 @@ public:
             mode_enum = AvatarSet::Mode::kMatrix;
         } else {
             ESP_LOGW(TAG, "OnAvatarSetFetch: unknown mode '%s'", mode_j->valuestring);
-            SendAvatarSetLoadedError("", "unknown_mode");
+            SendAvatarSetLoadedError(req_checksum, "unknown_mode");
             return;
         }
 
@@ -6062,7 +6069,7 @@ public:
         // mutex instance).
         if (avatar_fetch_in_progress_.exchange(true, std::memory_order_acq_rel)) {
             ESP_LOGW(TAG, "OnAvatarSetFetch: another fetch already in progress");
-            SendAvatarSetLoadedError("", "fetch_in_progress");
+            SendAvatarSetLoadedError(req_checksum, "fetch_in_progress");
             return;
         }
         EnsureAvatarPendingLock();
@@ -6099,7 +6106,7 @@ public:
             ESP_LOGE(TAG, "OnAvatarSetFetch: failed to create avatar_fetch task");
             delete context;
             avatar_fetch_in_progress_.store(false, std::memory_order_release);
-            SendAvatarSetLoadedError("", "task_create_failed");
+            SendAvatarSetLoadedError(req_checksum, "task_create_failed");
         }
     }
 
@@ -6122,14 +6129,23 @@ public:
     }
 
     void RunAvatarFetch(const AvatarFetchContext* ctx) {
+        // Capture expected_sha256 by value so the callback can fall back
+        // to it when AvatarSetFetcher reports an error before computing
+        // the actual checksum (HTTP error, size mismatch, allocation
+        // failure, etc.). The gateway's _avatar_set_waiters dict is keyed
+        // by checksum; replying with an empty key means the failure
+        // cannot resolve any waiter and the caller waits until timeout.
+        const std::string expected_sha256 = ctx->expected_sha256;
         AvatarSetFetcher::Fetch(
             avatar_set_,
             ctx->url, ctx->token,
             ctx->mode, ctx->expected_size, ctx->expected_sha256,
-            [](bool ok,
-               const std::string& actual_checksum,
-               const std::string& error_code) {
-                SendAvatarSetLoaded(ok, actual_checksum, error_code);
+            [expected_sha256](bool ok,
+                              const std::string& actual_checksum,
+                              const std::string& error_code) {
+                const std::string& correlation =
+                    actual_checksum.empty() ? expected_sha256 : actual_checksum;
+                SendAvatarSetLoaded(ok, correlation, error_code);
             });
 
         // Fetch finished (success or failure). Clear the in-progress flag
