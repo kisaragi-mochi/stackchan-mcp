@@ -46,6 +46,7 @@ using NetworkEventCallback = std::function<void(NetworkEvent event, const std::s
 void* create_board();
 class AudioCodec;
 class Display;
+struct cJSON;
 class Board {
 private:
     Board(const Board&) = delete; // 禁用拷贝构造函数
@@ -87,6 +88,15 @@ public:
     // override these to drive lip-sync animation while TTS audio is playing.
     virtual void OnTtsStart() {}
     virtual void OnTtsStop() {}
+
+    // Phase 4.5 avatar (saiverse-stackchan-addon): dynamic avatar set fetch
+    // notification dispatched from Application::OnIncomingJson. The cJSON
+    // object carries url / token / mode / checksum / expected_size fields
+    // (see docs/intent/stackchan_avatar_pipeline.md §C-3 in the SAIVerse
+    // repository). Default no-op so non-stackchan boards are unaffected;
+    // StackChanBoard overrides to spawn a worker task that performs the
+    // HTTP fetch via AvatarSetFetcher and loads the result into avatar_set_.
+    virtual void OnAvatarSetFetch(const cJSON* root) { (void)root; }
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

@@ -28,6 +28,8 @@ using ScsBus = SCSCL;
 static inline bool ServoWritePosOk(int r) { return r > 0; }
 #endif
 #include "avatar_images.h"
+#include "avatar_set.h"
+#include "avatar_set_fetcher.h"
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
@@ -522,6 +524,46 @@ private:
     lv_obj_t* avatar_img_ = nullptr;
     esp_timer_handle_t avatar_init_timer_ = nullptr;
     std::string current_avatar_face_ = "idle";
+
+    // Dynamic avatar set loaded via the load_avatar_set MCP tool. Stays
+    // unloaded by default — the index-based image lookups then fall back
+    // to the static const tables in avatar_images.h (placeholder or local
+    // override). See docs/intent/stackchan_avatar_pipeline.md in the
+    // SAIVerse repository.
+    AvatarSet avatar_set_;
+
+    // ---- Avatar rendering state (Phase 4.5-a) -----------------------------
+    //
+    // The avatar is represented as three independent axes — face, eyes,
+    // mouth — each carrying a 0-indexed slot identical to AvatarSet's
+    // GetFace / GetEyes / GetMouth layout. The on-screen image is then
+    // derived from this state in a mode-aware way (RenderAvatarLocked):
+    //
+    //   - Layered mode (or AvatarSet not loaded): there is no compositor
+    //     on the firmware side — avatar_img_ shows exactly one image at a
+    //     time. active_layer_ selects which axis drives the current frame
+    //     (face during rest / mouth during set_mouth / eyes during blink),
+    //     matching the upstream Phase 2 behaviour where blink temporarily
+    //     replaces the face image and is then restored.
+    //   - Matrix mode: avatar_set_.GetMatrix(face, eyes, mouth) returns the
+    //     pre-composed image for the current (face, eyes, mouth) triple.
+    //     active_layer_ is ignored; every state change updates the
+    //     composed frame.
+    //
+    // Indices remain valid across mode switches so a future load_avatar_set
+    // call into a different mode does not lose the persona's current
+    // expression. current_avatar_face_ is kept as the string form because
+    // existing internal callers (touch reactions, SetAvatarOff resume,
+    // mouth-sequence restore) still address the face by name.
+    enum class ActiveLayer : uint8_t {
+        FACE = 0,
+        EYES = 1,
+        MOUTH = 2,
+    };
+    int current_face_index_ = 0;   // 0..5  (idle / happy / thinking / sad / surprised / embarrassed)
+    int current_eyes_index_ = 0;   // 0..2  (open / half / closed) — 0 is the resting state
+    int current_mouth_index_ = 0;  // 0..4  (closed / half / open / e / u) — 0 is the resting state
+    ActiveLayer active_layer_ = ActiveLayer::FACE;
 
     // Phase 2: blinking + lip-sync overlay state.
     // Blink works as a four-step state machine driven by blink_step_timer_:
@@ -3559,17 +3601,233 @@ private:
         ESP_LOGI(TAG, "Si12T touch poll started (%d ms interval)", TOUCH_POLL_MS);
     }
 
-    // Map a face name (idle/happy/...) to the embedded RGB565 image.
-    // Returns nullptr if the name is unknown.
-    static const lv_image_dsc_t* AvatarImageFor(const char* face) {
-        if (face == nullptr) return nullptr;
-        if (strcmp(face, "idle") == 0)        return &avatar_idle;
-        if (strcmp(face, "happy") == 0)       return &avatar_happy;
-        if (strcmp(face, "thinking") == 0)    return &avatar_thinking;
-        if (strcmp(face, "sad") == 0)         return &avatar_sad;
-        if (strcmp(face, "surprised") == 0)   return &avatar_surprised;
-        if (strcmp(face, "embarrassed") == 0) return &avatar_embarrassed;
-        return nullptr;
+    // Map a face name to AvatarSet's 0-indexed slot, or -1 if unknown.
+    static int FaceNameToIndex(const char* face) {
+        if (face == nullptr) return -1;
+        if (strcmp(face, "idle") == 0)        return 0;
+        if (strcmp(face, "happy") == 0)       return 1;
+        if (strcmp(face, "thinking") == 0)    return 2;
+        if (strcmp(face, "sad") == 0)         return 3;
+        if (strcmp(face, "surprised") == 0)   return 4;
+        if (strcmp(face, "embarrassed") == 0) return 5;
+        return -1;
+    }
+
+    // Map a mouth shape name to AvatarSet's 0-indexed slot, or -1 if unknown.
+    // Indices match avatar_set_.GetMouth() order (closed/half/open/e/u).
+    static int MouthShapeToIndex(const char* shape) {
+        if (shape == nullptr) return -1;
+        if (strcmp(shape, "closed") == 0) return 0;
+        if (strcmp(shape, "half") == 0)   return 1;
+        if (strcmp(shape, "open") == 0)   return 2;
+        if (strcmp(shape, "e") == 0)      return 3;
+        if (strcmp(shape, "u") == 0)      return 4;
+        return -1;
+    }
+
+    // ---- Layered-mode image lookups (face / eyes / mouth) -----------------
+    //
+    // Resolution order for each axis:
+    //   1. If a dynamic AvatarSet has been loaded in layered mode, use
+    //      its GetFace / GetEyes / GetMouth lookup. nullptr from AvatarSet
+    //      is treated as "not in this set"; we fall through to (2).
+    //   2. Static const tables in avatar_images.h (placeholder by default;
+    //      avatar_images.local.cc swaps in real art for static-art users).
+    //
+    // Matrix-mode rendering uses avatar_set_.GetMatrix() directly inside
+    // RenderAvatarLocked() and bypasses these helpers entirely.
+
+    const lv_image_dsc_t* FaceImageForIndex(int face_index) const {
+        if (avatar_set_.is_loaded() &&
+            avatar_set_.mode() == AvatarSet::Mode::kLayered) {
+            const lv_image_dsc_t* dsc = avatar_set_.GetFace(face_index);
+            if (dsc != nullptr) return dsc;
+        }
+        switch (face_index) {
+            case 0: return &avatar_idle;
+            case 1: return &avatar_happy;
+            case 2: return &avatar_thinking;
+            case 3: return &avatar_sad;
+            case 4: return &avatar_surprised;
+            case 5: return &avatar_embarrassed;
+            default: return nullptr;
+        }
+    }
+
+    const lv_image_dsc_t* EyesImageForIndex(int eyes_index) const {
+        if (avatar_set_.is_loaded() &&
+            avatar_set_.mode() == AvatarSet::Mode::kLayered) {
+            const lv_image_dsc_t* dsc = avatar_set_.GetEyes(eyes_index);
+            if (dsc != nullptr) return dsc;
+        }
+        switch (eyes_index) {
+            case 0: return &avatar_eyes_open;
+            case 1: return &avatar_eyes_half;
+            case 2: return &avatar_eyes_closed;
+            default: return nullptr;
+        }
+    }
+
+    const lv_image_dsc_t* MouthImageForIndex(int mouth_index) const {
+        if (avatar_set_.is_loaded() &&
+            avatar_set_.mode() == AvatarSet::Mode::kLayered) {
+            const lv_image_dsc_t* dsc = avatar_set_.GetMouth(mouth_index);
+            if (dsc != nullptr) return dsc;
+        }
+        switch (mouth_index) {
+            case 0: return &avatar_mouth_closed;
+            case 1: return &avatar_mouth_half;
+            case 2: return &avatar_mouth_open;
+            case 3: return &avatar_mouth_e;
+            case 4: return &avatar_mouth_u;
+            default: return nullptr;
+        }
+    }
+
+    // Central mode-aware renderer. Caller must hold the display lock.
+    //
+    // Layered mode: picks a single image from the axis selected by
+    // active_layer_ (no firmware-side compositing).
+    // Matrix mode: looks up the pre-composed (face, eyes, mouth) image from
+    // the AvatarSet's matrix table.
+    //
+    // Returns false if the requested image is unavailable (e.g. AvatarSet
+    // loaded in matrix mode but the index triple is out of range, or the
+    // avatar lv_obj cannot be created yet because the screen tree isn't up).
+    bool RenderAvatarLocked() {
+        const lv_image_dsc_t* dsc = nullptr;
+        if (avatar_set_.is_loaded() &&
+            avatar_set_.mode() == AvatarSet::Mode::kMatrix) {
+            dsc = avatar_set_.GetMatrix(current_face_index_,
+                                        current_eyes_index_,
+                                        current_mouth_index_);
+        } else {
+            switch (active_layer_) {
+                case ActiveLayer::FACE:
+                    dsc = FaceImageForIndex(current_face_index_);
+                    break;
+                case ActiveLayer::EYES:
+                    dsc = EyesImageForIndex(current_eyes_index_);
+                    break;
+                case ActiveLayer::MOUTH:
+                    dsc = MouthImageForIndex(current_mouth_index_);
+                    break;
+            }
+        }
+        if (dsc == nullptr) return false;
+        if (!EnsureAvatarObject()) return false;
+        lv_image_set_src(avatar_img_, dsc);
+        lv_obj_move_foreground(avatar_img_);
+        return true;
+    }
+
+    // ---- Avatar fetch pending machinery (intent doc invariant #6) -------
+
+    // Lazily create avatar_pending_lock_. Safe to call repeatedly.
+    void EnsureAvatarPendingLock() {
+        if (avatar_pending_lock_ == nullptr) {
+            avatar_pending_lock_ = xSemaphoreCreateMutex();
+        }
+    }
+
+    // Record the request as pending if a fetch is currently in progress.
+    // Returns true when the request was captured (caller should NOT proceed
+    // with the live LVGL write); false when no fetch is active and the
+    // caller should run its normal path.
+    //
+    // Each helper writes the relevant subset of avatar_pending_ — a later
+    // call within the same fetch window wins (the user's most recent
+    // intent is what we apply when the fetch completes). set_avatar(face)
+    // and set_avatar("off") are mutually exclusive on the face axis, so
+    // they clear each other; mouth and blink axes are independent.
+    bool DeferAvatarFaceIfFetching(const char* face) {
+        if (!avatar_fetch_in_progress_.load(std::memory_order_acquire)) return false;
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ == nullptr) return false;
+        if (xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            avatar_pending_.has_off = false;
+            avatar_pending_.has_face = true;
+            avatar_pending_.face_name = (face != nullptr) ? face : "";
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        ESP_LOGI(TAG, "SetAvatarExpression('%s') deferred (avatar fetch in progress)",
+                 face != nullptr ? face : "(null)");
+        return true;
+    }
+
+    bool DeferAvatarOffIfFetching() {
+        if (!avatar_fetch_in_progress_.load(std::memory_order_acquire)) return false;
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ == nullptr) return false;
+        if (xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            avatar_pending_.has_face = false;
+            avatar_pending_.face_name.clear();
+            avatar_pending_.has_off = true;
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        ESP_LOGI(TAG, "SetAvatarOff deferred (avatar fetch in progress)");
+        return true;
+    }
+
+    bool DeferAvatarMouthIfFetching(const char* shape) {
+        if (!avatar_fetch_in_progress_.load(std::memory_order_acquire)) return false;
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ == nullptr) return false;
+        if (xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            avatar_pending_.has_mouth = true;
+            avatar_pending_.mouth_shape = (shape != nullptr) ? shape : "";
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        ESP_LOGI(TAG, "SetMouthShape('%s') deferred (avatar fetch in progress)",
+                 shape != nullptr ? shape : "(null)");
+        return true;
+    }
+
+    bool DeferAvatarBlinkIfFetching(bool enabled) {
+        if (!avatar_fetch_in_progress_.load(std::memory_order_acquire)) return false;
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ == nullptr) return false;
+        if (xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            avatar_pending_.has_blink = true;
+            avatar_pending_.blink_enabled = enabled;
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        ESP_LOGI(TAG, "set_blink(%d) deferred (avatar fetch in progress)", (int)enabled);
+        return true;
+    }
+
+    // Drain avatar_pending_ and apply it. Called from the avatar_fetch
+    // worker task after AvatarSet::AdoptOwnedBuffer returns (regardless of success);
+    // the caller must have already cleared avatar_fetch_in_progress_ so
+    // that the public SetAvatarExpression / SetMouthShape / set_blink
+    // paths invoked here run their live LVGL writes instead of looping
+    // back through the defer helpers.
+    void ApplyPendingAvatarAfterFetch() {
+        PendingAvatarState pending;
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ == nullptr) return;
+        if (xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            pending = avatar_pending_;
+            avatar_pending_ = PendingAvatarState{};
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        if (pending.has_off) {
+            SetAvatarOff();
+            return;
+        }
+        if (pending.has_face) {
+            SetAvatarExpression(pending.face_name.c_str());
+        }
+        if (pending.has_mouth) {
+            SetMouthShape(pending.mouth_shape.c_str());
+        }
+        if (pending.has_blink) {
+            if (pending.blink_enabled) {
+                StartBlinkTimer();
+            } else {
+                StopBlinkTimer();
+            }
+        }
     }
 
     // Create avatar_img_ on the active LVGL screen, scaled to fill the LCD.
@@ -3603,15 +3861,11 @@ private:
     // Apply the requested face to avatar_img_. Returns false if the face is
     // unknown or the avatar object cannot be created yet.
     bool SetAvatarExpressionLocked(const char* face) {
-        const lv_image_dsc_t* dsc = AvatarImageFor(face);
-        if (dsc == nullptr) {
-            return false;
-        }
-        if (!EnsureAvatarObject()) {
-            return false;
-        }
-        lv_image_set_src(avatar_img_, dsc);
-        lv_obj_move_foreground(avatar_img_);
+        const int idx = FaceNameToIndex(face);
+        if (idx < 0) return false;
+        current_face_index_ = idx;
+        active_layer_ = ActiveLayer::FACE;
+        if (!RenderAvatarLocked()) return false;
         current_avatar_face_ = face;
         return true;
     }
@@ -3626,6 +3880,12 @@ private:
         if (display_ == nullptr) {
             ESP_LOGW(TAG, "SetAvatarExpression('%s') ignored: display_ not ready", face);
             return false;
+        }
+        // Avatar set fetch in progress — record the request and return
+        // success. ApplyPendingAvatarAfterFetch() will replay the latest
+        // captured face when the fetch completes.
+        if (DeferAvatarFaceIfFetching(face)) {
+            return true;
         }
         bool was_off = (current_avatar_face_ == "off");
         bool ok;
@@ -3662,6 +3922,9 @@ private:
         if (display_ == nullptr) {
             ESP_LOGW(TAG, "SetAvatarOff() ignored: display_ not ready");
             return false;
+        }
+        if (DeferAvatarOffIfFetching()) {
+            return true;
         }
         // Capture the previous blink state only on the first transition
         // into "off". A repeated set_avatar("off") while already off must
@@ -3726,43 +3989,22 @@ private:
 
     // ---- Phase 2: parts (eyes / mouth) and blink state machine ----------
     //
-    // Eye state images (avatar_eyes_open / _half / _closed) are referenced
-    // directly by the blink state machine; we don't expose a generic
-    // EyesImageFor() helper yet because no MCP tool sets eyes manually.
+    // Eye and mouth axes share the unified rendering state machine above —
+    // each operation updates current_*_index_ + active_layer_ and asks
+    // RenderAvatarLocked() to redraw. In layered mode that produces the
+    // upstream Phase 2 behaviour (one image at a time, with blink
+    // temporarily replacing the face); in matrix mode the same state
+    // change drives a composite (face, eyes, mouth) frame.
 
-    // Map a mouth shape name to its full-frame image. Returns nullptr if unknown.
-    static const lv_image_dsc_t* MouthImageFor(const char* shape) {
-        if (shape == nullptr) return nullptr;
-        if (strcmp(shape, "closed") == 0) return &avatar_mouth_closed;
-        if (strcmp(shape, "half") == 0)   return &avatar_mouth_half;
-        if (strcmp(shape, "open") == 0)   return &avatar_mouth_open;
-        if (strcmp(shape, "e") == 0)      return &avatar_mouth_e;
-        if (strcmp(shape, "u") == 0)      return &avatar_mouth_u;
-        return nullptr;
-    }
-
-    // Swap avatar_img_ to a part image (eye or mouth). Caller must hold lock.
-    // Does NOT touch current_avatar_face_, so SetAvatarExpression(...) called
-    // later will still know what face to "return to".
-    bool SetPartImageLocked(const lv_image_dsc_t* dsc) {
-        if (dsc == nullptr) return false;
-        if (!EnsureAvatarObject()) return false;
-        lv_image_set_src(avatar_img_, dsc);
-        lv_obj_move_foreground(avatar_img_);
-        return true;
-    }
-
-    // Restore the last full-face expression after a part overlay.
+    // Restore the resting expression after a part overlay (= blink end /
+    // explicit stop). Eyes return to 0 (open); the mouth index is preserved
+    // so a Phase 4 lip-sync shape kept after the sequence ends continues to
+    // be composited in matrix mode and remains the last frame the next
+    // mouth call will replace in layered mode.
     bool RestoreCurrentFaceLocked() {
-        const lv_image_dsc_t* dsc = AvatarImageFor(current_avatar_face_.c_str());
-        if (dsc == nullptr) {
-            // Fall back to idle if somehow stale.
-            dsc = &avatar_idle;
-        }
-        if (!EnsureAvatarObject()) return false;
-        lv_image_set_src(avatar_img_, dsc);
-        lv_obj_move_foreground(avatar_img_);
-        return true;
+        current_eyes_index_ = 0;
+        active_layer_ = ActiveLayer::FACE;
+        return RenderAvatarLocked();
     }
 
     // Public mouth setter: wraps lock + look-up.
@@ -3771,12 +4013,19 @@ private:
             ESP_LOGW(TAG, "SetMouthShape('%s') ignored: display_ not ready", shape);
             return false;
         }
-        const lv_image_dsc_t* dsc = MouthImageFor(shape);
-        if (dsc == nullptr) {
-            return false;
+        const int idx = MouthShapeToIndex(shape);
+        if (idx < 0) return false;
+        if (DeferAvatarMouthIfFetching(shape)) {
+            // Fetch in progress — record the request in avatar_pending_ and
+            // let the post-fetch replay path apply it. Matches the face / off
+            // / blink deferral paths so set_mouth doesn't race the AvatarSet
+            // buffer swap.
+            return true;
         }
         DisplayLockGuard lock(display_);
-        return SetPartImageLocked(dsc);
+        current_mouth_index_ = idx;
+        active_layer_ = ActiveLayer::MOUTH;
+        return RenderAvatarLocked();
     }
 
     // Step callback for the four-phase blink sequence. Each invocation
@@ -3795,18 +4044,25 @@ private:
         DisplayLockGuard lock(display_);
         switch (blink_state_) {
             case BlinkState::EYES_HALF_DOWN:
-                SetPartImageLocked(&avatar_eyes_closed);
+                current_eyes_index_ = 2;  // closed
+                active_layer_ = ActiveLayer::EYES;
+                RenderAvatarLocked();
                 blink_state_ = BlinkState::EYES_CLOSED;
                 esp_timer_start_once(blink_step_timer_, BLINK_STEP_MS * 1000);
                 break;
             case BlinkState::EYES_CLOSED:
-                SetPartImageLocked(&avatar_eyes_half);
+                current_eyes_index_ = 1;  // half
+                active_layer_ = ActiveLayer::EYES;
+                RenderAvatarLocked();
                 blink_state_ = BlinkState::EYES_HALF_UP;
                 esp_timer_start_once(blink_step_timer_, BLINK_STEP_MS * 1000);
                 break;
             case BlinkState::EYES_HALF_UP:
-                // Final: restore the last applied face (Phase 2 trade-off:
-                // any active mouth overlay is replaced by the face image).
+                // Final: restore the resting state. In layered mode this
+                // repaints the face image (the Phase 2 trade-off: any
+                // active mouth overlay is replaced by the face). In matrix
+                // mode the mouth index is preserved so the composite frame
+                // keeps the user's lip-sync state.
                 RestoreCurrentFaceLocked();
                 blink_state_ = BlinkState::IDLE;
                 break;
@@ -3829,7 +4085,9 @@ private:
         if (blink_enabled_ && blink_state_ == BlinkState::IDLE && display_ != nullptr) {
             // Begin the blink: half-down now, full-closed at next step.
             DisplayLockGuard lock(display_);
-            if (SetPartImageLocked(&avatar_eyes_half)) {
+            current_eyes_index_ = 1;  // half
+            active_layer_ = ActiveLayer::EYES;
+            if (RenderAvatarLocked()) {
                 blink_state_ = BlinkState::EYES_HALF_DOWN;
                 esp_timer_start_once(blink_step_timer_, BLINK_STEP_MS * 1000);
             }
@@ -4188,7 +4446,7 @@ private:
                 cJSON_Delete(root);
                 return r;
             }
-            if (MouthImageFor(shape->valuestring) == nullptr) {
+            if (MouthShapeToIndex(shape->valuestring) < 0) {
                 r.error = std::string("step[") + std::to_string(i) +
                           "].shape unknown: '" + shape->valuestring +
                           "' (allowed: closed, half, open, e, u)";
@@ -4784,7 +5042,7 @@ private:
                     // interrupts cleanly)").
                     RequestMouthSequenceCancel();
                     applied = SetAvatarOff();
-                } else if (AvatarImageFor(face.c_str()) != nullptr) {
+                } else if (FaceNameToIndex(face.c_str()) >= 0) {
                     RequestMouthSequenceCancel();
                     applied = SetAvatarExpression(face.c_str());
                 } else {
@@ -4815,7 +5073,7 @@ private:
             PropertyList({Property("mouth", kPropertyTypeString)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 std::string mouth = properties["mouth"].value<std::string>();
-                bool valid = (MouthImageFor(mouth.c_str()) != nullptr);
+                bool valid = (MouthShapeToIndex(mouth.c_str()) >= 0);
                 cJSON* root = cJSON_CreateObject();
                 cJSON_AddStringToObject(root, "mouth", mouth.c_str());
                 if (!valid) {
@@ -4901,9 +5159,17 @@ private:
             PropertyList({Property("enabled", kPropertyTypeBoolean)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 bool enabled = properties["enabled"].value<bool>();
+                // blink_desired_ stays in sync with the user's intent
+                // regardless of which deferral path applies, so the
+                // mouth-sequence task and the avatar-fetch apply-pending
+                // path both see the latest value at their respective
+                // restore points.
                 blink_desired_.store(enabled, std::memory_order_release);
-                bool deferred = mouth_seq_active_.load(std::memory_order_acquire);
-                if (!deferred) {
+                bool deferred_by_fetch =
+                    DeferAvatarBlinkIfFetching(enabled);
+                bool deferred_by_mouth_seq =
+                    mouth_seq_active_.load(std::memory_order_acquire);
+                if (!deferred_by_fetch && !deferred_by_mouth_seq) {
                     if (enabled) {
                         StartBlinkTimer();
                     } else {
@@ -4913,11 +5179,15 @@ private:
                 cJSON* root = cJSON_CreateObject();
                 cJSON_AddBoolToObject(root, "enabled", enabled);
                 cJSON_AddBoolToObject(root, "ok", true);
-                if (deferred) {
+                if (deferred_by_fetch || deferred_by_mouth_seq) {
                     cJSON_AddBoolToObject(root, "deferred", true);
                 }
-                ESP_LOGI(TAG, "set_blink: enabled=%d deferred=%d",
-                         (int)enabled, deferred ? 1 : 0);
+                ESP_LOGI(TAG,
+                         "set_blink: enabled=%d deferred_by_fetch=%d "
+                         "deferred_by_mouth_seq=%d",
+                         (int)enabled,
+                         deferred_by_fetch ? 1 : 0,
+                         deferred_by_mouth_seq ? 1 : 0);
                 return root;
             });
 
@@ -5426,6 +5696,187 @@ public:
     virtual void OnTtsStop() override {
         StopTtsLipSync();
     }
+
+    // Phase 4.5 avatar (saiverse-stackchan-addon): handle the gateway's
+    // `avatar_set_fetch` WS message. Parse url/token/mode/checksum/
+    // expected_size, spawn a worker task that performs HTTP GET + SHA256
+    // verify + AvatarSet::AdoptOwnedBuffer, then send `avatar_set_loaded` back via
+    // the protocol. Runs on the protocol receive task; the actual fetch
+    // is delegated to a FreeRTOS task to avoid blocking the receive loop
+    // while the LCD-sized payload flows in.
+    virtual void OnAvatarSetFetch(const cJSON* root) override {
+        if (root == nullptr) {
+            ESP_LOGW(TAG, "OnAvatarSetFetch: root is null");
+            return;
+        }
+        auto url      = cJSON_GetObjectItem(root, "url");
+        auto token    = cJSON_GetObjectItem(root, "token");
+        auto mode_j   = cJSON_GetObjectItem(root, "mode");
+        auto checksum = cJSON_GetObjectItem(root, "checksum");
+        auto size_j   = cJSON_GetObjectItem(root, "expected_size");
+
+        // The gateway correlates avatar_set_loaded replies by checksum
+        // (see ESP32Connection._avatar_set_waiters). Reply with the
+        // requested checksum on every error path so a failure can wake
+        // the waiter promptly instead of timing out.
+        const std::string req_checksum =
+            cJSON_IsString(checksum) ? checksum->valuestring : "";
+
+        if (!cJSON_IsString(url) || !cJSON_IsString(token) ||
+            !cJSON_IsString(mode_j) || !cJSON_IsNumber(size_j)) {
+            ESP_LOGW(TAG, "OnAvatarSetFetch: missing required fields");
+            SendAvatarSetLoadedError(req_checksum, "missing_fields");
+            return;
+        }
+
+        AvatarSet::Mode mode_enum;
+        if (strcmp(mode_j->valuestring, "layered") == 0) {
+            mode_enum = AvatarSet::Mode::kLayered;
+        } else if (strcmp(mode_j->valuestring, "matrix") == 0) {
+            mode_enum = AvatarSet::Mode::kMatrix;
+        } else {
+            ESP_LOGW(TAG, "OnAvatarSetFetch: unknown mode '%s'", mode_j->valuestring);
+            SendAvatarSetLoadedError(req_checksum, "unknown_mode");
+            return;
+        }
+
+        // Take the in-progress guard. exchange(true) returns the previous
+        // value, so if another fetch was already running we reject this
+        // request rather than racing on avatar_set_'s PSRAM swap. The
+        // pending lock is created lazily (the defer helpers do the same;
+        // create it here so both producer and consumer share the same
+        // mutex instance).
+        if (avatar_fetch_in_progress_.exchange(true, std::memory_order_acq_rel)) {
+            ESP_LOGW(TAG, "OnAvatarSetFetch: another fetch already in progress");
+            SendAvatarSetLoadedError(req_checksum, "fetch_in_progress");
+            return;
+        }
+        EnsureAvatarPendingLock();
+        if (avatar_pending_lock_ != nullptr &&
+            xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
+            avatar_pending_ = PendingAvatarState{};
+            xSemaphoreGive(avatar_pending_lock_);
+        }
+        // Quiesce every autonomous LVGL writer so no set_src lands while
+        // AvatarSet::AdoptOwnedBuffer atomically swaps the PSRAM buffer backing
+        // each lv_image_dsc_t. The schedule timers / state machines restart
+        // from ApplyPendingAvatarAfterFetch (blink) or the next tts.start
+        // (TTS lipsync) once the fetch resolves.
+        StopTtsLipSync();
+        RequestMouthSequenceCancel();
+        StopBlinkTimer();
+
+        auto* context = new AvatarFetchContext;
+        context->board = this;
+        context->url = url->valuestring;
+        context->token = token->valuestring;
+        context->mode = mode_enum;
+        context->expected_size = static_cast<size_t>(size_j->valuedouble);
+        context->expected_sha256 = cJSON_IsString(checksum) ? checksum->valuestring : "";
+
+        BaseType_t ok = xTaskCreate(
+            &StackChanBoard::AvatarFetchTaskTrampoline,
+            "avatar_fetch",
+            8192,
+            context,
+            tskIDLE_PRIORITY + 2,
+            nullptr);
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "OnAvatarSetFetch: failed to create avatar_fetch task");
+            delete context;
+            avatar_fetch_in_progress_.store(false, std::memory_order_release);
+            SendAvatarSetLoadedError(req_checksum, "task_create_failed");
+        }
+    }
+
+    // ---- Phase 4.5 avatar helpers --------------------------------------
+
+    struct AvatarFetchContext {
+        StackChanBoard* board;
+        std::string url;
+        std::string token;
+        AvatarSet::Mode mode;
+        size_t expected_size;
+        std::string expected_sha256;
+    };
+
+    static void AvatarFetchTaskTrampoline(void* arg) {
+        auto* ctx = static_cast<AvatarFetchContext*>(arg);
+        ctx->board->RunAvatarFetch(ctx);
+        delete ctx;
+        vTaskDelete(nullptr);
+    }
+
+    void RunAvatarFetch(const AvatarFetchContext* ctx) {
+        // Capture expected_sha256 by value so the callback can fall back
+        // to it when AvatarSetFetcher reports an error before computing
+        // the actual checksum (HTTP error, size mismatch, allocation
+        // failure, etc.). The gateway's _avatar_set_waiters dict is keyed
+        // by checksum; replying with an empty key means the failure
+        // cannot resolve any waiter and the caller waits until timeout.
+        const std::string expected_sha256 = ctx->expected_sha256;
+        AvatarSetFetcher::Fetch(
+            avatar_set_,
+            ctx->url, ctx->token,
+            ctx->mode, ctx->expected_size, ctx->expected_sha256,
+            [expected_sha256](bool ok,
+                              const std::string& actual_checksum,
+                              const std::string& error_code) {
+                const std::string& correlation =
+                    actual_checksum.empty() ? expected_sha256 : actual_checksum;
+                SendAvatarSetLoaded(ok, correlation, error_code);
+            });
+
+        // Fetch finished (success or failure). Clear the in-progress flag
+        // BEFORE replaying pending state — otherwise the public
+        // SetAvatarExpression / SetMouthShape / StartBlinkTimer calls
+        // inside ApplyPendingAvatarAfterFetch would loop back into the
+        // defer helpers and the pending state would never be drained.
+        avatar_fetch_in_progress_.store(false, std::memory_order_release);
+
+        // After a successful adoption the previously displayed face is still
+        // pointing into the freed static-table data via avatar_img_; force a
+        // refresh so the new AvatarSet entry is picked up by the next
+        // RenderAvatarLocked() call (driven by SetAvatarExpressionIfActive
+        // below). Skipped on failure (the old image is still valid).
+        if (avatar_set_.is_loaded()) {
+            SetAvatarExpressionIfActive(current_avatar_face_.c_str());
+        }
+
+        // Replay the latest face / mouth / blink intent the user expressed
+        // while the fetch was running. Order: "off" wins over a face if
+        // both were issued (mutually exclusive on the face axis); blink
+        // restoration happens last so a successful fetch doesn't restart
+        // blink if the user disabled it mid-fetch.
+        ApplyPendingAvatarAfterFetch();
+    }
+
+    static void SendAvatarSetLoaded(
+        bool ok, const std::string& checksum, const std::string& error_code) {
+        cJSON* root = cJSON_CreateObject();
+        if (root == nullptr) return;
+        cJSON_AddStringToObject(root, "type", "avatar_set_loaded");
+        cJSON_AddStringToObject(root, "checksum", checksum.c_str());
+        cJSON_AddBoolToObject(root, "ok", ok);
+        if (ok || error_code.empty()) {
+            cJSON_AddNullToObject(root, "error");
+        } else {
+            cJSON_AddStringToObject(root, "error", error_code.c_str());
+        }
+        char* str = cJSON_PrintUnformatted(root);
+        if (str != nullptr) {
+            Application::GetInstance().SendJsonString(std::string(str));
+            cJSON_free(str);
+        }
+        cJSON_Delete(root);
+    }
+
+    static void SendAvatarSetLoadedError(
+        const std::string& checksum, const std::string& error_code) {
+        SendAvatarSetLoaded(false, checksum, error_code);
+    }
+
+    // --------------------------------------------------------------------
 
     virtual Backlight *GetBacklight() override {
         static CustomBacklight backlight(pmic_);
