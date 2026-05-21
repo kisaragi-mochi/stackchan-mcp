@@ -233,9 +233,21 @@ asyncio.run(smoke())
 
 ## License
 
-The gateway is distributed under the MIT License (see `LICENSE`). The
-parent monorepo's `firmware/` directory contains SCServo_lib code under
-GPL-3.0, but those files live only inside
+The gateway Python code is distributed under the **MIT License** (see
+`LICENSE`). The Windows wheel (`*-win_amd64.whl`) additionally bundles
+a native `opus.dll` built from upstream Opus source via vcpkg by the
+publish workflow. That binary is distributed under the **BSD 3-clause
+license + Xiph extension**; the full notice ships in every
+distribution form (sdist, `py3-none-any` wheel, `win_amd64` wheel) as
+`LICENSE-THIRD-PARTY`. Non-Windows wheels and the sdist do not contain
+any binary subject to that license — they rely on a system `libopus`
+provided by the OS package manager (e.g. `apt install libopus0`,
+`brew install opus`). See `stackchan_mcp/_libs/SOURCES.md` (also
+shipped in the wheel) for build provenance and the per-release
+SHA256 logged by CI.
+
+The parent monorepo's `firmware/` directory contains SCServo_lib code
+under GPL-3.0, but those files live only inside
 `firmware/main/boards/stackchan/` and never enter this package. The
 gateway and firmware communicate only over WebSocket, so the GPL/MIT
 boundary is preserved at the process level.
