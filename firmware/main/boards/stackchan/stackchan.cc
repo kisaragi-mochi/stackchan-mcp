@@ -624,6 +624,15 @@ private:
     uint64_t   last_event_us_ = 0;
     bool       last_zone_snapshot_[3] = {false, false, false};
     uint8_t    last_output1_raw_ = 0;
+    // Press-start snapshot. last_* fields above are overwritten every poll
+    // tick, so by the time HandleTap / HandleStroke fires on the falling edge
+    // they reflect the release state (zones=000 raw=0x00). press_start_*
+    // captures the rising-edge state so the log can show what the sensor
+    // actually saw when the touch began. Useful for distinguishing genuine
+    // touches (CH1〜CH3 set) from false positives (e.g. CH4 noise, raw=0x00
+    // with press judged via debounce, etc.).
+    bool       press_start_zones_[3] = {false, false, false};
+    uint8_t    press_start_output1_raw_ = 0;
 
     // Servo wobble sub-state. Keeps the previously-set angles untouched
     // before/after the wobble so that an external set_head_angles call is
@@ -3435,10 +3444,37 @@ private:
                              (uint64_t)REACTION_HOLD_MS * 1000);
     }
 
-    void HandleTap() {
-        ESP_LOGI(TAG, "touch event: TAP (zones=%d%d%d raw=0x%02X)",
-                 last_zone_snapshot_[0], last_zone_snapshot_[1], last_zone_snapshot_[2],
-                 last_output1_raw_);
+    // Decode a 2-bit channel level from the Si12T Output1 byte.
+    // 00 = no output, 01 = low, 10 = medium, 11 = high.
+    static inline char Si12tChLevelChar(uint8_t raw, int ch) {
+        uint8_t v = (raw >> (ch * 2)) & 0x3;
+        return "0LMH"[v];
+    }
+
+    // Emit the touch event log line. press_zones/press_raw are the
+    // rising-edge snapshot (= the touch the user actually made);
+    // release_raw is whatever the sensor reports at the falling edge
+    // (normally 0x00 — anything else hints at debounce / hysteresis quirks).
+    // ch=%c%c%c%c spells CH1〜CH4 levels using 0/L/M/H. CH4 is unused on
+    // stack-chan (the head has 3 zones), so anything non-0 on CH4 is a
+    // wiring noise / EMI signature worth investigating.
+    void LogTouchEvent(const char* event_name, uint64_t duration_ms) {
+        ESP_LOGI(TAG,
+                 "touch event: %s start_zones=%d%d%d start_raw=0x%02X ch=%c%c%c%c "
+                 "release_raw=0x%02X duration=%u ms",
+                 event_name,
+                 press_start_zones_[0], press_start_zones_[1], press_start_zones_[2],
+                 press_start_output1_raw_,
+                 Si12tChLevelChar(press_start_output1_raw_, 0),
+                 Si12tChLevelChar(press_start_output1_raw_, 1),
+                 Si12tChLevelChar(press_start_output1_raw_, 2),
+                 Si12tChLevelChar(press_start_output1_raw_, 3),
+                 last_output1_raw_,
+                 (unsigned)duration_ms);
+    }
+
+    void HandleTap(uint64_t duration_ms) {
+        LogTouchEvent("TAP", duration_ms);
         last_event_ = TouchEvent::TAP;
         last_event_us_ = esp_timer_get_time();
         // Use the IfActive variant so a tap during set_avatar("off") does
@@ -3448,9 +3484,7 @@ private:
     }
 
     void HandleStroke(uint64_t duration_ms) {
-        ESP_LOGI(TAG, "touch event: STROKE (zones=%d%d%d duration=%llums raw=0x%02X)",
-                 last_zone_snapshot_[0], last_zone_snapshot_[1], last_zone_snapshot_[2],
-                 (unsigned long long)duration_ms, last_output1_raw_);
+        LogTouchEvent("STROKE", duration_ms);
         last_event_ = TouchEvent::STROKE;
         last_event_us_ = esp_timer_get_time();
         SetAvatarExpressionIfActive("embarrassed");
@@ -3509,7 +3543,17 @@ private:
         uint64_t now_us = esp_timer_get_time();
 
         if (now) {
-            // Rising edge.
+            // Rising edge. Capture the sensor state for the falling-edge
+            // log either way — without this, a press that begins during
+            // the post-reaction cooldown and is held until the cooldown
+            // expires would log the previous touch's start_zones /
+            // start_raw on its falling edge, exactly the
+            // repeated-touch / noise-overlap scenario this logging is
+            // meant to clarify.
+            press_start_zones_[0] = s.zone[0];
+            press_start_zones_[1] = s.zone[1];
+            press_start_zones_[2] = s.zone[2];
+            press_start_output1_raw_ = s.output1_raw;
             if (now_us < cooldown_until_us_) {
                 // Suppress press event while in post-reaction cooldown.
                 touch_pressed_prev_ = now;
@@ -3530,7 +3574,7 @@ private:
                 HandleStroke(duration_ms);
             } else {
                 // Treat the 400-600 ms grey zone as TAP.
-                HandleTap();
+                HandleTap(duration_ms);
             }
             cooldown_until_us_ = now_us + (uint64_t)COOLDOWN_MS * 1000ULL;
         }
