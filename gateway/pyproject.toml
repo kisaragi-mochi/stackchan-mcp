@@ -5,7 +5,12 @@ description = "Two-faced MCP gateway for StackChan (xiaozhi-esp32): bridges stdi
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-license-files = ["LICENSE"]
+# `LICENSE-THIRD-PARTY` carries the BSD-3-Clause + Xiph notice for the
+# native libopus binary bundled into the `win_amd64` wheel. The file is
+# always shipped (sdist and every wheel variant) so license scanners
+# pointed at any distribution form can see it, even though the binary
+# itself is only present in the `win_amd64` wheel.
+license-files = ["LICENSE", "LICENSE-THIRD-PARTY"]
 authors = [
     { name = "kisaragi-mochi" },
 ]
@@ -86,16 +91,24 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 # Bundle the native libopus binary into the Windows wheel so that
-# `pip install stackchan-mcp[tts]` (or `[stt]`) works out-of-the-box on
-# Windows, where `libopus.dll` is not provided by any default install
-# path. The DLL is loaded at import time via `os.add_dll_directory()` in
-# `stackchan_mcp/__init__.py`. See `stackchan_mcp/_libs/SOURCES.md` for
-# provenance, license, and the planned switch to a CI-built binary.
+# `pip install stackchan-mcp[tts]` (or `[stt]`) works out-of-the-box
+# on Windows. The DLL is loaded at import time via
+# `os.add_dll_directory()` in `stackchan_mcp/__init__.py`. See
+# `stackchan_mcp/_libs/SOURCES.md` for provenance and license.
 #
-# Hatchling does not pick up arbitrary non-Python files inside the
-# package automatically — `force-include` makes the intent explicit
-# and ensures the DLL lands at the same path in the wheel as in the
-# source tree.
-[tool.hatch.build.targets.wheel.force-include]
-"stackchan_mcp/_libs/opus.dll" = "stackchan_mcp/_libs/opus.dll"
-"stackchan_mcp/_libs/SOURCES.md" = "stackchan_mcp/_libs/SOURCES.md"
+# Build-time contract: `opus.dll` is NOT tracked in git. The publish
+# workflow builds it from upstream Opus source via vcpkg on a Windows
+# runner (verified against a pinned SHA256), drops it under
+# `stackchan_mcp/_libs/`, then runs `uv build` which produces the
+# `win_amd64` wheel. Builds on non-Windows runners do not place a
+# DLL under `_libs/`, so the sdist and the `py3-none-any` wheel
+# produced on those runners ship without the binary. Glob patterns
+# below match `opus.dll` if and only if it exists at build time, so
+# the same pyproject config covers both wheel variants without an
+# unmatched-pattern error on the non-Windows runner.
+[tool.hatch.build.targets.wheel]
+packages = ["stackchan_mcp"]
+artifacts = [
+    "stackchan_mcp/_libs/opus.dll",
+    "stackchan_mcp/_libs/SOURCES.md",
+]

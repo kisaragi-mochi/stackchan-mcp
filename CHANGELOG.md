@@ -169,16 +169,30 @@ documented-only.
   non-device rates work without manual resampling. Contributed via
   [PR #TBD-A1](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A1).
 
-- Fixed: `pip install stackchan-mcp[tts]` did not work out-of-the-box on
-  Windows because `opuslib` calls `find_library("opus")`, which on
+- Fixed: `pip install stackchan-mcp[tts]` did not work out-of-the-box
+  on Windows because `opuslib` calls `find_library("opus")`, which on
   Windows requires a discoverable `opus.dll` — but pip-installable
-  upstream opus binaries do not exist for Windows. The wheel now bundles
-  a `gateway/stackchan_mcp/_libs/opus.dll` (PyOgg-derived, license
-  documented in `_libs/SOURCES.md`) and the package init prepends the
-  `_libs/` directory to `PATH` so `find_library` resolves it. macOS /
-  Linux installs are unaffected — the package init only manipulates
-  `PATH` on Windows. Contributed via
-  [PR #TBD-C](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-C).
+  upstream opus binaries do not exist for Windows. The publish
+  workflow now produces a platform-specific `*-win_amd64.whl` that
+  bundles `opus.dll` built from upstream Opus source via vcpkg on a
+  Windows runner (SHA256 logged per release for drift detection),
+  while the sdist and `py3-none-any` wheel published from the Ubuntu
+  runner ship without the binary so non-Windows installs and
+  non-x64 Windows installs stay clean. The package init prepends
+  `stackchan_mcp/_libs/` to `PATH` and registers it via
+  `os.add_dll_directory()` (handle retained at module scope so the
+  registration survives garbage collection), guarded on
+  `platform.machine() == "AMD64"` so a sdist install on a
+  non-x64 Windows host falls back to the same clean
+  "no opus" failure mode it had before this fix instead of trying to
+  load an architecture-mismatched DLL. The native binary itself is
+  no longer tracked in git — see `gateway/.gitignore` and
+  `stackchan_mcp/_libs/SOURCES.md`. The BSD-3-Clause + Xiph notice
+  for the bundled `opus.dll` ships alongside the gateway's MIT
+  `LICENSE` as `LICENSE-THIRD-PARTY`, included in every distribution
+  form so license scanners pointed at any wheel variant can see it.
+  Contributed via
+  [PR #217](https://github.com/kisaragi-mochi/stackchan-mcp/pull/217).
 
 - Added: MCP tool surface for the firmware-side Grove Port A generic
   I2C bus introduced in

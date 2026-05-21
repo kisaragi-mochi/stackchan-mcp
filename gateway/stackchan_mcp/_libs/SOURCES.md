@@ -44,44 +44,55 @@ version at build time" approach instead.
 | Field | Value |
 |---|---|
 | Architecture | x86_64 (`win_amd64`) |
-| File size | 491,520 bytes |
-| SHA256 | `5fa25b62f72f880acf420120d8ca32d31997620cadaab26ae798d13355012d1b` |
 | License | BSD 3-clause + Xiph extension — see <https://opus-codec.org/license/> |
-| Provenance | Extracted from PyOgg 0.6.14a1 Windows wheel on PyPI |
-| Source wheel SHA256 | `40f79b288b3a667309890885f4cf53371163b7dae17eb17567fb24ab467eca26` |
-| Source wheel URL | <https://pypi.org/project/pyogg/0.6.14a1/#files> (file: `PyOgg-0.6.14a1-py2.py3-none-win_amd64.whl`) |
+| Provenance | Built from upstream Opus source by the publish workflow via vcpkg |
+| Build command | `vcpkg install opus:x64-windows` (CI runner: `windows-latest`) |
 
 ### Provenance note
 
-This binary is currently sourced from the PyOgg project, which ships
-a Windows build of `libopus` inside its wheel. PyOgg is itself a thin
-ctypes wrapper around `libopus`, so the binary inside its wheel is a
-functionally standard build of the upstream Xiph Opus source.
+`opus.dll` is **not** tracked in git. The publish workflow
+(`.github/workflows/publish.yml`, job `build-windows-wheel`)
+bootstraps a fresh vcpkg checkout on a `windows-latest` runner,
+runs `vcpkg install opus:x64-windows`, copies the produced
+`opus.dll` into `stackchan_mcp/_libs/`, and logs its SHA256 to the
+job log so reviewers can spot vcpkg-side binary drift before a tag
+publishes. The wheel build that follows picks the DLL up via
+`tool.hatch.build.targets.wheel.artifacts` in
+`gateway/pyproject.toml`, and the resulting wheel is renamed from
+`*-py3-none-any.whl` to `*-py3-none-win_amd64.whl` so pip resolves
+it only on Windows x64 installs.
 
-Before this change is finalized for merge into the upstream
-`stackchan-mcp` repository, the long-term provenance plan is to switch
-to a CI-built binary so the build trail is fully self-contained
-inside `stackchan-mcp`'s own CI. The proposed pipeline:
+Builds on the Ubuntu runner (sdist + the `py3-none-any` wheel they
+produce) do not place a DLL under `_libs/`, so those distributions
+ship clean — non-Windows installs and non-x64 Windows installs
+either fall back to a system `libopus` (Linux/macOS) or get a
+clean "no compatible wheel" install-time message (Windows ARM64 /
+x86 32-bit).
 
-1. Add a `windows-latest` job to `.github/workflows/build.yml` that
-   installs `libopus` via `vcpkg install opus --triplet=x64-windows`.
-2. Copy the resulting `opus.dll` from the vcpkg installed tree into
-   `stackchan_mcp/_libs/`.
-3. Verify SHA256 against a pinned expected value and fail the build
-   on drift (so a vcpkg-side change can't silently swap the binary).
-4. The wheel built by that job uploads `stackchan-mcp-*-win_amd64.whl`
-   to PyPI.
+### Local development
 
-The PyOgg-sourced binary in this PR is functionally equivalent and lets
-us validate the bundling + `os.add_dll_directory()` machinery before
-the CI build pipeline is wired up.
+If you need a local Windows checkout to test the bundling path
+(running `uv build` outside CI), mirror the CI step by:
+
+1. Installing libopus via vcpkg (`vcpkg install opus:x64-windows`)
+   and copying the produced DLL into `stackchan_mcp/_libs/opus.dll`.
+2. Or downloading the same `opus.dll` from a release artifact
+   uploaded by the publish workflow.
+3. Or installing system libopus and copying it into the directory.
+
+The DLL is gitignored (see `gateway/.gitignore`) so a local copy
+never sneaks into a commit.
 
 ## License compliance
 
 The Opus codec is distributed under the 3-clause BSD license (with the
 optional Xiph patent grant), which permits redistribution in source or
 binary form provided the copyright notice and license text are
-preserved. The full license text is reproduced below.
+preserved. The canonical notice ships at the top of every gateway
+distribution as `LICENSE-THIRD-PARTY` (declared in
+`gateway/pyproject.toml`'s `license-files`); the same text is
+reproduced below as the bundling-rationale narrative for readers of
+this document.
 
 ```
 Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic,
