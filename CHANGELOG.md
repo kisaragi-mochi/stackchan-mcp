@@ -382,6 +382,16 @@ documented-only.
 
 - Added: the gateway now advertises `_stackchan-mcp._tcp.local.` over mDNS/DNS-SD by default so fresh firmware can discover the WebSocket endpoint on the local network. A new `--no-mdns` flag disables advertising.
 
+- Added: `POST /pcm` HTTP endpoint on the capture server that consumes
+  external PCM uploads and pipes them through `send_pcm_stream` to the
+  device. Lets non-MCP producers (sound-effect players, alternative TTS
+  stacks, browser bridges) hand audio to stack-chan over plain HTTP
+  without registering a `TTSEngine`. Accepts raw PCM with the source
+  sample rate carried in an `X-Sample-Rate` header, requires
+  Bearer-token auth, streams chunks to the device as they arrive so
+  latency stays low for long uploads. Contributed via
+  [PR #214](https://github.com/kisaragi-mochi/stackchan-mcp/pull/214).
+
 - Added: `send_pcm_stream(gateway, async_iter, source_rate=...)`
   incremental variant of `send_pcm_audio`. Consumes an async
   iterable of PCM chunks, opus-encodes and pushes them frame-by-frame
