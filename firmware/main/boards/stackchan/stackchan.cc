@@ -576,6 +576,24 @@ private:
     int current_mouth_index_ = 0;  // 0..4  (closed / half / open / e / u) — 0 is the resting state
     ActiveLayer active_layer_ = ActiveLayer::FACE;
 
+    // Pending state captured while an avatar_set_fetch is in flight.
+    // Calls to set_avatar / set_mouth_shape / set_blink during a fetch
+    // are buffered here and replayed once the new AvatarSet is loaded,
+    // so the UI does not flicker between the old and partially-loaded
+    // new sets. avatar_fetch_in_progress_ is the entry guard: a
+    // concurrent avatar_set_fetch is rejected with
+    // avatar_set_loaded error="fetch_in_progress" rather than racing
+    // the worker task that is already running.
+    std::atomic<bool> avatar_fetch_in_progress_{false};
+    SemaphoreHandle_t avatar_pending_lock_ = nullptr;
+    struct PendingAvatarState {
+        bool has_off = false;
+        bool has_face = false;     std::string face_name;
+        bool has_mouth = false;    std::string mouth_shape;
+        bool has_blink = false;    bool blink_enabled = false;
+    };
+    PendingAvatarState avatar_pending_;
+
     // Phase 2: blinking + lip-sync overlay state.
     // Blink works as a four-step state machine driven by blink_step_timer_:
     //   FACE -> EYES_HALF -> EYES_CLOSED -> EYES_HALF -> FACE (restore last face)
