@@ -155,6 +155,25 @@ jobs:
     permissions:
       contents: read
 
+    env:
+      # Pinned vcpkg release tag. Both the Opus port script and the
+      # underlying source tarball SHA come from this tag, so the
+      # supply-chain story for the bundled opus.dll is reproducible
+      # from CI history alone — independent of master drift or
+      # runner-image rev. Bump only after reviewing vcpkg's Opus port
+      # for security-relevant changes between tags.
+      # https://github.com/microsoft/vcpkg/releases
+      # Pinned to 2026.04.27 → Opus 1.5.2 port-version 1.
+      VCPKG_PIN: "2026.04.27"
+      # Expected SHA256 of the produced opus.dll. Re-derived only when
+      # VCPKG_PIN or the windows-latest runner-image MSVC version
+      # changes. To rotate: run this workflow via `workflow_dispatch`
+      # (or watch the next tag run), copy the actual hash from the
+      # "Verify opus.dll SHA256" step below, and commit. An empty
+      # value intentionally fails the comparison so a missing pin
+      # cannot silently ship.
+      EXPECTED_OPUS_DLL_SHA256: ""
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -162,17 +181,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # vcpkg ships with the GitHub-hosted Windows runner image but at
-      # a pinned revision that drifts over time. Bootstrap a fresh
-      # checkout so the Opus version we ship is reproducible from
-      # CI history alone, independent of any runner-image rev.
-      - name: Bootstrap vcpkg
+      # Pin vcpkg to a reviewed release tag rather than HEAD of
+      # master. This locks both the Opus port script and the
+      # source tarball it pulls so the bundled DLL is reviewable
+      # supply chain — see the VCPKG_PIN comment above.
+      - name: Bootstrap vcpkg (pinned)
         shell: pwsh
         run: |
           if (Test-Path "$env:RUNNER_TEMP\vcpkg") {
             Remove-Item -Recurse -Force "$env:RUNNER_TEMP\vcpkg"
           }
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          git clone --depth 1 --branch "$env:VCPKG_PIN" https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          $head = & git -C "$env:RUNNER_TEMP\vcpkg" rev-parse HEAD
+          Write-Output "vcpkg pinned to tag $env:VCPKG_PIN (commit $head)"
           & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
 
       - name: Install libopus via vcpkg
@@ -190,23 +211,47 @@ jobs:
           $dest_dir = "$env:GITHUB_WORKSPACE\gateway\stackchan_mcp\_libs"
           New-Item -ItemType Directory -Force -Path $dest_dir | Out-Null
           Copy-Item -Force $dll "$dest_dir\opus.dll"
-          # Surface the SHA256 in the job log so a humans reviewing
-          # the run can spot vcpkg-side binary drift even before the
-          # release goes out to PyPI.
-          $hash = (Get-FileHash "$dest_dir\opus.dll" -Algorithm SHA256).Hash.ToLower()
-          Write-Output "opus.dll SHA256: $hash"
-          # Also expose for downstream steps if a future pin check is
-          # added.
-          "OPUS_DLL_SHA256=$hash" | Out-File -Append -FilePath $env:GITHUB_ENV
+
+      # Block the wheel build on opus.dll SHA256 drift. Without this
+      # gate, a tag rerun (or a runner-image refresh that changes
+      # MSVC build behaviour) could silently ship a different native
+      # binary than the one reviewed for the release, defeating the
+      # vcpkg pin above.
+      - name: Verify opus.dll SHA256
+        shell: pwsh
+        run: |
+          $dll = "$env:GITHUB_WORKSPACE\gateway\stackchan_mcp\_libs\opus.dll"
+          $actual = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower()
+          $expected = $env:EXPECTED_OPUS_DLL_SHA256.ToLower()
+          Write-Output "opus.dll SHA256 (actual):   $actual"
+          Write-Output "opus.dll SHA256 (expected): $expected"
+          if ([string]::IsNullOrWhiteSpace($expected)) {
+            Write-Output "::error::EXPECTED_OPUS_DLL_SHA256 is unset. Run this workflow via workflow_dispatch, then copy the actual hash above into the EXPECTED_OPUS_DLL_SHA256 env in .github/workflows/publish.yml and commit before tagging a release."
+            exit 1
+          }
+          if ($actual -ne $expected) {
+            Write-Output "::error::opus.dll SHA256 mismatch — vcpkg-side or runner-image drift detected. Refusing to publish a different binary than the one reviewed for this VCPKG_PIN."
+            exit 1
+          }
+          Write-Output "opus.dll SHA256: verified against EXPECTED_OPUS_DLL_SHA256."
+          # Expose for any downstream step (e.g. release notes) that
+          # may want to surface the verified hash.
+          "OPUS_DLL_SHA256=$actual" | Out-File -Append -FilePath $env:GITHUB_ENV
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
 
-      - name: Install gateway dependencies
+      # `--extra tts` pulls in `opuslib`, which the smoke test below
+      # imports. Without it, the smoke step fails with
+      # `ModuleNotFoundError: No module named 'opuslib'` — a
+      # release-only failure mode that the PR build (`build.yml`)
+      # would not catch, since PR CI already installs the `tts`
+      # extra explicitly.
+      - name: Install gateway dependencies (with tts extra)
         working-directory: gateway
-        run: uv sync --frozen
+        run: uv sync --frozen --extra tts
 
       # Smoke test the loader paths on the actual platform that ships
       # the DLL. This catches obvious mistakes (missing `_libs/`

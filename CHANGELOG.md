@@ -174,19 +174,27 @@ documented-only.
   Windows requires a discoverable `opus.dll` — but pip-installable
   upstream opus binaries do not exist for Windows. The publish
   workflow now produces a platform-specific `*-win_amd64.whl` that
-  bundles `opus.dll` built from upstream Opus source via vcpkg on a
-  Windows runner (SHA256 logged per release for drift detection),
-  while the sdist and `py3-none-any` wheel published from the Ubuntu
-  runner ship without the binary so non-Windows installs and
-  non-x64 Windows installs stay clean. The package init prepends
-  `stackchan_mcp/_libs/` to `PATH` and registers it via
-  `os.add_dll_directory()` (handle retained at module scope so the
-  registration survives garbage collection), guarded on
-  `platform.machine() == "AMD64"` so a sdist install on a
-  non-x64 Windows host falls back to the same clean
-  "no opus" failure mode it had before this fix instead of trying to
-  load an architecture-mismatched DLL. The native binary itself is
-  no longer tracked in git — see `gateway/.gitignore` and
+  bundles `opus.dll` built from upstream Opus source via a pinned
+  vcpkg release (`VCPKG_PIN=2026.04.27` → Opus 1.5.2 port-version 1)
+  on a Windows runner, with the produced DLL's SHA256 verified against
+  an `EXPECTED_OPUS_DLL_SHA256` env in the workflow before the wheel
+  is built (the build fails on mismatch or unset expected value, so a
+  silent vcpkg-side or runner-image drift cannot ship a different
+  native binary than the one reviewed for the release). The sdist
+  and `py3-none-any` wheel published from the Ubuntu runner ship
+  without the binary so non-Windows installs and non-x64 Windows
+  installs stay clean. The Windows job also installs the `tts` extra
+  (`uv sync --frozen --extra tts`) before the post-build smoke test
+  so the test exercises the same `opuslib` import path users hit,
+  closing a release-only `ModuleNotFoundError` gap PR CI did not
+  cover. The package init prepends `stackchan_mcp/_libs/` to `PATH`
+  and registers it via `os.add_dll_directory()` (handle retained at
+  module scope so the registration survives garbage collection),
+  guarded on `platform.machine() == "AMD64"` so a sdist install on
+  a non-x64 Windows host falls back to the same clean "no opus"
+  failure mode it had before this fix instead of trying to load an
+  architecture-mismatched DLL. The native binary itself is no longer
+  tracked in git — see `gateway/.gitignore` and
   `stackchan_mcp/_libs/SOURCES.md`. The BSD-3-Clause + Xiph notice
   for the bundled `opus.dll` ships alongside the gateway's MIT
   `LICENSE` as `LICENSE-THIRD-PARTY`, included in every distribution
