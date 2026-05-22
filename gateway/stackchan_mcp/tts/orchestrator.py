@@ -25,6 +25,7 @@ from .audio_utils import (
     DEVICE_FRAME_DURATION_MS,
     DEVICE_SAMPLE_RATE,
     encode_opus_frames,
+    resample_pcm16_linear,
 )
 from .base import EngineRegistry, get_registry
 
@@ -173,6 +174,128 @@ async def synthesize_and_send(
             f"Engine '{voice}' produced no PCM data for the given text."
         )
 
+    # Hand the PCM off to the shared encode-and-push path. Engines that
+    # have already resampled to DEVICE_SAMPLE_RATE (the documented
+    # TTSEngine contract) need no further conversion here.
+    result = await send_pcm_audio(
+        gateway,
+        pcm,
+        source_label=f"engine:{voice}",
+    )
+
+    logger.info(
+        "say(): engine=%s speaker=%s frames=%d duration_ms=%d",
+        voice,
+        speaker_id if speaker_id is not None else "default",
+        result["frame_count"],
+        result["duration_ms"],
+    )
+
+    return {
+        "engine": voice,
+        "text": text,
+        "speaker_id": speaker_id,
+        "frame_count": result["frame_count"],
+        "sample_rate": result["sample_rate"],
+        "frame_duration_ms": result["frame_duration_ms"],
+        "duration_ms": result["duration_ms"],
+    }
+
+
+async def send_pcm_audio(
+    gateway: "Gateway",
+    pcm: bytes,
+    *,
+    source_rate: int = DEVICE_SAMPLE_RATE,
+    source_label: str = "external",
+) -> dict[str, Any]:
+    """Encode mono PCM and push as Opus frames to the connected device.
+
+    This is the shared back-half of the TTS pipeline. ``synthesize_and_send``
+    delegates here after running its engine; external producers (an HTTP
+    PCM bridge, a sound-effect player, another voice stack like the SAIVerse
+    voice-tts addon) can call this directly to push pre-synthesised audio
+    without going through a registered :class:`TTSEngine`.
+
+    Args:
+        gateway: The :class:`Gateway` instance whose
+            :attr:`Gateway.esp32` the audio frames are pushed through.
+        pcm: Signed-16-bit little-endian mono PCM bytes. Must be
+            non-empty.
+        source_rate: Sample rate of ``pcm``. Defaults to
+            :data:`DEVICE_SAMPLE_RATE` (16 kHz). When the source is at a
+            different rate (e.g. voice-tts produces 32 kHz) the bytes
+            are resampled linearly before Opus encoding; engines that
+            already resample to the device rate internally should leave
+            this at the default.
+        source_label: Label that appears in the orchestrator log line so
+            external callers can be traced separately from engine-driven
+            synthesis (e.g. ``"voice-tts"``, ``"sfx:notification"``).
+
+    Returns:
+        Dict describing the push: ``source``, ``frame_count``,
+        ``sample_rate``, ``frame_duration_ms``, ``duration_ms``.
+        ``sample_rate`` is always :data:`DEVICE_SAMPLE_RATE` because that
+        is what the device actually decoded, regardless of the source
+        rate.
+
+    Raises:
+        RuntimeError: if ``pcm`` is empty, ``gateway`` is missing, no
+            device is connected, the negotiated protocol is not v1, Opus
+            encoding fails, or the device disconnects mid-stream.
+    """
+    if not pcm:
+        # Surface empty input as a clear bug rather than silently doing
+        # nothing — same reasoning as the "engine produced no PCM" guard
+        # in synthesize_and_send.
+        raise RuntimeError(
+            f"send_pcm_audio: PCM payload was empty (source={source_label!r})."
+        )
+
+    # Validate source_rate before it reaches resample_pcm16_linear.
+    # The resampler computes ``n_dst = n_src * dst_rate // src_rate``,
+    # which raises ZeroDivisionError on 0 and produces nonsense for
+    # negatives — neither of which the caller's narrow ``RuntimeError``
+    # filter translates cleanly to an MCP-facing error. Catch invalid
+    # rates here so non-engine producers (HTTP /pcm bridges,
+    # external voice stacks) that forward unvalidated request params
+    # get a deterministic error instead of a raw stack trace.
+    if not isinstance(source_rate, int) or source_rate <= 0:
+        raise RuntimeError(
+            f"send_pcm_audio: source_rate must be a positive integer, "
+            f"got {source_rate!r}."
+        )
+
+    if gateway is None:
+        raise RuntimeError(
+            "send_pcm_audio requires a 'gateway' argument to push audio "
+            "frames; this call appears to be a validation probe without one."
+        )
+
+    if not gateway.esp32.device_connected:
+        raise RuntimeError(
+            "No ESP32 device connected; cannot deliver audio."
+        )
+
+    # WebSocket protocol version gate. The firmware decodes raw Opus
+    # binary frames only on protocol v1; v2/v3 wrap each binary message
+    # in a BinaryProtocol header that this gateway does not yet emit.
+    connection = getattr(gateway.esp32, "connection", None)
+    proto_version = getattr(connection, "protocol_version", 1)
+    if proto_version != 1:
+        raise RuntimeError(
+            f"send_pcm_audio requires WebSocket protocol v1, but the "
+            f"connected device negotiated v{proto_version}. Rebuild the "
+            "firmware with v1 (the default for this repository) — v2/v3 "
+            "BinaryProtocol header wrapping is not yet supported."
+        )
+
+    # Resample to the device's rate before Opus encoding. ``encode_opus_frames``
+    # expects samples at DEVICE_SAMPLE_RATE; passing a different rate would
+    # produce frames that play back too fast / too slow on the device.
+    if source_rate != DEVICE_SAMPLE_RATE:
+        pcm = resample_pcm16_linear(pcm, source_rate, DEVICE_SAMPLE_RATE)
+
     # Encode -> push. Materialising the frame list before pushing keeps
     # the count reportable and makes it easy to short-circuit if Opus
     # encoding fails before any audio reaches the wire.
@@ -186,20 +309,11 @@ async def synthesize_and_send(
     # binary audio frames while in kDeviceStateSpeaking, which is
     # entered on receipt of {"type":"tts","state":"start"} and exited
     # on "stop". Without these notifications the audio frames are
-    # silently discarded and the say() tool returns success even
-    # though nothing actually plays.
+    # silently discarded.
     #
     # The whole start → frames → stop block runs under the device's
-    # TTS lock so two concurrent ``say()`` invocations can't interleave
-    # their Opus frames on the same WebSocket or overlap their state
-    # notifications. Without the lock, utterance B's ``stop`` could
-    # land mid-A and pull the firmware out of ``kDeviceStateSpeaking``
-    # while A's frames are still in flight, silently dropping the
-    # remainder of A's audio.
-    # Acquire the device's TTS lock for the duration of the
-    # start → frames → stop block. ``getattr`` lets test fakes that
-    # don't expose the lock attribute keep working — production always
-    # provides it via :class:`ESP32Manager.tts_lock`.
+    # TTS lock so two concurrent pushes can't interleave their Opus
+    # frames on the same WebSocket or overlap their state notifications.
     tts_lock = getattr(gateway.esp32, "tts_lock", None)
     lock_ctx = tts_lock if tts_lock is not None else nullcontext()
 
@@ -264,17 +378,14 @@ async def synthesize_and_send(
     duration_ms = sent * DEVICE_FRAME_DURATION_MS
 
     logger.info(
-        "say(): engine=%s speaker=%s frames=%d duration_ms=%d",
-        voice,
-        speaker_id if speaker_id is not None else "default",
+        "send_pcm_audio: source=%s frames=%d duration_ms=%d",
+        source_label,
         sent,
         duration_ms,
     )
 
     return {
-        "engine": voice,
-        "text": text,
-        "speaker_id": speaker_id,
+        "source": source_label,
         "frame_count": sent,
         "sample_rate": DEVICE_SAMPLE_RATE,
         "frame_duration_ms": DEVICE_FRAME_DURATION_MS,
