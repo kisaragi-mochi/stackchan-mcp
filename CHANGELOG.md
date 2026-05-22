@@ -32,6 +32,28 @@ documented-only.
 
 ### Firmware
 
+- Changed: the device no longer auto-enters Listening after a TTS
+  utterance ends. The `Application::OnIncomingJson` handler for the
+  `tts.stop` event used to fall through to
+  `SetDeviceState(kDeviceStateListening)` whenever `listening_mode_`
+  was anything other than `kListeningModeManualStop`, mirroring the
+  upstream xiaozhi conversational-agent UX. In an MCP-gateway
+  deployment that auto-listening path is a footgun: when the TTS
+  pipeline stalls (we observed `audio_input` task watchdog timeouts
+  firing every 10 s for over two minutes during long playback), the
+  deferred `tts.stop` event arrives long after the user expected the
+  conversation to be quiescent, and the device then records ~30 s of
+  ambient room audio that the gateway happily posts as a user
+  utterance — repeatedly per session. With this change `tts.stop`
+  unconditionally returns the device to Idle; listening is now started
+  only by the user (touch / button / external command) or by the AI
+  (gateway-issued `StartListening`). Loop-style `Listening → Speaking
+  → Listening` flows belong on the gateway side, where the gateway
+  can reason about the conversation's actual state. Avatar mouth
+  animation cleanup via `OnTtsStop()` still fires unconditionally.
+  Contributed via
+  [PR #225](https://github.com/kisaragi-mochi/stackchan-mcp/pull/225).
+
 - Added: `self.port_b.ws2812.{init, set_pixel, set_strip, refresh, clear}`
   MCP tools — five generic tools to drive any WS2812-compatible LED
   strip attached to the official kit's Port B (CoreS3 HY2.0-4P digital
