@@ -529,11 +529,28 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this, &board]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
+                        // stackchan-mcp is an MCP gateway, not a standalone
+                        // xiaozhi-style conversational agent. Listening must
+                        // be triggered explicitly — either by the user
+                        // (touch / button / external command) or by the
+                        // AI (gateway-issued StartListening). The upstream
+                        // xiaozhi behaviour of automatically re-entering
+                        // listening after every TTS utterance is a footgun
+                        // here: when the firmware's TTS pipeline stalls
+                        // (e.g. audio_input task watchdog timeouts during
+                        // long playback) the deferred tts.stop event lands
+                        // long after the user expected the conversation to
+                        // be quiescent, and the device then records ~30 s
+                        // of ambient room audio that the gateway happily
+                        // posts as a user utterance.
+                        //
+                        // Returning to Idle here forces the listening
+                        // boundary to be set explicitly by whoever wants
+                        // to continue the conversation (user touch,
+                        // gateway-driven push-to-talk, etc.). Loop-style
+                        // Listening→Speaking→Listening flows belong on
+                        // the gateway side, not in this firmware.
+                        SetDeviceState(kDeviceStateIdle);
                     }
                     // Phase 4 audio (Issue #76): stop the avatar mouth
                     // animation unconditionally on tts.stop. A wake-word /
