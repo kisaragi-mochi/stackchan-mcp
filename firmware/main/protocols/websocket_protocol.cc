@@ -345,6 +345,18 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             continue;
         }
         auto notify_disconnect = std::make_shared<std::atomic<bool>>(false);
+        // Per-candidate flag flipped by the OnDisconnected lambda (on the WS
+        // task) the moment a live, post-handshake server-side close has
+        // already armed a reconnect via ScheduleReconnect(). The main task
+        // loads this with acquire semantics immediately after
+        // xEventGroupWaitBits() returns the server-hello event, before any
+        // success-path mutation. Using a per-socket atomic captured by the
+        // lambda gives us a synchronised handshake between the WS task's
+        // close path and the main task's resume — unlike reading
+        // WebSocket::IsConnected(), whose underlying `connected_` is a
+        // plain bool mutated by the WS/TCP callback path with no acquire/
+        // release ordering. See #189 round-2 review for the race window.
+        auto disconnected_after_hello = std::make_shared<std::atomic<bool>>(false);
 
         if (!token.empty()) {
             websocket_->SetHeader("Authorization", token.c_str());
@@ -431,7 +443,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             last_incoming_time_ = std::chrono::steady_clock::now();
         });
 
-        websocket_->OnDisconnected([this, notify_disconnect]() {
+        websocket_->OnDisconnected([this, notify_disconnect, disconnected_after_hello]() {
             audio_channel_open_.store(false);
             transport_connected_.store(false);
             // notify_disconnect carries this socket's reconnect intent.
@@ -452,6 +464,14 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             if (on_audio_channel_closed_ != nullptr) {
                 on_audio_channel_closed_();
             }
+            // Publish "a live disconnect has already armed reconnect" to
+            // the main task BEFORE calling ScheduleReconnect(). The release
+            // here synchronises with the acquire load in
+            // OpenAudioChannelInternal() right after xEventGroupWaitBits(),
+            // ensuring the main task observes this store on every code
+            // path that would otherwise race in to cancel the just-armed
+            // timer via StopReconnectTimer() (#189 round-2 review).
+            disconnected_after_hello->store(true, std::memory_order_release);
             ScheduleReconnect();
         });
 
@@ -503,6 +523,31 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             server_hello_timed_out = true;
             websocket_.reset();
             continue;
+        }
+
+        // A server-side close arriving between ParseServerHello() setting the
+        // wait bit and this main-task resume runs the OnDisconnected lambda on
+        // the WS task with notify_disconnect already armed, so the lambda has
+        // already called ScheduleReconnect() to arm the reconnect timer.
+        // Returning into the success path below would unconditionally call
+        // StopReconnectTimer() and cancel that just-armed retry, returning
+        // true to the reconnect-timer caller and leaving the transport dead
+        // with no retry scheduled (#189).
+        //
+        // Detect this race via the per-socket disconnected_after_hello flag
+        // captured by the OnDisconnected lambda: the lambda stores true with
+        // release semantics before ScheduleReconnect(), and the acquire load
+        // here establishes happens-before with that store. Unlike
+        // WebSocket::IsConnected() — whose `connected_` is a plain bool
+        // mutated by the WS/TCP callback path with no synchronisation — this
+        // ordering guarantees we observe the close that already armed the
+        // reconnect, instead of a stale "still connected" reading
+        // (#189 round-2 review). The websocket_ != nullptr check is kept as
+        // a defensive guard against unexpected teardown ordering.
+        if (websocket_ == nullptr ||
+            disconnected_after_hello->load(std::memory_order_acquire)) {
+            ESP_LOGW(TAG, "Server-side close raced with server hello; leaving reconnect to the per-socket disconnect handler");
+            return false;
         }
 
         // ParseServerHello() already armed notify_disconnect on the WS

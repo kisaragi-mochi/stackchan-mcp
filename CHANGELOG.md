@@ -32,6 +32,82 @@ documented-only.
 
 ### Firmware
 
+- Added: `self.port_b.ws2812.{init, set_pixel, set_strip, refresh, clear}`
+  MCP tools — five generic tools to drive any WS2812-compatible LED
+  strip attached to the official kit's Port B (CoreS3 HY2.0-4P digital
+  OUTPUT, GPIO 9). Same hardware-boundary-as-contract pattern as the
+  Port A I2C generic tools from
+  [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196):
+  the base firmware exposes a generic capability of the official
+  expansion port at the MCP layer; accessory-specific semantics live
+  outside the base repository. Driver: `espressif/led_strip` ~3.0.2
+  (already a dependency in `firmware/main/idf_component.yml`; the
+  stackchan board is the first stackchan-side consumer), RMT backend,
+  single strip per `init`, `led_count` set at `init()` time (1..256
+  parameter-clamped). Hardware path is fully independent of the
+  on-board PY32-driven 12-LED base strip (I2C → PY32 → PY32-internal
+  WS2812 engine, separate from RMT); existing `self.led.*` behaviour
+  is byte-for-byte unchanged. Contributed via
+  [PR #223](https://github.com/kisaragi-mochi/stackchan-mcp/pull/223).
+
+- Fixed: the Si12T head-touch driver's TAP / STROKE log line printed
+  `duration=lums raw=0xNNNN` instead of human-readable values, because
+  ESP-IDF's nano-printf cannot parse the `%llums` specifier and the
+  failed parse stops `va_arg` from advancing past `duration_ms` — so
+  the following `%02X` consumed the long-long's bytes rather than the
+  Si12T Output1 register. `zones=000 raw=0x00` was also misleading
+  because the snapshot fields were overwritten every poll tick and
+  read the post-release zero state by the time the falling-edge
+  handler logged. The log line now uses `%u ms`, captures the
+  rising-edge sensor state separately into `press_start_*`, and reports
+  it as
+  `start_zones=NNN start_raw=0xNN ch=CCCC release_raw=0xNN duration=NN ms`,
+  with `ch=CCCC` decoding Output1's four 2-bit channel levels as
+  `0/L/M/H` (CH4 should always be `0`; a non-`0` CH4 character flags
+  wiring noise / EMI). `HandleTap` also receives the duration so the
+  400-600 ms grey-zone TAPs print their timing. The rising-edge
+  capture also fires on the cooldown-suppressed branch so a touch
+  whose press started during the post-reaction cooldown but released
+  after cooldown expired logs its own start state instead of the
+  previous touch's. Purely a logging change — touch detection logic
+  and timing constants are unchanged. Contributed via
+  [PR #206](https://github.com/kisaragi-mochi/stackchan-mcp/pull/206).
+
+- Fixed: a server-side close arriving between the WebSocket server
+  hello and the main task resuming no longer cancels the reconnect
+  timer that the per-socket `OnDisconnected` lambda just armed.
+  `OpenAudioChannelInternal()` now uses a per-candidate
+  acquire/release atomic flag captured by `OnDisconnected` (stored
+  with release before `ScheduleReconnect()`, loaded with acquire
+  immediately after `xEventGroupWaitBits()` returns the server-hello
+  event) and bails out with `return false` before the success-path
+  `StopReconnectTimer()`. The earlier `websocket_->IsConnected()`
+  guard was insufficient because the underlying `connected_` is a
+  plain bool with no acquire/release ordering against the close-side
+  callback path. The reconnect-timer caller observes the false return
+  and waits for the already-armed retry. Happy path (no concurrent
+  close) is unchanged. Closes
+  [#189](https://github.com/kisaragi-mochi/stackchan-mcp/issues/189).
+
+- Fixed: the `OGG_POPUP` listening cue was only triggered on wake-word
+  activation paths (`HandleWakeWordDetectedEvent` /
+  `ContinueWakeWordInvoke`), so callers of the public
+  `Application::StartListening()` API — board-level touch buttons,
+  server-driven listen, etc. — silently lost the audible "listening
+  started" feedback. `HandleStartListeningEvent` now arms
+  `play_popup_on_listening_` itself, after the early-return branches
+  for `kDeviceStateActivating` / `kDeviceStateWifiConfiguring` /
+  null-protocol but before the Idle / Speaking-abort listening
+  dispatches, so the flag is only latched when the function is
+  actually going to transition the device toward listening. The
+  public `Application::StartListening()` stays a thin event setter
+  (`xEventGroupSetBits` + return) so the write happens entirely on
+  the main task, matching the wake-word path that already flips the
+  flag from the main task before calling `ContinueWakeWordInvoke`.
+  No behaviour change for the wake-word path (the flag was already
+  true there before this function ran). Contributed via
+  [PR #207](https://github.com/kisaragi-mochi/stackchan-mcp/pull/207).
+
 - Fixed: WebSocket candidate fallback is now fail-fast when a server
   hello is malformed (missing/non-string `transport`, missing/empty
   `session_id`, or unsupported `transport`). A new
