@@ -32,6 +32,24 @@ documented-only.
 
 ### Firmware
 
+- Added: `self.port_b.ws2812.{init, set_pixel, set_strip, refresh, clear}`
+  MCP tools — five generic tools to drive any WS2812-compatible LED
+  strip attached to the official kit's Port B (CoreS3 HY2.0-4P digital
+  OUTPUT, GPIO 9). Same hardware-boundary-as-contract pattern as the
+  Port A I2C generic tools from
+  [PR #196](https://github.com/kisaragi-mochi/stackchan-mcp/pull/196):
+  the base firmware exposes a generic capability of the official
+  expansion port at the MCP layer; accessory-specific semantics live
+  outside the base repository. Driver: `espressif/led_strip` ~3.0.2
+  (already a dependency in `firmware/main/idf_component.yml`; the
+  stackchan board is the first stackchan-side consumer), RMT backend,
+  single strip per `init`, `led_count` set at `init()` time (1..256
+  parameter-clamped). Hardware path is fully independent of the
+  on-board PY32-driven 12-LED base strip (I2C → PY32 → PY32-internal
+  WS2812 engine, separate from RMT); existing `self.led.*` behaviour
+  is byte-for-byte unchanged. Contributed via
+  [PR #223](https://github.com/kisaragi-mochi/stackchan-mcp/pull/223).
+
 - Fixed: the Si12T head-touch driver's TAP / STROKE log line printed
   `duration=lums raw=0xNNNN` instead of human-readable values, because
   ESP-IDF's nano-printf cannot parse the `%llums` specifier and the
