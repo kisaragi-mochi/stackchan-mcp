@@ -7,6 +7,7 @@
 #include "i2c_device.h"
 #include "axp2101.h"
 #include "mcp_server.h"
+#include "led_strip.h"
 // Issue #79: servo driver is selectable at build time via Kconfig.
 //   - CONFIG_STACKCHAN_SERVO_SCSCL  (default): GPL-3.0 SCServo_lib
 //   - CONFIG_STACKCHAN_SERVO_FEETECH: MIT clean-room driver vendored at
@@ -504,6 +505,16 @@ private:
     // External I2C bus dedicated to Grove Port A. Exposed through self.i2c.*
     // MCP tools so the gateway can drive attached M5Stack Unit modules.
     i2c_master_bus_handle_t port_a_i2c_bus_;
+    // Port B WS2812 generic strip state (driven from MCP tools self.port_b.ws2812.*).
+    // Independent from the on-board PY32-driven 12-LED base strip (self.led.*),
+    // which uses I2C -> PY32 internal WS2812 engine. The two paths share no
+    // hardware peripheral and no software state; existing self.led.* behaviour
+    // is byte-for-byte unchanged.
+    bool ws2812_ok_ = false;
+    uint16_t ws2812_led_count_ = 0;
+    led_strip_handle_t ws2812_handle_ = nullptr;
+    static constexpr gpio_num_t PORT_B_WS2812_DATA_PIN = GPIO_NUM_9;  // CoreS3 HY2.0-4P (Port B) digital OUTPUT
+    static constexpr uint16_t PORT_B_WS2812_MAX_LEDS = 256;
     Pmic* pmic_;
     Aw9523* aw9523_;
     Ft6336* ft6336_;
@@ -2050,6 +2061,52 @@ private:
         ESP_ERROR_CHECK(i2c_new_master_bus(&port_a_cfg, &port_a_i2c_bus_));
     }
 
+    esp_err_t InitPortBWs2812(uint16_t led_count) {
+        if (ws2812_ok_ && ws2812_led_count_ == led_count) {
+            return ESP_OK;  // idempotent: same led_count is a no-op
+        }
+        if (ws2812_handle_ != nullptr) {
+            led_strip_del(ws2812_handle_);
+            ws2812_handle_ = nullptr;
+            ws2812_ok_ = false;
+            ws2812_led_count_ = 0;
+        }
+
+        led_strip_config_t strip_config = {
+            .strip_gpio_num = PORT_B_WS2812_DATA_PIN,
+            .max_leds = led_count,
+            .led_model = LED_MODEL_WS2812,
+            .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+            .flags = { .invert_out = false },
+        };
+        led_strip_rmt_config_t rmt_config = {
+            .clk_src = RMT_CLK_SRC_DEFAULT,
+            .resolution_hz = 10 * 1000 * 1000,  // 10 MHz, standard WS2812 bit timing
+            .mem_block_symbols = 0,              // 0 = driver default block size
+            .flags = { .with_dma = false },
+        };
+        esp_err_t err = led_strip_new_rmt_device(&strip_config, &rmt_config, &ws2812_handle_);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "port_b.ws2812.init led_strip_new_rmt_device failed: %s",
+                     esp_err_to_name(err));
+            return err;
+        }
+
+        err = led_strip_clear(ws2812_handle_);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "port_b.ws2812.init led_strip_clear failed: %s",
+                     esp_err_to_name(err));
+            led_strip_del(ws2812_handle_);
+            ws2812_handle_ = nullptr;
+            return err;
+        }
+        ws2812_led_count_ = led_count;
+        ws2812_ok_ = true;
+        ESP_LOGI(TAG, "port_b.ws2812 initialized: %u LEDs on GPIO %d",
+                 (unsigned)led_count, (int)PORT_B_WS2812_DATA_PIN);
+        return ESP_OK;
+    }
+
     void I2cDetect() {
         uint8_t address;
         printf("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f\r\n");
@@ -2338,6 +2395,14 @@ private:
         if (v < 0) return 0;
         if (v > 255) return 255;
         return (uint8_t)v;
+    }
+
+    static bool JsonByte(cJSON* item, uint8_t* out) {
+        if (!cJSON_IsNumber(item)) return false;
+        if (item->valuedouble != static_cast<double>(item->valueint)) return false;
+        if (item->valueint < 0 || item->valueint > 255) return false;
+        *out = static_cast<uint8_t>(item->valueint);
+        return true;
     }
 
     // Pack one RGB888 sample into the {lo, hi} RGB565 pair the PY32
@@ -5380,6 +5445,258 @@ private:
                 }
                 ESP_LOGI(TAG, "i2c.write_read addr=0x%02X w=%d r=%d ok=%d",
                          addr, (int)write_buf.size(), n, err == ESP_OK);
+                return root;
+            });
+
+        // ---- Generic Port B WS2812 strip tools ----
+        // Expose the CoreS3 Port B digital output (GPIO 9) as a generic
+        // WS2812-compatible strip driver. This is independent from self.led.*,
+        // which drives the 12-LED base strip through the PY32 I2C path.
+
+        mcp_server.AddTool(
+            "self.port_b.ws2812.init",
+            "Initialize a WS2812-compatible LED strip connected to Port B "
+            "(CoreS3 HY2.0-4P digital OUTPUT, GPIO 9). led_count is the "
+            "number of LEDs in the strip (1..256). This allocates the "
+            "ESP-IDF led_strip RMT backend and must succeed before calling "
+            "self.port_b.ws2812.set_pixel, set_strip, refresh, or clear. "
+            "Repeated calls with the same led_count are no-ops; a different "
+            "led_count tears down and rebuilds the strip handle. Returns "
+            "{\"available\":true,\"ok\":true,\"led_count\":N} on success or "
+            "{\"available\":false,\"ok\":false,\"led_count\":N,"
+            "\"error\":\"ESP_ERR_...\"} on failure. The strip protocol is "
+            "3.3 V CMOS data on GPIO 9; most modern WS2812B-V5/B2 strips "
+            "tolerate this, while older strict 5 V V_IH variants may need "
+            "an external level shifter.",
+            PropertyList({
+                Property("led_count", kPropertyTypeInteger, 1, PORT_B_WS2812_MAX_LEDS)
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                uint16_t led_count = static_cast<uint16_t>(props["led_count"].value<int>());
+                esp_err_t err = InitPortBWs2812(led_count);
+                bool ok = (err == ESP_OK);
+                cJSON_AddBoolToObject(root, "available", ok);
+                cJSON_AddBoolToObject(root, "ok", ok);
+                cJSON_AddNumberToObject(root, "led_count", led_count);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "port_b.ws2812.init led_count=%u ok=%d",
+                         (unsigned)led_count, ok ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.port_b.ws2812.set_pixel",
+            "Set one LED in the Port B WS2812 strip buffer. Call "
+            "self.port_b.ws2812.init first; until init succeeds this returns "
+            "{\"available\":false,\"ok\":false}. index is 0..255, but the "
+            "effective range is 0..(led_count-1); out-of-range requests "
+            "return ok=false with error=\"index out of range\". r, g, and b "
+            "are 0..255. By default the color is buffered only; pass "
+            "refresh=true to immediately latch it to the strip, or call "
+            "self.port_b.ws2812.refresh after several buffered updates. "
+            "Runtime led_strip failures return ok=false with error. Port B "
+            "outputs 3.3 V CMOS data on GPIO 9; older strict 5 V WS2812 "
+            "variants may require a level shifter.",
+            PropertyList({
+                Property("index", kPropertyTypeInteger, 0, PORT_B_WS2812_MAX_LEDS - 1),
+                Property("r", kPropertyTypeInteger, 0, 255),
+                Property("g", kPropertyTypeInteger, 0, 255),
+                Property("b", kPropertyTypeInteger, 0, 255),
+                Property("refresh", kPropertyTypeBoolean, false)
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", ws2812_ok_);
+                if (!ws2812_ok_ || ws2812_handle_ == nullptr) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error",
+                                            "Port B WS2812 strip not initialized.");
+                    return root;
+                }
+                int index = props["index"].value<int>();
+                if (index >= ws2812_led_count_) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "index out of range");
+                    ESP_LOGW(TAG, "port_b.ws2812.set_pixel index=%d out of range (led_count=%u)",
+                             index, (unsigned)ws2812_led_count_);
+                    return root;
+                }
+                uint8_t r = ClampByte(props["r"].value<int>());
+                uint8_t g = ClampByte(props["g"].value<int>());
+                uint8_t b = ClampByte(props["b"].value<int>());
+                bool refresh = props["refresh"].value<bool>();
+                esp_err_t err = led_strip_set_pixel(ws2812_handle_, index, r, g, b);
+                if (err == ESP_OK && refresh) {
+                    err = led_strip_refresh(ws2812_handle_);
+                }
+                bool ok = (err == ESP_OK);
+                cJSON_AddBoolToObject(root, "ok", ok);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "port_b.ws2812.set_pixel index=%d rgb=(%u,%u,%u) refresh=%d ok=%d",
+                         index, r, g, b, refresh ? 1 : 0, ok ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.port_b.ws2812.set_strip",
+            "Set multiple LEDs in the Port B WS2812 strip and refresh "
+            "immediately. Call self.port_b.ws2812.init first; until init "
+            "succeeds this returns {\"available\":false,\"ok\":false}. "
+            "colors is a JSON-encoded array of [r,g,b] integer triples, "
+            "for example \"[[255,0,0],[0,255,0],[0,0,255]]\". Entries are "
+            "applied from LED index 0; up to led_count entries are written, "
+            "extras are ignored, and missing trailing entries preserve the "
+            "previous buffered values. The payload is validate-then-write: "
+            "a malformed entry leaves the strip buffer unchanged. This tool "
+            "auto-refreshes and is the preferred path for animation frames. "
+            "Runtime led_strip failures return ok=false with error. Port B "
+            "outputs 3.3 V CMOS data on GPIO 9; older strict 5 V WS2812 "
+            "variants may require a level shifter.",
+            PropertyList({Property("colors", kPropertyTypeString)}),
+            [this](const PropertyList& props) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", ws2812_ok_);
+                if (!ws2812_ok_ || ws2812_handle_ == nullptr) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddNumberToObject(root, "written", 0);
+                    cJSON_AddStringToObject(root, "error",
+                                            "Port B WS2812 strip not initialized.");
+                    return root;
+                }
+
+                std::string json = props["colors"].value<std::string>();
+                cJSON* arr = cJSON_Parse(json.c_str());
+                if (arr == nullptr || !cJSON_IsArray(arr)) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddNumberToObject(root, "written", 0);
+                    cJSON_AddStringToObject(root, "error",
+                                            "colors must be a JSON array of [r,g,b] triples");
+                    if (arr != nullptr) cJSON_Delete(arr);
+                    return root;
+                }
+
+                int n = cJSON_GetArraySize(arr);
+                if (n > ws2812_led_count_) n = ws2812_led_count_;
+                std::vector<uint8_t> rgb;
+                rgb.reserve(static_cast<size_t>(n) * 3);
+                bool parse_ok = true;
+                for (int i = 0; i < n; i++) {
+                    cJSON* triple = cJSON_GetArrayItem(arr, i);
+                    if (!cJSON_IsArray(triple) || cJSON_GetArraySize(triple) != 3) {
+                        parse_ok = false;
+                        break;
+                    }
+                    uint8_t r = 0, g = 0, b = 0;
+                    if (!JsonByte(cJSON_GetArrayItem(triple, 0), &r) ||
+                        !JsonByte(cJSON_GetArrayItem(triple, 1), &g) ||
+                        !JsonByte(cJSON_GetArrayItem(triple, 2), &b)) {
+                        parse_ok = false;
+                        break;
+                    }
+                    rgb.push_back(r);
+                    rgb.push_back(g);
+                    rgb.push_back(b);
+                }
+                cJSON_Delete(arr);
+
+                if (!parse_ok) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddNumberToObject(root, "written", 0);
+                    cJSON_AddStringToObject(root, "error",
+                                            "Each entry must be a [r,g,b] triple of integers 0..255");
+                    ESP_LOGW(TAG, "port_b.ws2812.set_strip rejected malformed colors payload");
+                    return root;
+                }
+
+                esp_err_t err = ESP_OK;
+                for (int i = 0; i < n; i++) {
+                    size_t offset = static_cast<size_t>(i) * 3;
+                    err = led_strip_set_pixel(ws2812_handle_, i,
+                                              rgb[offset + 0],
+                                              rgb[offset + 1],
+                                              rgb[offset + 2]);
+                    if (err != ESP_OK) {
+                        break;
+                    }
+                }
+                if (err == ESP_OK) {
+                    err = led_strip_refresh(ws2812_handle_);
+                }
+
+                bool ok = (err == ESP_OK);
+                cJSON_AddBoolToObject(root, "ok", ok);
+                cJSON_AddNumberToObject(root, "written", ok ? n : 0);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "port_b.ws2812.set_strip written=%d ok=%d",
+                         ok ? n : 0, ok ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.port_b.ws2812.refresh",
+            "Refresh the Port B WS2812 strip, latching the current buffered "
+            "colors out on CoreS3 HY2.0-4P digital OUTPUT GPIO 9. Call "
+            "self.port_b.ws2812.init first; until init succeeds this returns "
+            "{\"available\":false,\"ok\":false}. Use this after one or more "
+            "self.port_b.ws2812.set_pixel calls made with refresh=false. "
+            "Runtime led_strip failures return ok=false with error. Port B "
+            "outputs 3.3 V CMOS data; older strict 5 V WS2812 variants may "
+            "require a level shifter.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", ws2812_ok_);
+                if (!ws2812_ok_ || ws2812_handle_ == nullptr) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error",
+                                            "Port B WS2812 strip not initialized.");
+                    return root;
+                }
+                esp_err_t err = led_strip_refresh(ws2812_handle_);
+                bool ok = (err == ESP_OK);
+                cJSON_AddBoolToObject(root, "ok", ok);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "port_b.ws2812.refresh ok=%d", ok ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.port_b.ws2812.clear",
+            "Turn off every LED in the Port B WS2812 strip and refresh "
+            "immediately on CoreS3 HY2.0-4P digital OUTPUT GPIO 9. Call "
+            "self.port_b.ws2812.init first; until init succeeds this returns "
+            "{\"available\":false,\"ok\":false}. This is equivalent to "
+            "self.port_b.ws2812.set_strip with an all-zero array of length "
+            "led_count, and it clears the driver's sticky per-pixel buffer. "
+            "Runtime led_strip failures return ok=false with error. Port B "
+            "outputs 3.3 V CMOS data; older strict 5 V WS2812 variants may "
+            "require a level shifter.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", ws2812_ok_);
+                if (!ws2812_ok_ || ws2812_handle_ == nullptr) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error",
+                                            "Port B WS2812 strip not initialized.");
+                    return root;
+                }
+                esp_err_t err = led_strip_clear(ws2812_handle_);
+                bool ok = (err == ESP_OK);
+                cJSON_AddBoolToObject(root, "ok", ok);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "port_b.ws2812.clear ok=%d", ok ? 1 : 0);
                 return root;
             });
 
