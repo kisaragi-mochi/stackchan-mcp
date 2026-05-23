@@ -172,7 +172,7 @@ jobs:
       # "Verify opus.dll SHA256" step below, and commit. An empty
       # value intentionally fails the comparison so a missing pin
       # cannot silently ship.
-      EXPECTED_OPUS_DLL_SHA256: ""
+      EXPECTED_OPUS_DLL_SHA256: "99cd252b09891398cefab997be8cdb1cebc9a40cafa1382c88ad32069560a864"
 
     steps:
       - name: Checkout repository
