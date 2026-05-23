@@ -206,7 +206,6 @@ documented-only.
 
 ### Gateway
 
-<<<<<<< HEAD
 - Added: `send_pcm_audio(gateway, pcm, source_rate=...)` helper
   extracted from `synthesize_and_send`'s encode-and-push back-half.
   External producers — HTTP PCM bridges, sound-effect players,
@@ -218,8 +217,7 @@ documented-only.
   the existing `resample_pcm16_linear` helper, so producers at
   non-device rates work without manual resampling. Contributed via
   [PR #TBD-A1](https://github.com/kisaragi-mochi/stackchan-mcp/pull/TBD-A1).
-||||||| parent of bb37747 (docs(changelog): add Unreleased entries for PR-E1 (dynamic AvatarSet))
-=======
+
 - Added: `load_avatar_set` MCP tool + supporting HTTP staging /
   WebSocket fetch protocol for the firmware's dynamic AvatarSet
   pipeline (PR-E1 firmware side). The gateway stages a raw RGB565
@@ -229,7 +227,6 @@ documented-only.
   filesystem `archive_path` rather than inline bytes so the MCP JSON
   transport stays free of multi-MB base64 payloads. Contributed via
   [PR #210](https://github.com/kisaragi-mochi/stackchan-mcp/pull/210).
->>>>>>> bb37747 (docs(changelog): add Unreleased entries for PR-E1 (dynamic AvatarSet))
 
 - Fixed: `pip install stackchan-mcp[tts]` did not work out-of-the-box
   on Windows because `opuslib` calls `find_library("opus")`, which on
