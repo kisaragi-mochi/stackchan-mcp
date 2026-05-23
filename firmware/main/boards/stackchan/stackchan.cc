@@ -6054,7 +6054,18 @@ public:
         if (strcmp(mode_j->valuestring, "layered") == 0) {
             mode_enum = AvatarSet::Mode::kLayered;
         } else if (strcmp(mode_j->valuestring, "matrix") == 0) {
-            mode_enum = AvatarSet::Mode::kMatrix;
+            // Matrix-mode rendering is wired in PR #211 (PR-E2). This PR
+            // (PR-E1) exposes only the layered render path: AvatarImageFor()
+            // consumes the dynamic set for kLayered only, and the matrix
+            // lookup (face × eyes × mouth) is not present yet. Accepting a
+            // matrix load here would succeed at AdoptOwnedBuffer but never
+            // render — the display lookup falls through to the static
+            // avatar_images tables — handing the gateway a false success
+            // signal. Reject explicitly until #211 wires the matrix lookup
+            // and lifts this guard.
+            ESP_LOGW(TAG, "OnAvatarSetFetch: matrix mode not supported until PR #211");
+            SendAvatarSetLoadedError(req_checksum, "matrix_mode_unsupported");
+            return;
         } else {
             ESP_LOGW(TAG, "OnAvatarSetFetch: unknown mode '%s'", mode_j->valuestring);
             SendAvatarSetLoadedError(req_checksum, "unknown_mode");
