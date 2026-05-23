@@ -8,6 +8,7 @@
 #include <esp_log.h>
 
 #include "board.h"
+#include "display/display.h"
 
 #define TAG "AvatarSetFetcher"
 
@@ -115,7 +116,24 @@ void AvatarSetFetcher::Fetch(
     // Hand ownership to AvatarSet. On success it owns `buffer` and will
     // free it on the next Unload() / destruction; on failure ownership
     // stays with us and we must free it ourselves.
-    const bool loaded = target_set.AdoptOwnedBuffer(mode, buffer, expected_size);
+    //
+    // AdoptOwnedBuffer frees the previously adopted PSRAM buffer and
+    // rewrites the lv_image_dsc_t descriptors backing the on-screen avatar.
+    // OnAvatarSetFetch quiesced the autonomous LVGL writers (lipsync / mouth
+    // sequence / blink timers) before spawning this task, but that only
+    // blocks new set_src writes — the LVGL display task can still be reading
+    // the current descriptor source. Hold the display lock across the swap so
+    // a concurrent render can't race into a half-freed buffer or a
+    // half-cleared descriptor.
+    auto* display = board.GetDisplay();
+    bool loaded;
+    if (display != nullptr) {
+        DisplayLockGuard lock(display);
+        loaded = target_set.AdoptOwnedBuffer(mode, buffer, expected_size);
+    } else {
+        // Headless board (NoDisplay): no LVGL reader to race against.
+        loaded = target_set.AdoptOwnedBuffer(mode, buffer, expected_size);
+    }
     if (!loaded) {
         heap_caps_free(buffer);
         on_complete(false, actual_sha256, "load_failed");
