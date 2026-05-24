@@ -29,18 +29,154 @@ def test_wildcard_host_advertises_all_usable_non_loopback_ipv4(
     monkeypatch.setattr(
         mdns,
         "_iter_ifaddr_ipv4_addresses",
-        lambda: ["127.0.0.1", "192.0.2.10", "0.0.0.0"],
+        lambda: [("127.0.0.1", 8), ("192.0.2.10", 24), ("0.0.0.0", 24)],
     )
     monkeypatch.setattr(
         mdns,
         "_iter_socket_ipv4_addresses",
-        lambda: ["192.0.2.10", "10.0.0.5"],
+        lambda: [("192.0.2.10", None), ("10.0.0.5", None)],
     )
 
     advertisement = build_advertisement(host="0.0.0.0", port=8765)
 
     assert advertisement is not None
-    assert advertisement.parsed_addresses == ["192.0.2.10", "10.0.0.5"]
+    # 10.0.0.5 is RFC1918 (tier 1) and sorts ahead of the public 192.0.2.10.
+    assert advertisement.parsed_addresses == ["10.0.0.5", "192.0.2.10"]
+
+
+def test_rfc1918_addresses_are_advertised_before_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mdns,
+        "_iter_ifaddr_ipv4_addresses",
+        lambda: [
+            ("203.0.113.7", 24),  # public, tier 2
+            ("192.168.0.10", 24),  # RFC1918, tier 1
+            ("10.1.2.3", 8),  # RFC1918, tier 1
+            ("172.16.5.6", 12),  # RFC1918, tier 1
+        ],
+    )
+    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
+
+    advertisement = build_advertisement(host="0.0.0.0", port=8765)
+
+    assert advertisement is not None
+    # All kept; the three private addresses move ahead of the public one, and
+    # within each tier the original enumeration order is preserved.
+    assert advertisement.parsed_addresses == [
+        "192.168.0.10",
+        "10.1.2.3",
+        "172.16.5.6",
+        "203.0.113.7",
+    ]
+
+
+def test_cgnat_address_is_kept_but_ordered_after_rfc1918(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Reproduces the real-device scenario from the issue: a CGNAT address
+    # (100.64.0.0/10, here as a /32 host address) must remain advertised but be
+    # tried only after the reachable LAN address.
+    monkeypatch.setattr(
+        mdns,
+        "_iter_ifaddr_ipv4_addresses",
+        lambda: [
+            ("100.64.10.20", 32),  # CGNAT, tier 2 (must NOT be dropped)
+            ("192.168.0.10", 24),  # RFC1918 LAN, tier 1
+        ],
+    )
+    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
+
+    advertisement = build_advertisement(host="0.0.0.0", port=8765)
+
+    assert advertisement is not None
+    assert advertisement.parsed_addresses == ["192.168.0.10", "100.64.10.20"]
+
+
+def test_network_and_broadcast_addresses_are_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mdns,
+        "_iter_ifaddr_ipv4_addresses",
+        lambda: [
+            ("192.168.0.0", 24),  # network address -> excluded
+            ("192.168.0.255", 24),  # broadcast address -> excluded
+            ("192.168.0.10", 24),  # host address -> kept
+        ],
+    )
+    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
+
+    advertisement = build_advertisement(host="0.0.0.0", port=8765)
+
+    assert advertisement is not None
+    assert advertisement.parsed_addresses == ["192.168.0.10"]
+
+
+def test_host_prefixes_are_not_treated_as_network_or_broadcast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # /31 and /32 have no distinct network/broadcast address; a legitimate host
+    # IP on such a prefix must not be dropped.
+    monkeypatch.setattr(
+        mdns,
+        "_iter_ifaddr_ipv4_addresses",
+        lambda: [("192.168.5.0", 32), ("10.0.0.0", 31)],
+    )
+    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
+
+    advertisement = build_advertisement(host="0.0.0.0", port=8765)
+
+    assert advertisement is not None
+    assert advertisement.parsed_addresses == ["192.168.5.0", "10.0.0.0"]
+
+
+def test_addresses_without_prefix_are_not_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The socket source carries no prefix; a ".0"-looking address from it cannot
+    # be classified as a network address and must be kept (zero-regression).
+    monkeypatch.setattr(mdns, "_iter_ifaddr_ipv4_addresses", lambda: [])
+    monkeypatch.setattr(
+        mdns,
+        "_iter_socket_ipv4_addresses",
+        lambda: [("192.168.0.0", None), ("192.168.0.10", None)],
+    )
+
+    advertisement = build_advertisement(host="0.0.0.0", port=8765)
+
+    assert advertisement is not None
+    assert advertisement.parsed_addresses == ["192.168.0.0", "192.168.0.10"]
+
+
+def test_mixed_tier_ordering_preserves_within_tier_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ifaddr source (with prefixes) is enumerated before the socket source; the
+    # stable sort must keep that combined order within each tier.
+    monkeypatch.setattr(
+        mdns,
+        "_iter_ifaddr_ipv4_addresses",
+        lambda: [("198.51.100.4", 24), ("192.168.1.2", 24)],
+    )
+    monkeypatch.setattr(
+        mdns,
+        "_iter_socket_ipv4_addresses",
+        lambda: [("203.0.113.9", None), ("10.5.5.5", None)],
+    )
+
+    advertisement = build_advertisement(host="0.0.0.0", port=8765)
+
+    assert advertisement is not None
+    # tier 1 (private), original order: 192.168.1.2 then 10.5.5.5;
+    # tier 2 (other), original order: 198.51.100.4 then 203.0.113.9.
+    assert advertisement.parsed_addresses == [
+        "192.168.1.2",
+        "10.5.5.5",
+        "198.51.100.4",
+        "203.0.113.9",
+    ]
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])

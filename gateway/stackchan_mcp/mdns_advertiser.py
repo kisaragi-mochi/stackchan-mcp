@@ -16,6 +16,20 @@ SERVICE_NAME = f"{DEFAULT_INSTANCE}.{SERVICE_TYPE}"
 FALLBACK_SERVICE_HOSTNAME = f"{DEFAULT_INSTANCE}.local."
 TXT_VERSION = "1"
 
+# Private (RFC1918) IPv4 ranges. Addresses inside these ranges are the most
+# likely to be reachable from a same-LAN device, so they are advertised first.
+# Anything outside is still advertised, just ordered after these.
+_PRIVATE_NETWORKS = (
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+)
+
+# Only prefixes shorter than /31 have a distinct network and broadcast address.
+# A /31 (point-to-point) or /32 (host) address must never be treated as a
+# network or broadcast address, since that would drop a legitimate host IP.
+_MAX_NETWORK_BROADCAST_PREFIX = 30
+
 
 @dataclass(frozen=True)
 class MdnsAdvertisement:
@@ -50,6 +64,65 @@ def _is_usable_ipv4(address: str) -> bool:
     )
 
 
+def _is_network_or_broadcast_address(address: str, prefix: int | None) -> bool:
+    """Return ``True`` when ``address`` is the subnet network or broadcast address.
+
+    Requires the subnet prefix: without it (e.g. the socket-based source) the
+    network/broadcast endpoints cannot be derived, so callers pass ``None`` and
+    the address is kept. Host prefixes (/31, /32) have no distinct network or
+    broadcast address and are never excluded here.
+    """
+    if prefix is None or prefix > _MAX_NETWORK_BROADCAST_PREFIX:
+        return False
+    try:
+        interface = ipaddress.ip_interface(f"{address}/{prefix}")
+    except ValueError:
+        return False
+    network = interface.network
+    return interface.ip in (network.network_address, network.broadcast_address)
+
+
+def _is_private_lan_address(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return any(ip in network for network in _PRIVATE_NETWORKS)
+
+
+def _lan_reachability_tier(address: str) -> int:
+    """Sort key: private (RFC1918) LAN addresses first, everything else after.
+
+    Returns a 2-value tier so a stable sort preserves the original enumeration
+    order within each tier.
+    """
+    return 0 if _is_private_lan_address(address) else 1
+
+
+def _select_advertised_addresses(
+    candidates: list[tuple[str, int | None]],
+) -> list[str]:
+    """Filter, de-duplicate and order candidate addresses for advertisement.
+
+    Excludes only clearly-unusable addresses (loopback/multicast/unspecified via
+    :func:`_is_usable_ipv4`, plus network/broadcast addresses when a prefix is
+    known). All remaining addresses are kept and ordered by LAN-reachability
+    likelihood (RFC1918 private ranges first) using a stable sort, so addresses
+    a same-LAN device can reach are tried before overlay/global/edge-case ones.
+    """
+    seen: set[str] = set()
+    usable: list[str] = []
+    for address, prefix in candidates:
+        if address in seen or not _is_usable_ipv4(address):
+            continue
+        if _is_network_or_broadcast_address(address, prefix):
+            continue
+        seen.add(address)
+        usable.append(address)
+    usable.sort(key=_lan_reachability_tier)
+    return usable
+
+
 def _is_wildcard_host(host: str) -> bool:
     try:
         ip = ipaddress.ip_address(host)
@@ -71,22 +144,34 @@ def _build_service_hostname() -> str:
     return f"{safe_label}.local."
 
 
-def _iter_ifaddr_ipv4_addresses() -> list[str]:
+def _iter_ifaddr_ipv4_addresses() -> list[tuple[str, int | None]]:
+    """Enumerate host IPv4 addresses with their subnet prefix length.
+
+    The prefix (``ip.network_prefix``) lets the caller drop network/broadcast
+    addresses; it is ``None`` only if ifaddr reports a non-integer prefix.
+    """
     try:
         import ifaddr
     except ImportError:
         return []
 
-    addresses: list[str] = []
+    addresses: list[tuple[str, int | None]] = []
     for adapter in ifaddr.get_adapters():
         for ip in adapter.ips:
             if not isinstance(ip.ip, str):
                 continue
-            addresses.append(ip.ip)
+            prefix = ip.network_prefix if isinstance(ip.network_prefix, int) else None
+            addresses.append((ip.ip, prefix))
     return addresses
 
 
-def _iter_socket_ipv4_addresses() -> list[str]:
+def _iter_socket_ipv4_addresses() -> list[tuple[str, int | None]]:
+    """Enumerate host IPv4 addresses via socket resolution.
+
+    This source carries no subnet prefix, so each entry pairs the address with
+    ``None``; network/broadcast addresses therefore cannot be (and are not)
+    excluded from this source.
+    """
     addresses: set[str] = set()
     hostnames = {socket.gethostname(), socket.getfqdn()}
 
@@ -109,18 +194,13 @@ def _iter_socket_ipv4_addresses() -> list[str]:
     finally:
         sock.close()
 
-    return sorted(addresses)
+    return [(address, None) for address in sorted(addresses)]
 
 
 def _enumerate_usable_ipv4_addresses() -> list[str]:
-    seen: set[str] = set()
-    usable: list[str] = []
-    for address in [*_iter_ifaddr_ipv4_addresses(), *_iter_socket_ipv4_addresses()]:
-        if address in seen or not _is_usable_ipv4(address):
-            continue
-        seen.add(address)
-        usable.append(address)
-    return usable
+    return _select_advertised_addresses(
+        [*_iter_ifaddr_ipv4_addresses(), *_iter_socket_ipv4_addresses()]
+    )
 
 
 def _resolve_concrete_host_ipv4_addresses(host: str) -> list[str]:
@@ -135,14 +215,9 @@ def _resolve_concrete_host_ipv4_addresses(host: str) -> list[str]:
     else:
         addresses = [str(ip)]
 
-    seen: set[str] = set()
-    usable: list[str] = []
-    for address in addresses:
-        if address in seen or not _is_usable_ipv4(address):
-            continue
-        seen.add(address)
-        usable.append(address)
-    return usable
+    # A concrete HOST carries no subnet prefix, so network/broadcast addresses
+    # cannot be derived; pair each address with ``None`` to keep them.
+    return _select_advertised_addresses([(address, None) for address in addresses])
 
 
 def build_advertisement(
