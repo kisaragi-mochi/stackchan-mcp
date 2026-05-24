@@ -208,6 +208,20 @@ documented-only.
 
 ### Gateway
 
+- Fixed: mDNS now advertises the host's IPv4 addresses ordered by LAN
+  reachability instead of in interface-enumeration order. On a host with
+  multiple interfaces (a CGNAT `100.64.0.0/10` overlay address, several LAN
+  segments), the firmware tries candidates in advertised order and could spend
+  several seconds timing out on an unreachable candidate before reaching a
+  LAN-reachable one. Addresses are now stably sorted so RFC1918 private ranges
+  (`192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`) are tried first and
+  everything else follows; no reachable address is dropped. Subnet network and
+  broadcast addresses (e.g. a `.0` network address or `.255`-style broadcast),
+  which are never valid host endpoints, are now excluded when the interface
+  prefix is known — guarded so `/31` and `/32` host addresses are never
+  dropped. Contributed via
+  [PR #232](https://github.com/kisaragi-mochi/stackchan-mcp/pull/232).
+
 - Added: the gateway now advertises `_stackchan-mcp._tcp.local.` over mDNS/DNS-SD by default so fresh firmware can discover the WebSocket endpoint on the local network. A new `--no-mdns` flag disables advertising.
 
 - Added: `send_pcm_audio(gateway, pcm, source_rate=...)` helper
