@@ -29,6 +29,7 @@ set(SOURCES "audio/audio_codec.cc"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
+            "protocols/mdns_gateway_discovery.cc"
             "mcp_server.cc"
             "system_info.cc"
             "application.cc"
@@ -1022,6 +1023,9 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
         espressif__touch_slider_sensor
         espressif__touch_button_sensor
     )
+endif()
+if(CONFIG_STACKCHAN_MDNS_DISCOVERY)
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA espressif__mdns)
 endif()
 
 idf_component_register(SRCS ${SOURCES}

@@ -5,6 +5,57 @@ import pytest
 from stackchan_mcp.gateway import Gateway, get_gateway
 
 
+def _patch_gateway_network(monkeypatch: pytest.MonkeyPatch, gw: Gateway) -> list[tuple]:
+    """Replace real listeners with fakes so gateway lifecycle tests avoid bind()."""
+    import stackchan_mcp.gateway as gw_mod
+
+    calls: list[tuple] = []
+
+    class FakeEsp32:
+        def __init__(self) -> None:
+            self._server = None
+
+        async def start(
+            self,
+            host: str,
+            port: int,
+            *,
+            vision_url: str,
+            vision_token: str,
+        ) -> None:
+            self._server = object()
+            calls.append(("esp32_start", host, port, vision_url, vision_token))
+
+        async def stop(self) -> None:
+            self._server = None
+            calls.append(("esp32_stop",))
+
+    class FakeAppRunner:
+        def __init__(self, app) -> None:
+            self.app = app
+
+        async def setup(self) -> None:
+            calls.append(("http_setup",))
+
+        async def cleanup(self) -> None:
+            calls.append(("http_cleanup",))
+
+    class FakeTCPSite:
+        def __init__(self, runner, host: str, port: int) -> None:
+            self.runner = runner
+            self.host = host
+            self.port = port
+
+        async def start(self) -> None:
+            calls.append(("http_start", self.host, self.port))
+
+    gw.esp32 = FakeEsp32()
+    monkeypatch.setattr(gw_mod, "create_capture_app", lambda capture_token="": object())
+    monkeypatch.setattr(gw_mod.web, "AppRunner", FakeAppRunner)
+    monkeypatch.setattr(gw_mod.web, "TCPSite", FakeTCPSite)
+    return calls
+
+
 def test_get_gateway_singleton():
     """get_gateway returns the same instance."""
     # Reset singleton for test isolation
@@ -69,9 +120,126 @@ async def test_gateway_start_stop(monkeypatch):
     monkeypatch.setenv("CAPTURE_PORT", "0")  # Random port
 
     gw = Gateway()
-    await gw.start()
+    calls = _patch_gateway_network(monkeypatch, gw)
+
+    await gw.start(advertise_mdns=False)
     assert gw._running is True
     assert gw.esp32._server is not None
+    assert ("http_start", "0.0.0.0", 0) in calls
 
     await gw.stop()
     assert gw._running is False
+    assert ("http_cleanup",) in calls
+    assert ("esp32_stop",) in calls
+
+
+@pytest.mark.asyncio
+async def test_gateway_start_advertises_mdns_by_default(monkeypatch):
+    """Gateway.start() starts mDNS advertising after listeners are ready."""
+    import stackchan_mcp.gateway as gw_mod
+
+    calls = []
+
+    class FakeAdvertiser:
+        async def start(self, *, host: str, port: int, path: str = "/") -> None:
+            calls.append(("start", host, port, path))
+
+        async def stop(self) -> None:
+            calls.append(("stop",))
+
+    monkeypatch.setenv("WS_PORT", "0")
+    monkeypatch.setenv("CAPTURE_PORT", "0")
+    monkeypatch.setattr(gw_mod, "MdnsAdvertiser", FakeAdvertiser)
+
+    gw = Gateway()
+    _patch_gateway_network(monkeypatch, gw)
+    await gw.start()
+
+    assert calls == [("start", "0.0.0.0", 0, "/")]
+    assert gw._running is True
+
+    await gw.stop()
+    assert calls == [("start", "0.0.0.0", 0, "/"), ("stop",)]
+
+
+@pytest.mark.asyncio
+async def test_gateway_start_can_disable_mdns(monkeypatch):
+    """Gateway.start(advertise_mdns=False) skips mDNS advertising."""
+    import stackchan_mcp.gateway as gw_mod
+
+    class FailAdvertiser:
+        def __init__(self) -> None:
+            raise AssertionError("MdnsAdvertiser should not be constructed")
+
+    monkeypatch.setenv("WS_PORT", "0")
+    monkeypatch.setenv("CAPTURE_PORT", "0")
+    monkeypatch.setattr(gw_mod, "MdnsAdvertiser", FailAdvertiser)
+
+    gw = Gateway()
+    _patch_gateway_network(monkeypatch, gw)
+    await gw.start(advertise_mdns=False)
+
+    assert gw._mdns_advertiser is None
+
+    await gw.stop()
+
+
+@pytest.mark.asyncio
+async def test_gateway_mdns_start_failure_does_not_abort(
+    monkeypatch, caplog
+):
+    """mDNS registration failure logs a warning but gateway startup continues."""
+    import stackchan_mcp.gateway as gw_mod
+
+    class FailingAdvertiser:
+        async def start(self, *, host: str, port: int, path: str = "/") -> None:
+            raise RuntimeError("mock mdns failure")
+
+        async def stop(self) -> None:
+            raise AssertionError("failed start should not leave advertiser active")
+
+    monkeypatch.setenv("WS_PORT", "0")
+    monkeypatch.setenv("CAPTURE_PORT", "0")
+    monkeypatch.setattr(gw_mod, "MdnsAdvertiser", FailingAdvertiser)
+
+    gw = Gateway()
+    _patch_gateway_network(monkeypatch, gw)
+    with caplog.at_level("WARNING"):
+        await gw.start()
+
+    assert gw._running is True
+    assert gw._mdns_advertiser is None
+    assert "mDNS advertisement failed" in caplog.text
+
+    await gw.stop()
+
+
+@pytest.mark.asyncio
+async def test_gateway_mdns_stop_failure_does_not_mask_shutdown(
+    monkeypatch, caplog
+):
+    """mDNS unregister failure logs a warning and shutdown still completes."""
+    import stackchan_mcp.gateway as gw_mod
+
+    class FailingStopAdvertiser:
+        async def start(self, *, host: str, port: int, path: str = "/") -> None:
+            return None
+
+        async def stop(self) -> None:
+            raise RuntimeError("mock mdns stop failure")
+
+    monkeypatch.setenv("WS_PORT", "0")
+    monkeypatch.setenv("CAPTURE_PORT", "0")
+    monkeypatch.setattr(gw_mod, "MdnsAdvertiser", FailingStopAdvertiser)
+
+    gw = Gateway()
+    _patch_gateway_network(monkeypatch, gw)
+    await gw.start()
+
+    with caplog.at_level("WARNING"):
+        await gw.stop()
+
+    assert gw._running is False
+    assert gw._mdns_advertiser is None
+    assert gw.esp32._server is None
+    assert "mDNS advertisement shutdown failed" in caplog.text

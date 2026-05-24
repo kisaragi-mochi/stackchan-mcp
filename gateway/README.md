@@ -75,6 +75,10 @@ Default ports:
 - WebSocket (ESP32 -> gateway): `0.0.0.0:8765`
 - HTTP capture (ESP32 -> gateway): `0.0.0.0:8766`
 
+By default, the gateway advertises the WebSocket endpoint as
+`_stackchan-mcp._tcp.local.` via mDNS/DNS-SD so fresh firmware can discover it
+on the local LAN. Run `stackchan-mcp --no-mdns` to disable this advertisement.
+
 For non-LAN setups, see [`../docs/remote-access.md`](../docs/remote-access.md)
 for the Tailscale Funnel flow.
 

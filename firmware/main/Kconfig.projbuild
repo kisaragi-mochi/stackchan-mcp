@@ -93,6 +93,20 @@ config FORCE_DEFAULT_WEBSOCKET_URL
         Default disabled to preserve NVS-priority semantics for end users
         who configure the URL/token via runtime tooling.
 
+config STACKCHAN_MDNS_DISCOVERY
+    bool "Discover stackchan-mcp gateway with mDNS"
+    default y if BOARD_TYPE_STACKCHAN
+    default n
+    help
+        When enabled, firmware queries the local network for
+        _stackchan-mcp._tcp.local. when NVS websocket.url is empty.
+        A discovered gateway is tried before CONFIG_DEFAULT_WEBSOCKET_URL,
+        while websocket.fallback_url and CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL
+        remain later fallback candidates.
+
+        Disable this option to compile out the mDNS dependency and require
+        explicit NVS/Kconfig WebSocket URL configuration.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE

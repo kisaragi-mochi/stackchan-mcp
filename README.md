@@ -132,7 +132,35 @@ safe and matches CI.
 
 After flashing, WiFi configuration happens on first boot — connect from a smartphone to the setup UI (the xiaozhi-esp32 standard flow).
 
+On a local network, the gateway advertises `_stackchan-mcp._tcp.local.`
+by default. Fresh firmware can use that mDNS/DNS-SD record to find the
+WebSocket endpoint automatically when no primary URL has been saved yet.
+
 ### Configuring the WebSocket gateway URL and auth token
+
+Primary URL resolution order:
+
+1. NVS `websocket.url`
+2. mDNS `_stackchan-mcp._tcp.local.` when `CONFIG_STACKCHAN_MDNS_DISCOVERY`
+   is enabled and the primary NVS URL is empty
+3. `CONFIG_DEFAULT_WEBSOCKET_URL`
+4. Empty/fail with a boot log error
+
+Existing `websocket.fallback_url` and
+`CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL` candidates are still tried after the
+primary candidate path above. `CONFIG_FORCE_DEFAULT_WEBSOCKET_URL=y` remains
+an explicit exception for stale-NVS recovery: a non-empty Kconfig URL wins and
+mDNS discovery is skipped.
+
+The gateway advertises mDNS by default; run `stackchan-mcp --no-mdns` to
+disable advertisement. To compile out firmware discovery, set
+`CONFIG_STACKCHAN_MDNS_DISCOVERY=n`. Discovery requires UDP multicast on the
+local LAN, and some routers or VLANs block it. When multiple gateways are
+visible, the firmware picks the first supported gateway service, tries each
+usable IPv4 address from that service, and logs the selected instance, host,
+address list, and port. mDNS only discovers the URL;
+`websocket.token` / `CONFIG_DEFAULT_WEBSOCKET_TOKEN` still control
+authentication.
 
 The firmware reads these NVS keys for the gateway connection:
 

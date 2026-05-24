@@ -14,6 +14,7 @@ from aiohttp import web
 
 from .capture_server import create_capture_app, stage_avatar_set
 from .esp32_client import ESP32Manager
+from .mdns_advertiser import MdnsAdvertiser
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class Gateway:
         # Phase 4.5 avatar: kept so load_avatar_set can stage payloads
         # against the same web.Application that serves /avatar_set/{id}.
         self._capture_app: web.Application | None = None
+        self._mdns_advertiser: MdnsAdvertiser | None = None
 
     @property
     def vision_url(self) -> str:
@@ -77,7 +79,7 @@ class Gateway:
             or ""
         )
 
-    async def start(self) -> None:
+    async def start(self, *, advertise_mdns: bool = True) -> None:
         """Start the ESP32 WebSocket server and HTTP capture server."""
         host = os.getenv("HOST", "0.0.0.0")
         ws_port = int(os.getenv("WS_PORT", os.getenv("PORT", "8765")))
@@ -100,6 +102,16 @@ class Gateway:
         site = web.TCPSite(self._http_runner, host, capture_port)
         await site.start()
 
+        if advertise_mdns:
+            self._mdns_advertiser = MdnsAdvertiser()
+            try:
+                await self._mdns_advertiser.start(host=host, port=ws_port, path="/")
+            except Exception as exc:  # pragma: no cover - exact zeroconf errors vary by host
+                logger.warning("mDNS advertisement failed: %s", exc)
+                self._mdns_advertiser = None
+        else:
+            self._mdns_advertiser = None
+
         self._running = True
         logger.info(
             "Gateway started: WS on %s:%d, capture on %s:%d, vision_url=%s",
@@ -109,6 +121,13 @@ class Gateway:
     async def stop(self) -> None:
         """Stop the gateway."""
         self._running = False
+        if self._mdns_advertiser:
+            try:
+                await self._mdns_advertiser.stop()
+            except Exception as exc:  # pragma: no cover - exact zeroconf errors vary by host
+                logger.warning("mDNS advertisement shutdown failed: %s", exc)
+            finally:
+                self._mdns_advertiser = None
         if self._http_runner:
             await self._http_runner.cleanup()
             self._http_runner = None

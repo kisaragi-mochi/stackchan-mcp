@@ -54,6 +54,8 @@ documented-only.
   Contributed via
   [PR #225](https://github.com/kisaragi-mochi/stackchan-mcp/pull/225).
 
+- Added: when the primary NVS `websocket.url` is empty, the firmware can discover a local stackchan-mcp gateway via mDNS before falling back to `CONFIG_DEFAULT_WEBSOCKET_URL`. The feature is controlled by `CONFIG_STACKCHAN_MDNS_DISCOVERY` and keeps the existing WebSocket candidate fallback loop.
+
 - Added: `self.port_b.ws2812.{init, set_pixel, set_strip, refresh, clear}`
   MCP tools — five generic tools to drive any WS2812-compatible LED
   strip attached to the official kit's Port B (CoreS3 HY2.0-4P digital
@@ -205,6 +207,8 @@ documented-only.
   [PR #186](https://github.com/kisaragi-mochi/stackchan-mcp/pull/186).
 
 ### Gateway
+
+- Added: the gateway now advertises `_stackchan-mcp._tcp.local.` over mDNS/DNS-SD by default so fresh firmware can discover the WebSocket endpoint on the local network. A new `--no-mdns` flag disables advertising.
 
 - Added: `send_pcm_audio(gateway, pcm, source_rate=...)` helper
   extracted from `synthesize_and_send`'s encode-and-push back-half.

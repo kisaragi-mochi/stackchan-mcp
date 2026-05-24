@@ -72,6 +72,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "non-zero if at least one blocking issue is found."
         ),
     )
+    parser.add_argument(
+        "--no-mdns",
+        action="store_true",
+        help="Disable mDNS/DNS-SD advertisement for the WebSocket endpoint.",
+    )
     return parser
 
 
@@ -543,14 +548,14 @@ def _run_preflight() -> int:
     return 1
 
 
-async def _run() -> None:
+async def _run(*, advertise_mdns: bool = True) -> None:
     """Start both the ESP32 WebSocket server and the stdio MCP server."""
     from .gateway import get_gateway
     from .stdio_server import run_stdio_server
 
     gateway = get_gateway()
 
-    await gateway.start()
+    await gateway.start(advertise_mdns=advertise_mdns)
     logger.info("Gateway started, waiting for ESP32 connections...")
 
     try:
@@ -586,7 +591,7 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    asyncio.run(_run())
+    asyncio.run(_run(advertise_mdns=not args.no_mdns))
 
 
 if __name__ == "__main__":
