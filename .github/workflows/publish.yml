@@ -121,7 +121,12 @@ jobs:
         working-directory: gateway
         run: uv run pytest
 
-      - name: Build distributions
+      - name: Build distributions (sdist + py3-none-any wheel)
+        # The Ubuntu runner does not place `opus.dll` under
+        # `stackchan_mcp/_libs/`, so this build produces a sdist plus a
+        # `py3-none-any` wheel that ships with `SOURCES.md` but
+        # without the native binary. The Windows-only wheel is built
+        # by `build-windows-wheel` below.
         working-directory: gateway
         run: uv build
 
@@ -132,13 +137,167 @@ jobs:
       - name: Upload distributions
         uses: actions/upload-artifact@v4
         with:
-          name: python-package-distributions
+          name: python-package-distributions-linux
           path: gateway/dist/
+          retention-days: 7
+
+  build-windows-wheel:
+    name: Build win_amd64 wheel
+    needs: build
+    # The Windows wheel only differs from the Ubuntu build by the
+    # bundled `opus.dll`, but it must be built on a Windows runner so
+    # vcpkg can produce a binary that matches the runtime ABI users
+    # will install onto. The job is gated on the Ubuntu build passing
+    # so lint / pytest failures stop the pipeline before this much
+    # slower runner spins up.
+    runs-on: windows-latest
+
+    permissions:
+      contents: read
+
+    env:
+      # Pinned vcpkg release tag. Both the Opus port script and the
+      # underlying source tarball SHA come from this tag, so the
+      # supply-chain story for the bundled opus.dll is reproducible
+      # from CI history alone — independent of master drift or
+      # runner-image rev. Bump only after reviewing vcpkg's Opus port
+      # for security-relevant changes between tags.
+      # https://github.com/microsoft/vcpkg/releases
+      # Pinned to 2026.04.27 → Opus 1.5.2 port-version 1.
+      VCPKG_PIN: "2026.04.27"
+      # Expected SHA256 of the produced opus.dll. Re-derived only when
+      # VCPKG_PIN or the windows-latest runner-image MSVC version
+      # changes. To rotate: run this workflow via `workflow_dispatch`
+      # (or watch the next tag run), copy the actual hash from the
+      # "Verify opus.dll SHA256" step below, and commit. An empty
+      # value intentionally fails the comparison so a missing pin
+      # cannot silently ship.
+      EXPECTED_OPUS_DLL_SHA256: "99cd252b09891398cefab997be8cdb1cebc9a40cafa1382c88ad32069560a864"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Pin vcpkg to a reviewed release tag rather than HEAD of
+      # master. This locks both the Opus port script and the
+      # source tarball it pulls so the bundled DLL is reviewable
+      # supply chain — see the VCPKG_PIN comment above.
+      - name: Bootstrap vcpkg (pinned)
+        shell: pwsh
+        run: |
+          if (Test-Path "$env:RUNNER_TEMP\vcpkg") {
+            Remove-Item -Recurse -Force "$env:RUNNER_TEMP\vcpkg"
+          }
+          git clone --depth 1 --branch "$env:VCPKG_PIN" https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          $head = & git -C "$env:RUNNER_TEMP\vcpkg" rev-parse HEAD
+          Write-Output "vcpkg pinned to tag $env:VCPKG_PIN (commit $head)"
+          & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Install libopus via vcpkg
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install opus:x64-windows
+          # Locate the produced DLL.
+          $dll = "$env:RUNNER_TEMP\vcpkg\installed\x64-windows\bin\opus.dll"
+          if (-not (Test-Path $dll)) {
+            Write-Error "Expected $dll after vcpkg install, but it is missing."
+            exit 1
+          }
+          # Drop into the package _libs/ directory so the wheel build
+          # picks it up via `tool.hatch.build.targets.wheel.artifacts`.
+          $dest_dir = "$env:GITHUB_WORKSPACE\gateway\stackchan_mcp\_libs"
+          New-Item -ItemType Directory -Force -Path $dest_dir | Out-Null
+          Copy-Item -Force $dll "$dest_dir\opus.dll"
+
+      # Block the wheel build on opus.dll SHA256 drift. Without this
+      # gate, a tag rerun (or a runner-image refresh that changes
+      # MSVC build behaviour) could silently ship a different native
+      # binary than the one reviewed for the release, defeating the
+      # vcpkg pin above.
+      - name: Verify opus.dll SHA256
+        shell: pwsh
+        run: |
+          $dll = "$env:GITHUB_WORKSPACE\gateway\stackchan_mcp\_libs\opus.dll"
+          $actual = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower()
+          $expected = $env:EXPECTED_OPUS_DLL_SHA256.ToLower()
+          Write-Output "opus.dll SHA256 (actual):   $actual"
+          Write-Output "opus.dll SHA256 (expected): $expected"
+          if ([string]::IsNullOrWhiteSpace($expected)) {
+            Write-Output "::error::EXPECTED_OPUS_DLL_SHA256 is unset. Run this workflow via workflow_dispatch, then copy the actual hash above into the EXPECTED_OPUS_DLL_SHA256 env in .github/workflows/publish.yml and commit before tagging a release."
+            exit 1
+          }
+          if ($actual -ne $expected) {
+            Write-Output "::error::opus.dll SHA256 mismatch — vcpkg-side or runner-image drift detected. Refusing to publish a different binary than the one reviewed for this VCPKG_PIN."
+            exit 1
+          }
+          Write-Output "opus.dll SHA256: verified against EXPECTED_OPUS_DLL_SHA256."
+          # Expose for any downstream step (e.g. release notes) that
+          # may want to surface the verified hash.
+          "OPUS_DLL_SHA256=$actual" | Out-File -Append -FilePath $env:GITHUB_ENV
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      # `--extra tts` pulls in `opuslib`, which the smoke test below
+      # imports. Without it, the smoke step fails with
+      # `ModuleNotFoundError: No module named 'opuslib'` — a
+      # release-only failure mode that the PR build (`build.yml`)
+      # would not catch, since PR CI already installs the `tts`
+      # extra explicitly.
+      - name: Install gateway dependencies (with tts extra)
+        working-directory: gateway
+        run: uv sync --frozen --extra tts
+
+      # Smoke test the loader paths on the actual platform that ships
+      # the DLL. This catches obvious mistakes (missing `_libs/`
+      # directory, wrong filename, broken `add_dll_directory`
+      # registration) before the wheel leaves CI.
+      - name: Smoke test bundled opus loader
+        working-directory: gateway
+        shell: pwsh
+        run: |
+          uv run python -c "import stackchan_mcp, pathlib; p = pathlib.Path(stackchan_mcp.__file__).parent / '_libs' / 'opus.dll'; assert p.is_file(), f'missing {p}'; print(f'opus.dll size: {p.stat().st_size}')"
+          uv run python -c "import stackchan_mcp; import opuslib; enc = opuslib.Encoder(48000, 1, opuslib.APPLICATION_VOIP); _ = enc.encode(b'\x00' * 960 * 2, 960); print('opus encode round-trip: OK')"
+
+      - name: Build wheel (win_amd64)
+        working-directory: gateway
+        shell: pwsh
+        # `uv build --wheel` produces `*-py3-none-any.whl` by default;
+        # override the platform tag with cibuildwheel-style tag args via
+        # hatch's `--target-platform`-equivalent. Since hatchling does
+        # not have a CLI override for the wheel tag, rely on uv build's
+        # `--target` flag if available; otherwise fall back to renaming.
+        run: |
+          # Use uv build to produce the wheel, then rename the
+          # platform tag from `any` to `win_amd64` so pip resolves it
+          # only on Windows x64 installs. hatchling does not auto-tag
+          # based on bundled binaries.
+          uv build --wheel
+          $wheels = Get-ChildItem dist\*-py3-none-any.whl
+          if ($wheels.Count -ne 1) {
+            Write-Error "Expected exactly one py3-none-any wheel, found $($wheels.Count)"
+            exit 1
+          }
+          $src = $wheels[0].FullName
+          $dst = $src -replace '-py3-none-any\.whl$', '-py3-none-win_amd64.whl'
+          Rename-Item -Path $src -NewName (Split-Path -Leaf $dst)
+          Get-ChildItem dist\
+
+      - name: Upload Windows wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions-windows
+          path: gateway/dist/*-win_amd64.whl
           retention-days: 7
 
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, build-windows-wheel]
     # Only publish on tag pushes. workflow_dispatch invocations stop at
     # the build job above, so manual runs cannot release. The
     # `startsWith(github.ref, 'refs/tags/v')` guard makes the intent
@@ -159,11 +318,20 @@ jobs:
       id-token: write
 
     steps:
-      - name: Download distributions
+      - name: Download Linux distributions (sdist + py3-none-any wheel)
         uses: actions/download-artifact@v4
         with:
-          name: python-package-distributions
+          name: python-package-distributions-linux
           path: dist/
+
+      - name: Download Windows wheel (win_amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions-windows
+          path: dist/
+
+      - name: List artifacts to publish
+        run: ls -la dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@v1.14.0

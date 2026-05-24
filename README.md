@@ -539,6 +539,8 @@ The canonical firmware build path (`firmware/scripts/release.py stackchan`) prod
 
 The `gateway/` runs as an independent Python process and only talks to the ESP32 over the network (WebSocket), so it stays usable and derivable under the **MIT License** regardless of which servo driver the firmware-side build selects.
 
+The gateway's `win_amd64` PyPI wheel additionally bundles `opus.dll` built from upstream Opus source by the publish workflow. That native binary ships under the **BSD 3-clause license + Xiph extension**; the notice is shipped in every distribution form as `gateway/LICENSE-THIRD-PARTY`. Non-Windows wheels and the sdist do not contain the binary — they rely on the system `libopus`. See `gateway/stackchan_mcp/_libs/SOURCES.md` for the per-release SHA256 and build provenance.
+
 > **Note for direct `idf.py` users with a pre-existing `firmware/sdkconfig`:**
 > ESP-IDF persists Kconfig choices into `firmware/sdkconfig`, and a
 > change to the Kconfig `default` does not retroactively rewrite that
