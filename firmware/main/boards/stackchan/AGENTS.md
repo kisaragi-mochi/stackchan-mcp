@@ -183,8 +183,8 @@ See `README.md` `## Trademarks` for the public specification. This section cover
 ### Pre-commit check
 
 ```bash
-# Personal fork link should not appear
-grep -nE 'mongonta0716/stack-chan(?!-arduino)' <file>
+# Personal fork link should not appear (exclude the -arduino repo)
+grep -n 'mongonta0716/stack-chan' <file> | grep -v 'stackchan-arduino'
 grep -nE 'タカヲ|mongonta555' <file>
 
 # Trademarks section sanity
