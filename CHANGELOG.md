@@ -323,6 +323,17 @@ documented-only.
   rather than a functional gap. Tool descriptions now state the
   constraint explicitly.
 
+### Docs
+
+- Added: tracked `AGENTS.md` files at four levels (root, `gateway/`,
+  `firmware/`, `firmware/main/boards/stackchan/`) with review guidelines
+  for automated code review and public developer guides covering build,
+  flash, troubleshooting, servo/touch behavior, layer architecture,
+  license boundary, and attribution. Previously all `AGENTS.md` files
+  were gitignored; personal local configuration now uses
+  `AGENTS.local.md` (gitignored). Added migration guide and review
+  priorities section to `CONTRIBUTING.md`.
+
 ## [firmware-v1.8.0] - 2026-05-20
 
 ### Firmware
