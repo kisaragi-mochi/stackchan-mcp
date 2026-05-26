@@ -221,6 +221,28 @@ Use placeholder examples in documentation instead. Firmware developers can put
 personal Kconfig overrides in `firmware/sdkconfig.defaults.local`; it is ignored
 by git and loaded by the firmware build.
 
+## AGENTS.md and AGENTS.local.md
+
+This repository provides tracked `AGENTS.md` files at multiple levels (root,
+`gateway/`, `firmware/`, `firmware/main/boards/stackchan/`). These contain
+review guidelines and public developer guides that automated tools (such as
+Codex) and contributors can use.
+
+If you need **personal local configuration** (custom paths, local tokens,
+environment-specific notes), create an `AGENTS.local.md` file in the same
+directory. It is gitignored and will not be committed.
+
+**Migration note:** Before this change, `AGENTS.md` was gitignored. If you
+already have a local `AGENTS.md` with your own configuration, rename it:
+
+```bash
+mv AGENTS.md AGENTS.local.md
+# repeat for any subdirectory where you had one
+```
+
+After renaming, `git pull` will bring in the tracked `AGENTS.md` without
+conflict, and your personal settings continue to work as `AGENTS.local.md`.
+
 ## License Boundary
 
 Most of this repository is MIT licensed. The SCServo-lib-derived files under
