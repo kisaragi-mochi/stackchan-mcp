@@ -232,8 +232,11 @@ If you need **personal local configuration** (custom paths, local tokens,
 environment-specific notes), create an `AGENTS.local.md` file in the same
 directory. It is gitignored and will not be committed.
 
-**Migration note:** Before this change, `AGENTS.md` was gitignored. If you
-already have a local `AGENTS.md` with your own configuration, rename it:
+**Migration note:** Before this change, `AGENTS.md` was gitignored, so you
+may have created your own local `AGENTS.md` with personal configuration.
+We apologize for the inconvenience — we needed to provide repository-level
+review guidelines through tracked `AGENTS.md` files, and this unfortunately
+changes the convention. To migrate, simply rename your existing file:
 
 ```bash
 mv AGENTS.md AGENTS.local.md
@@ -242,6 +245,8 @@ mv AGENTS.md AGENTS.local.md
 
 After renaming, `git pull` will bring in the tracked `AGENTS.md` without
 conflict, and your personal settings continue to work as `AGENTS.local.md`.
+We chose the `.local.md` suffix specifically so this transition is a simple
+rename with no loss of your configuration.
 
 ## License Boundary
 
