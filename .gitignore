@@ -11,7 +11,7 @@ venv/
 .env
 .env.local
 *.local
-AGENTS.md
+AGENTS.local.md
 CLAUDE.md
 
 # Captures (user photos)
