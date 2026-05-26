@@ -280,6 +280,23 @@ Significant firmware changes should receive especially careful review for race
 conditions, resource lifetime, boot behavior, NVS compatibility, and hardware
 failure modes.
 
+### Review priorities
+
+This is a single-user hobby product on a home LAN, not a multi-tenant SaaS.
+Reviews (both human and automated) should reflect that context:
+
+- **User-first**: does the feature work for the person sitting next to the
+  robot? That matters more than theoretical edge cases.
+- **Main path correctness over edge-case hardening**: a broken happy path is
+  P0; a rare race condition is P2 at most.
+- **DoS / resource-exhaustion stays low priority**: one user, one device, one
+  LAN — denial-of-service is not a meaningful threat model here.
+- **Be kind**: frame comments as suggestions, explain *why*, and mark
+  stylistic preferences as non-blocking.
+
+These priorities are also encoded in the `## Review guidelines` section of
+`AGENTS.md` so automated review tools follow the same approach.
+
 ## Documentation Language
 
 The top-level user guide is maintained in both English and Japanese:
