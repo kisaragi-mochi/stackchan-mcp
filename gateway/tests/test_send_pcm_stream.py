@@ -490,13 +490,18 @@ async def test_stream_translates_disconnect_before_start(fake_opuslib):
 
 
 @pytest.mark.asyncio
-async def test_stream_translates_encoder_error(fake_opuslib):
+async def test_stream_translates_encoder_error(fake_opuslib, monkeypatch):
     """A failure inside ``Encoder.encode`` becomes a clean RuntimeError."""
 
     def boom_encode(self: Any, pcm: bytes, samples_per_frame: int) -> bytes:
         raise RuntimeError("opus internal error")
 
-    fake_opuslib.Encoder.encode = boom_encode  # type: ignore[attr-defined]
+    # Use monkeypatch.setattr (not raw assignment) so the override is
+    # rolled back at test teardown; ``_FakeOpusEncoder`` is a
+    # module-level class shared across tests, and a raw
+    # ``Encoder.encode = boom_encode`` leaks into any later test in
+    # the same session.
+    monkeypatch.setattr(fake_opuslib.Encoder, "encode", boom_encode)
 
     esp32 = _FakeESP32(connected=True)
     gateway = _FakeGateway(esp32)
@@ -504,4 +509,64 @@ async def test_stream_translates_encoder_error(fake_opuslib):
     with pytest.raises(RuntimeError, match="Opus encoding failed"):
         await send_pcm_stream(
             gateway, _aiter([b"\x01\x00" * SAMPLES_PER_FRAME])
+        )
+
+
+@pytest.mark.asyncio
+async def test_stream_re_paces_after_producer_pause(fake_opuslib):
+    """Producer pause must not cause a post-pause frame burst.
+
+    When the upstream PCM iterator pauses longer than ``frame_period_s``
+    (HTTP chunked uploads, streaming TTS synthesis jitter) and then
+    yields a multi-frame chunk, ``send_pcm_stream`` must continue to
+    pace frames ~``frame_period_s`` apart rather than burst the queued
+    frames back-to-back. The firmware's decode queue is ~40 packets;
+    a back-to-back burst from a long pause + chunky producer would
+    silently drop audio. Regression test for the post-pause re-anchor
+    in ``_push``.
+    """
+    frame_period_s = DEVICE_FRAME_DURATION_MS / 1000.0
+    pre_chunk = b"\x01\x00" * SAMPLES_PER_FRAME            # 1 frame
+    post_chunk = b"\x02\x00" * (SAMPLES_PER_FRAME * 5)     # 5 frames
+
+    async def paused_producer() -> AsyncIterator[bytes]:
+        yield pre_chunk
+        # Pause long enough that next_send_time would be far behind
+        # real time by the time we yield again — 5 frame periods.
+        await asyncio.sleep(frame_period_s * 5)
+        yield post_chunk
+
+    esp32 = _FakeESP32(connected=True)
+    gateway = _FakeGateway(esp32)
+    loop = asyncio.get_event_loop()
+    send_times: list[float] = []
+
+    orig_send = esp32.send_audio_frame
+
+    async def timed_send(frame: bytes) -> None:
+        send_times.append(loop.time())
+        await orig_send(frame)
+
+    esp32.send_audio_frame = timed_send  # type: ignore[assignment]
+
+    result = await send_pcm_stream(gateway, paused_producer())
+
+    assert result["frame_count"] == 6
+    assert len(send_times) == 6
+
+    # Frame 0 fires at start; frame 1 (the first post-pause frame)
+    # fires immediately when the producer resumes — those gaps are
+    # not what we're guarding here. The pacing assertion is on the
+    # *post-pause batch*: each consecutive pair within frames 1..5
+    # (i.e. intervals at i=2..5) must be paced at least one
+    # ``frame_period_s`` apart, otherwise the post-pause burst is
+    # happening.
+    tolerance = 0.005  # 5 ms scheduling jitter allowance
+    for i in range(2, 6):
+        interval = send_times[i] - send_times[i - 1]
+        assert interval >= frame_period_s - tolerance, (
+            f"frame {i} fired only {interval * 1000:.1f} ms after "
+            f"frame {i - 1} (expected >= "
+            f"{(frame_period_s - tolerance) * 1000:.1f} ms); post-pause "
+            "burst detected — pacing not re-anchored to real time"
         )

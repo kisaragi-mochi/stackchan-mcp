@@ -527,7 +527,19 @@ async def send_pcm_stream(
             push_error = exc
             return False
         sent += 1
-        next_send_time += frame_period_s
+        # Advance the schedule from whichever is later: the previous
+        # target (when we kept up — preserves the underlying 20 ms
+        # cadence and absorbs sub-frame jitter), or the actual current
+        # time (when the upstream producer paused — re-anchors pacing
+        # so the next yielded chunk does not burst frames back-to-back
+        # to "catch up" the stale schedule). Without this re-anchor a
+        # producer pause longer than ``frame_period_s`` lets multiple
+        # post-pause frames fire in one event-loop turn, exceeding the
+        # firmware's ~40-packet decode queue and silently dropping
+        # audio. The streaming use cases this helper is designed for
+        # (HTTP chunked uploads, real-time TTS synthesis jitter)
+        # routinely produce such pauses.
+        next_send_time = max(next_send_time, loop.time()) + frame_period_s
         return True
 
     async with lock_ctx:
