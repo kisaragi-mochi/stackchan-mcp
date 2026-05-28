@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 import stackchan_mcp.stt.orchestrator as orchestrator
-from stackchan_mcp.audio_stream import is_recording, stop_recording
+from stackchan_mcp.audio_stream import is_recording, start_recording, stop_recording
 from stackchan_mcp.stt import EngineRegistry, STTEngine, listen_and_transcribe
 from stackchan_mcp.stt.audio_utils import DEVICE_FRAME_DURATION_MS, DEVICE_SAMPLE_RATE
 
@@ -957,6 +957,43 @@ async def test_pipeline_raises_when_device_disconnected():
 
     assert engine.calls == []
     assert not is_recording()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_declines_when_device_driven_capture_active():
+    """MCP listen() declines when the audio_stream slot is already held.
+
+    Symmetric to the device-driven listen.start branch in
+    esp32_client._handler, which logs and bails when an MCP listen() is
+    already recording. Without this guard the orchestrator's
+    ``start_recording(session_id)`` silently overwrites the active
+    buffer, dropping the device-driven capture frames mid-stream.
+    """
+    # Simulate a device-driven capture already holding the slot.
+    start_recording("device-session-xyz")
+    assert is_recording()
+
+    engine = _CapturingEngine()
+    esp32 = _FakeESP32()
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    with pytest.raises(RuntimeError, match=r"declined"):
+        await listen_and_transcribe(
+            {"duration_ms": 500},
+            gateway=gateway,
+            registry=reg,
+        )
+
+    # The pre-existing slot is preserved: no listen.start was sent, no
+    # engine call ran, and the device-driven buffer was not clobbered
+    # (still owned by the device session). The autouse cleanup fixture
+    # releases it after the test.
+    assert esp32.listen_states == []
+    assert engine.calls == []
+    assert is_recording()
 
 
 @pytest.mark.asyncio

@@ -37,7 +37,7 @@ import logging
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal
 
-from ..audio_stream import start_recording, stop_recording
+from ..audio_stream import is_recording, start_recording, stop_recording
 from .audio_utils import DEVICE_FRAME_DURATION_MS, DEVICE_SAMPLE_RATE, decode_opus_frames
 from .base import EngineRegistry, get_registry
 
@@ -391,6 +391,22 @@ async def listen_and_transcribe(
     async with lock_ctx:
         connection = gateway.esp32.connection
         session_id = getattr(connection, "session_id", "") if connection else ""
+
+        # Symmetric ownership guard with the device-driven listen.start
+        # branch in esp32_client._handler (which logs and bails when an
+        # MCP listen() already holds the slot). If a device-driven
+        # capture is currently buffering, decline this MCP listen() call
+        # rather than silently clobber the in-progress buffer via
+        # start_recording's slot-overwrite. lock_ctx serialises MCP-side
+        # listen acquisitions, but the device-driven path acquires the
+        # slot from esp32_client without going through lock_ctx, so this
+        # check is the cross-source guard.
+        if is_recording():
+            raise RuntimeError(
+                "audio_stream recording slot is already held "
+                "(device-driven capture in progress); MCP listen() "
+                "declined to avoid clobbering the active buffer"
+            )
 
         primary_exc: BaseException | None = None
         try:
