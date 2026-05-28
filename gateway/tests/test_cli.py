@@ -151,6 +151,65 @@ def test_arg_parser_check_defaults_to_false() -> None:
     assert args.check is False
 
 
+def test_arg_parser_no_mdns_flag_is_registered() -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args(["--no-mdns"])
+    assert args.no_mdns is True
+
+
+def test_arg_parser_no_mdns_defaults_to_false() -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args([])
+    assert args.no_mdns is False
+
+
+def test_main_default_advertises_mdns(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, bool] = {}
+
+    async def fake_run(*, advertise_mdns: bool = True) -> None:
+        called["advertise_mdns"] = advertise_mdns
+
+    monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_libopus_findable", lambda: None)
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    main([])
+
+    assert called == {"advertise_mdns": True}
+
+
+def test_main_no_mdns_disables_advertisement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: dict[str, bool] = {}
+
+    async def fake_run(*, advertise_mdns: bool = True) -> None:
+        called["advertise_mdns"] = advertise_mdns
+
+    monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_libopus_findable", lambda: None)
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    main(["--no-mdns"])
+
+    assert called == {"advertise_mdns": False}
+
+
+def test_main_check_flag_remains_side_effect_free_with_no_mdns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_run(*, advertise_mdns: bool = True) -> None:
+        raise AssertionError("--check must not start the gateway")
+
+    monkeypatch.setattr(cli, "_run_preflight", lambda: 0)
+    monkeypatch.setattr(cli, "_run", fail_run)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--check", "--no-mdns"])
+
+    assert exc.value.code == 0
+
+
 def test_format_port_status_available() -> None:
     assert _format_port_status(True, None) == "AVAILABLE"
 

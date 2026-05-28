@@ -221,6 +221,33 @@ Use placeholder examples in documentation instead. Firmware developers can put
 personal Kconfig overrides in `firmware/sdkconfig.defaults.local`; it is ignored
 by git and loaded by the firmware build.
 
+## AGENTS.md and AGENTS.local.md
+
+This repository provides tracked `AGENTS.md` files at multiple levels (root,
+`gateway/`, `firmware/`, `firmware/main/boards/stackchan/`). These contain
+review guidelines and public developer guides that automated tools (such as
+Codex) and contributors can use.
+
+If you need **personal local configuration** (custom paths, local tokens,
+environment-specific notes), create an `AGENTS.local.md` file in the same
+directory. It is gitignored and will not be committed.
+
+**Migration note:** Before this change, `AGENTS.md` was gitignored, so you
+may have created your own local `AGENTS.md` with personal configuration.
+We apologize for the inconvenience — we needed to provide repository-level
+review guidelines through tracked `AGENTS.md` files, and this unfortunately
+changes the convention. To migrate, simply rename your existing file:
+
+```bash
+mv AGENTS.md AGENTS.local.md
+# repeat for any subdirectory where you had one
+```
+
+After renaming, `git pull` will bring in the tracked `AGENTS.md` without
+conflict, and your personal settings continue to work as `AGENTS.local.md`.
+We chose the `.local.md` suffix specifically so this transition is a simple
+rename with no loss of your configuration.
+
 ## License Boundary
 
 Most of this repository is MIT licensed. The SCServo-lib-derived files under
@@ -252,6 +279,23 @@ PR lands as one coherent change on `main`.
 Significant firmware changes should receive especially careful review for race
 conditions, resource lifetime, boot behavior, NVS compatibility, and hardware
 failure modes.
+
+### Review priorities
+
+This is a single-user hobby product on a home LAN, not a multi-tenant SaaS.
+Reviews (both human and automated) should reflect that context:
+
+- **User-first**: does the feature work for the person sitting next to the
+  robot? That matters more than theoretical edge cases.
+- **Main path correctness over edge-case hardening**: a broken happy path is
+  P0; a rare race condition is P2 at most.
+- **DoS / resource-exhaustion stays low priority**: one user, one device, one
+  LAN — denial-of-service is not a meaningful threat model here.
+- **Be kind**: frame comments as suggestions, explain *why*, and mark
+  stylistic preferences as non-blocking.
+
+These priorities are also encoded in the `## Review guidelines` section of
+`AGENTS.md` so automated review tools follow the same approach.
 
 ## Documentation Language
 

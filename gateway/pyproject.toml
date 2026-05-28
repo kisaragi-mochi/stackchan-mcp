@@ -35,6 +35,7 @@ dependencies = [
     "python-dotenv",
     "mcp>=1.0",
     "aiohttp>=3",
+    "zeroconf>=0.149",
 ]
 
 [project.optional-dependencies]

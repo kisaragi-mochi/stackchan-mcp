@@ -54,6 +54,8 @@ documented-only.
   Contributed via
   [PR #225](https://github.com/kisaragi-mochi/stackchan-mcp/pull/225).
 
+- Added: when the primary NVS `websocket.url` is empty, the firmware can discover a local stackchan-mcp gateway via mDNS before falling back to `CONFIG_DEFAULT_WEBSOCKET_URL`. The feature is controlled by `CONFIG_STACKCHAN_MDNS_DISCOVERY` and keeps the existing WebSocket candidate fallback loop.
+
 - Added: `self.port_b.ws2812.{init, set_pixel, set_strip, refresh, clear}`
   MCP tools — five generic tools to drive any WS2812-compatible LED
   strip attached to the official kit's Port B (CoreS3 HY2.0-4P digital
@@ -168,6 +170,29 @@ documented-only.
   true there before this function ran). Contributed via
   [PR #207](https://github.com/kisaragi-mochi/stackchan-mcp/pull/207).
 
+- Added (stackchan): touch-driven listen UX overhaul. The FT6336
+  short-tap behavior now models stack-chan as a single-shot
+  push-to-talk device (touch → listen → touch → submit) rather than
+  xiaozhi's default continuous-conversation model. Concretely: (a) a
+  short tap while in `kDeviceStateListening` now calls
+  `StopListening()` instead of `CloseAudioChannel()`, so the gateway
+  receives `listen.stop` (= record-then-flush) instead of a transport
+  teardown that aborts the in-flight capture; (b) a short tap from
+  idle / speaking now calls `StartListening()` (which forces
+  `ManualStop`) instead of `ToggleChatState()` (which uses
+  `AutoStop`), so the device does not re-arm listening immediately
+  after `tts.stop` and the next tap is reliably interpreted as a new
+  `listen.start`; (c) 300 ms press-after-release debounce on
+  FT6336 chatter; (d) 30-second auto-`StopListening` for users who
+  start a listen and then walk away; (e) RGB LED tap feedback (green
+  on activation, off on submit) via a small `SetAllRgbLeds` helper
+  that shares the I2C path used by the `set_all_leds` MCP tool;
+  (f) `%lld` → `%d (int)cast` for the existing duration log,
+  matching the nano-printf-safe pattern already used in this file's
+  motion driver. Stack-chan-only — other board UX is unchanged.
+  Contributed via
+  [PR #208](https://github.com/kisaragi-mochi/stackchan-mcp/pull/208).
+
 - Fixed: WebSocket candidate fallback is now fail-fast when a server
   hello is malformed (missing/non-string `transport`, missing/empty
   `session_id`, or unsupported `transport`). A new
@@ -216,6 +241,22 @@ documented-only.
   [PR #186](https://github.com/kisaragi-mochi/stackchan-mcp/pull/186).
 
 ### Gateway
+
+- Fixed: mDNS now advertises the host's IPv4 addresses ordered by LAN
+  reachability instead of in interface-enumeration order. On a host with
+  multiple interfaces (a CGNAT `100.64.0.0/10` overlay address, several LAN
+  segments), the firmware tries candidates in advertised order and could spend
+  several seconds timing out on an unreachable candidate before reaching a
+  LAN-reachable one. Addresses are now stably sorted so RFC1918 private ranges
+  (`192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`) are tried first and
+  everything else follows; no reachable address is dropped. Subnet network and
+  broadcast addresses (e.g. a `.0` network address or `.255`-style broadcast),
+  which are never valid host endpoints, are now excluded when the interface
+  prefix is known — guarded so `/31` and `/32` host addresses are never
+  dropped. Contributed via
+  [PR #232](https://github.com/kisaragi-mochi/stackchan-mcp/pull/232).
+
+- Added: the gateway now advertises `_stackchan-mcp._tcp.local.` over mDNS/DNS-SD by default so fresh firmware can discover the WebSocket endpoint on the local network. A new `--no-mdns` flag disables advertising.
 
 - Added: `send_pcm_audio(gateway, pcm, source_rate=...)` helper
   extracted from `synthesize_and_send`'s encode-and-push back-half.
@@ -292,6 +333,17 @@ documented-only.
   request-handling layer, so this closes a tool-surface inconsistency
   rather than a functional gap. Tool descriptions now state the
   constraint explicitly.
+
+### Docs
+
+- Added: tracked `AGENTS.md` files at four levels (root, `gateway/`,
+  `firmware/`, `firmware/main/boards/stackchan/`) with review guidelines
+  for automated code review and public developer guides covering build,
+  flash, troubleshooting, servo/touch behavior, layer architecture,
+  license boundary, and attribution. Previously all `AGENTS.md` files
+  were gitignored; personal local configuration now uses
+  `AGENTS.local.md` (gitignored). Added migration guide and review
+  priorities section to `CONTRIBUTING.md`.
 
 ## [firmware-v1.8.0] - 2026-05-20
 

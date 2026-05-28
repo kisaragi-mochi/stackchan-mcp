@@ -1,4 +1,5 @@
 #include "websocket_protocol.h"
+#include "mdns_gateway_discovery.h"
 #include "board.h"
 #include "system_info.h"
 #include "application.h"
@@ -235,7 +236,9 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
     // response, and CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG (default y) prevents
     // the upstream OTA server from overwriting the NVS values read below.
     // This firmware always speaks to a stackchan-mcp gateway directly.
-    std::string url = settings.GetString("url");
+    std::string nvs_url = settings.GetString("url");
+    std::vector<std::string> gateway_candidates;
+    bool force_default_url = false;
 #ifdef CONFIG_DEFAULT_WEBSOCKET_URL
 #ifdef CONFIG_FORCE_DEFAULT_WEBSOCKET_URL
     // Force mode: Kconfig URL always wins over NVS. Used when NVS contains
@@ -243,26 +246,45 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
     // runtime tool can currently overwrite. Only forces when the Kconfig
     // value is non-empty so an unset Kconfig still falls through to NVS.
     if (CONFIG_DEFAULT_WEBSOCKET_URL[0] != '\0') {
-        if (!url.empty() && url != CONFIG_DEFAULT_WEBSOCKET_URL) {
+        if (!nvs_url.empty() && nvs_url != CONFIG_DEFAULT_WEBSOCKET_URL) {
             ESP_LOGI(TAG,
                      "FORCE: overriding NVS websocket.url with Kconfig: NVS=%s -> %s",
-                     url.c_str(), CONFIG_DEFAULT_WEBSOCKET_URL);
-        } else if (url.empty()) {
+                     nvs_url.c_str(), CONFIG_DEFAULT_WEBSOCKET_URL);
+        } else if (nvs_url.empty()) {
             ESP_LOGI(TAG, "FORCE: using Kconfig websocket URL: %s", CONFIG_DEFAULT_WEBSOCKET_URL);
         }
-        url = CONFIG_DEFAULT_WEBSOCKET_URL;
+        AddGatewayCandidate(gateway_candidates,
+                            CONFIG_DEFAULT_WEBSOCKET_URL,
+                            "CONFIG_DEFAULT_WEBSOCKET_URL");
+        force_default_url = true;
     }
-#else
-    if (url.empty()) {
-        url = CONFIG_DEFAULT_WEBSOCKET_URL;
-        if (!url.empty()) {
-            ESP_LOGI(TAG, "NVS websocket.url empty; using build-time default from Kconfig: %s", url.c_str());
+#endif
+#endif
+    if (!force_default_url) {
+        AddGatewayCandidate(gateway_candidates, nvs_url, "websocket.url");
+        if (nvs_url.empty()) {
+#ifdef CONFIG_STACKCHAN_MDNS_DISCOVERY
+            auto mdns_candidates = DiscoverStackchanGateway(1500);
+            if (mdns_candidates.has_value()) {
+                for (const auto& mdns_candidate : *mdns_candidates) {
+                    AddGatewayCandidate(gateway_candidates,
+                                        mdns_candidate.url,
+                                        "mDNS _stackchan-mcp._tcp.local.");
+                }
+            }
+#endif
+#ifdef CONFIG_DEFAULT_WEBSOCKET_URL
+            if (CONFIG_DEFAULT_WEBSOCKET_URL[0] != '\0') {
+                ESP_LOGI(TAG,
+                         "NVS websocket.url empty; adding build-time default from Kconfig: %s",
+                         CONFIG_DEFAULT_WEBSOCKET_URL);
+                AddGatewayCandidate(gateway_candidates,
+                                    CONFIG_DEFAULT_WEBSOCKET_URL,
+                                    "CONFIG_DEFAULT_WEBSOCKET_URL");
+            }
+#endif
         }
     }
-#endif
-#endif
-    std::vector<std::string> gateway_candidates;
-    AddGatewayCandidate(gateway_candidates, url, "websocket.url");
 
     std::string fallback_url = settings.GetString("fallback_url");
 #ifdef CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL
@@ -321,7 +343,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
 
     auto network = Board::GetInstance().GetNetwork();
     if (gateway_candidates.empty()) {
-        ESP_LOGE(TAG, "No websocket gateway URL configured");
+        ESP_LOGE(TAG, "WS_URL not configured: no websocket gateway URL candidates available");
         if (report_error) {
             SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         }
