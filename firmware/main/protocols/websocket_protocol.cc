@@ -79,6 +79,30 @@ WebsocketProtocol::WebsocketProtocol() {
         ESP_LOGE(TAG, "Failed to create reconnect timer; auto reconnect will not be available");
         reconnect_timer_ = nullptr;
     }
+
+    // Keepalive timer: periodic check that drives both active WS ping
+    // emission and silent-path-break detection. See issue #239 and the
+    // header comment on keepalive_timer_ for the full rationale. The
+    // callback hops to the main task via Application::Schedule to mirror
+    // the reconnect timer pattern (avoid touching websocket_ from
+    // ESP_TIMER_TASK).
+    esp_timer_create_args_t keepalive_timer_args = {
+        .callback = [](void* arg) {
+            auto protocol = static_cast<WebsocketProtocol*>(arg);
+            auto alive = protocol->alive_;
+            Application::GetInstance().Schedule([protocol, alive]() {
+                if (!alive->load()) {
+                    return;
+                }
+                protocol->OnKeepaliveTick();
+            });
+        },
+        .arg = this,
+    };
+    if (esp_timer_create(&keepalive_timer_args, &keepalive_timer_) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create keepalive timer; silent-break recovery will not be available");
+        keepalive_timer_ = nullptr;
+    }
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
@@ -92,6 +116,11 @@ WebsocketProtocol::~WebsocketProtocol() {
     if (reconnect_timer_ != nullptr) {
         esp_timer_delete(reconnect_timer_);
         reconnect_timer_ = nullptr;
+    }
+    StopKeepaliveTimer();
+    if (keepalive_timer_ != nullptr) {
+        esp_timer_delete(keepalive_timer_);
+        keepalive_timer_ = nullptr;
     }
     websocket_.reset();
     if (event_group_handle_ != nullptr) {
@@ -388,6 +417,11 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
         websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
 
         websocket_->OnData([this, notify_disconnect, arm_audio_channel](const char* data, size_t len, bool binary) {
+            // Any data frame from the gateway counts as proof-of-life for
+            // the keepalive watchdog (see issue #239). Update before any
+            // early-return below so dropped/late frames still refresh the
+            // liveness signal.
+            last_received_us_.store(esp_timer_get_time(), std::memory_order_release);
             if (binary) {
                 // Drop binary frames before parsing when the device is not
                 // speaking. This mirrors Application::OnIncomingAudio's
@@ -468,6 +502,11 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
         websocket_->OnDisconnected([this, notify_disconnect, disconnected_after_hello]() {
             audio_channel_open_.store(false);
             transport_connected_.store(false);
+            // Stop the keepalive watchdog whenever the transport drops —
+            // whether the close was server-initiated, keepalive-forced,
+            // or intentional. StartKeepaliveTimer() will re-arm it on
+            // the next successful handshake. See issue #239.
+            StopKeepaliveTimer();
             // notify_disconnect carries this socket's reconnect intent.
             // ParseServerHello() arms it (true) once the handshake
             // completes; intentional teardown paths (CloseAudioChannel,
@@ -583,6 +622,11 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
         transport_connected_.store(true);
         reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
         StopReconnectTimer();
+        // Seed the keepalive baseline with "now" so the dead-timeout
+        // window starts from the connect time, then arm the periodic
+        // check. See issue #239.
+        last_received_us_.store(esp_timer_get_time(), std::memory_order_release);
+        StartKeepaliveTimer();
 
         if (on_connected_ != nullptr) {
             on_connected_();
@@ -650,6 +694,85 @@ void WebsocketProtocol::StopReconnectTimer() {
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "Failed to stop reconnect timer (err=%d)", err);
     }
+}
+
+void WebsocketProtocol::StartKeepaliveTimer() {
+    if (keepalive_timer_ == nullptr) {
+        ESP_LOGW(TAG, "Keepalive timer not initialised; cannot start");
+        return;
+    }
+    // Stop first in case the timer is already running from a previous
+    // connect (esp_timer_start_periodic on a running timer returns an
+    // error). ESP_ERR_INVALID_STATE here is the no-op case and is fine.
+    esp_timer_stop(keepalive_timer_);
+    esp_err_t err = esp_timer_start_periodic(
+        keepalive_timer_,
+        (uint64_t)WEBSOCKET_KEEPALIVE_INTERVAL_MS * 1000ULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to start keepalive timer (err=%d); silent-break recovery disabled", err);
+        return;
+    }
+    ESP_LOGI(TAG, "Keepalive started (check every %d s, dead threshold %d s)",
+             WEBSOCKET_KEEPALIVE_INTERVAL_MS / 1000,
+             WEBSOCKET_KEEPALIVE_DEAD_TIMEOUT_MS / 1000);
+}
+
+void WebsocketProtocol::StopKeepaliveTimer() {
+    if (keepalive_timer_ == nullptr) {
+        return;
+    }
+    esp_err_t err = esp_timer_stop(keepalive_timer_);
+    // Mirror StopReconnectTimer: INVALID_STATE just means not running.
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Failed to stop keepalive timer (err=%d)", err);
+    }
+}
+
+void WebsocketProtocol::OnKeepaliveTick() {
+    // Runs on the main task (via Application::Schedule in the timer
+    // callback). All access to websocket_ and the connection flags
+    // happens here so we don't have to coordinate with ESP_TIMER_TASK.
+    if (!alive_->load()) {
+        return;
+    }
+    if (websocket_ == nullptr) {
+        return;
+    }
+    if (!transport_connected_.load(std::memory_order_acquire)) {
+        // Tolerate the race where the timer fires between transport teardown
+        // and StopKeepaliveTimer running (or vice-versa during reconnect).
+        return;
+    }
+
+    uint64_t now_us = esp_timer_get_time();
+    uint64_t last_us = last_received_us_.load(std::memory_order_acquire);
+    uint64_t silence_us = (last_us == 0 || now_us < last_us) ? 0ULL : (now_us - last_us);
+
+    if (silence_us > (uint64_t)WEBSOCKET_KEEPALIVE_DEAD_TIMEOUT_MS * 1000ULL) {
+        // Stick to %u for the millisecond value — ESP-IDF's nano-printf
+        // drops %llu / %lu, mangling the format string and downstream
+        // args. uint32_t covers up to ~49 days of silence, far more than
+        // any sensible dead-threshold.
+        uint32_t silence_ms = (uint32_t)(silence_us / 1000ULL);
+        ESP_LOGW(TAG,
+                 "Keepalive timeout: no data frame received in %u ms (>= %d s threshold) — forcing reconnect",
+                 (unsigned)silence_ms,
+                 (int)(WEBSOCKET_KEEPALIVE_DEAD_TIMEOUT_MS / 1000));
+        // Resetting the WebSocket fires OnDisconnected (with
+        // intentional_close_ left false here, so the lambda's reconnect
+        // path is taken). StopKeepaliveTimer is called from inside that
+        // lambda so we do not need to stop it here.
+        websocket_.reset();
+        return;
+    }
+
+    // Path appears healthy: emit a ping to actively probe it and refresh
+    // any intermediate NAT / router state. The library's Ping() is
+    // fire-and-forget (the server's PONG response is handled internally
+    // and is not surfaced through OnData), so we cannot use the PONG as
+    // a liveness signal — that is what the receive-timestamp check
+    // above is for.
+    websocket_->Ping();
 }
 
 std::string WebsocketProtocol::GetHelloMessage() {
