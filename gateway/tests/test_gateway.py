@@ -22,6 +22,8 @@ def _patch_gateway_network(monkeypatch: pytest.MonkeyPatch, gw: Gateway) -> list
             *,
             vision_url: str,
             vision_token: str,
+            audio_hook_url: str = "",
+            audio_hook_token: str = "",
         ) -> None:
             self._server = object()
             calls.append(("esp32_start", host, port, vision_url, vision_token))
