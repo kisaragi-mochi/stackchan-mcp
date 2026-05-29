@@ -1137,6 +1137,35 @@ config STACKCHAN_AUTO_TORQUE_RELEASE_MS
         Runtime-overridable via the set_auto_torque_release MCP tool
         (session override, not persisted across reboot).
 
+config STACKCHAN_TAILNET
+    bool "Enable tailnet (microlink Tailscale) for out-of-LAN gateway access"
+    default n
+    help
+        Opt-in. When disabled (default), the microlink component is
+        excluded from the build at the project level, so the on-disk
+        component pin contributes zero bytes to the firmware image and
+        zero runtime overhead. Enable only when out-of-LAN access via
+        the Tailscale ts2021 protocol is needed; the LAN-only zero-config
+        path (#26 mDNS) remains the default and is unaffected.
+
+        Personal Tailscale auth keys MUST NOT be committed to
+        sdkconfig.defaults in this repository. Use the gitignored
+        sdkconfig.defaults.local to override the auth-key option below
+        on a per-developer basis.
+
+config STACKCHAN_TAILNET_AUTH_KEY
+    string "Tailscale auth key (placeholder, set real value in sdkconfig.defaults.local)"
+    depends on STACKCHAN_TAILNET
+    default ""
+    help
+        Placeholder for the Tailscale auth key used during tailnet bring-up.
+        DO NOT commit a real auth key value to sdkconfig.defaults.
+        Override this value in the gitignored sdkconfig.defaults.local so
+        it stays on the developer's machine only.
+
+        Phase 1 scaffolding does not yet wire this string into runtime
+        code; follow-up PRs will read it from the component bring-up path.
+
 endif # BOARD_TYPE_STACKCHAN
 
 endmenu

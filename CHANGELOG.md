@@ -32,6 +32,21 @@ documented-only.
 
 ### Firmware
 
+- Added: `CONFIG_STACKCHAN_TAILNET` opt-in scaffolding for out-of-LAN
+  gateway access via the
+  [microlink](https://github.com/CamM2325/microlink) Tailscale ts2021
+  component (pinned to upstream `v2.1.0`). Default off — when disabled
+  the component pin is excluded at the project CMake level, so the
+  firmware image is byte-for-byte unchanged from the previous build
+  and the LAN-only zero-config path (#26 mDNS) remains the default.
+  Phase 1 wires the Kconfig surface (`CONFIG_STACKCHAN_TAILNET` +
+  placeholder `CONFIG_STACKCHAN_TAILNET_AUTH_KEY`) and the
+  `EXCLUDE_COMPONENTS` gate only; follow-up PRs will wire actual
+  tailnet bring-up, the config-UI auth-key entry path, and verify
+  CGNAT reachability per #230. License stack: microlink MIT +
+  wireguard-lwip BSD-3-Clause sub + x25519 MIT, all MIT-compatible
+  with the existing firmware MIT base. Refs #230.
+
 - Changed: the device no longer auto-enters Listening after a TTS
   utterance ends. The `Application::OnIncomingJson` handler for the
   `tts.stop` event used to fall through to

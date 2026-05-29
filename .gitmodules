@@ -1,3 +1,6 @@
 [submodule "firmware/components/smooth_ui_toolkit"]
 	path = firmware/components/smooth_ui_toolkit
 	url = https://github.com/Forairaaaaa/smooth_ui_toolkit.git
+[submodule "firmware/components/microlink"]
+	path = firmware/third-party/microlink
+	url = https://github.com/CamM2325/microlink.git
