@@ -34,6 +34,10 @@ private:
     EventGroupHandle_t event_group_handle_;
     std::unique_ptr<WebSocket> websocket_;
     esp_timer_handle_t reconnect_timer_ = nullptr;
+    // True while reconnect_timer_ has a pending one-shot retry. This keeps
+    // independent failure/disconnect paths from double-arming the same retry
+    // and advancing reconnect_interval_ms_ more than once.
+    std::atomic<bool> reconnect_timer_armed_ = false;
     // Per-socket "this disconnect should fire the reconnect path" flag.
     // The candidate loop in OpenAudioChannelInternal() creates a fresh
     // shared_ptr<atomic<bool>>(false) for each socket and captures it

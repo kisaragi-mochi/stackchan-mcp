@@ -42,6 +42,7 @@ WebsocketProtocol::WebsocketProtocol() {
                 if (!alive->load()) {
                     return;
                 }
+                protocol->reconnect_timer_armed_.store(false);
                 // Re-check intent on the main task. esp_timer_stop() does
                 // not cancel work that the timer has already re-posted via
                 // Application::Schedule, so a CloseAudioChannel() or
@@ -475,7 +476,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             // before resetting the socket. A false reading here means
             // either the candidate never completed handshake or the
             // close was intentional — neither should reconnect.
-            if (!notify_disconnect->load()) {
+            if (!notify_disconnect->load(std::memory_order_acquire)) {
                 ESP_LOGI(TAG, "Websocket disconnected (no reconnect: candidate failed or intentional close)");
                 return;
             }
@@ -627,10 +628,15 @@ void WebsocketProtocol::ScheduleReconnect() {
         ESP_LOGI(TAG, "Reconnect not scheduled (intentional close in progress)");
         return;
     }
+    bool expected = false;
+    if (!reconnect_timer_armed_.compare_exchange_strong(expected, true)) {
+        ESP_LOGI(TAG, "Reconnect already scheduled");
+        return;
+    }
 
-    StopReconnectTimer();
     esp_err_t err = esp_timer_start_once(reconnect_timer_, reconnect_interval_ms_ * 1000);
     if (err != ESP_OK) {
+        reconnect_timer_armed_.store(false);
         ESP_LOGW(TAG, "Failed to start reconnect timer (err=%d); reconnect not scheduled", err);
         return;
     }
@@ -639,6 +645,7 @@ void WebsocketProtocol::ScheduleReconnect() {
 }
 
 void WebsocketProtocol::StopReconnectTimer() {
+    reconnect_timer_armed_.store(false);
     if (reconnect_timer_ == nullptr) {
         return;
     }
