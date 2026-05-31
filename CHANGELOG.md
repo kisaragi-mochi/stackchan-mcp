@@ -242,6 +242,26 @@ documented-only.
 
 ### Gateway
 
+- Fixed: mDNS advertiser no longer interferes with the host OS Bonjour
+  hostname. The SRV `server` field is now a fixed `stackchan-mcp.local.`
+  instead of the system hostname, so the Python zeroconf library does
+  not register A records that overlap with the OS Bonjour responder
+  (previously this could cause macOS to change the user's
+  `LocalHostName`, e.g. `MacBook-Pro` -> `MacBook-Pro-2`).
+
+- Fixed: when zeroconf assigns a modified instance name (e.g. a stale
+  registration from an ungraceful shutdown is still visible on the
+  network), the advertiser now logs a clear WARNING instead of silently
+  renaming. The firmware browses by service type so the advertisement
+  remains discoverable; the warning surfaces operationally so the stale
+  state is visible to the operator.
+
+- Added: SIGTERM signal handler in the CLI entry point so `kill <pid>`
+  triggers graceful shutdown and mDNS unregistration via
+  `gateway.stop()`. Previously SIGTERM bypassed the `try/finally` that
+  unregisters the mDNS service, leaving stale registrations on the
+  network until their TTL expired.
+
 - Added: optional device-driven listen audio capture forwarding via
   `STACKCHAN_AUDIO_HOOK_URL`. When set, inbound device-initiated
   listen captures (wake-word, button, LCD touch — any path that calls
