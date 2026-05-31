@@ -1078,11 +1078,26 @@ private:
     }
 
     struct ServoTorqueResult {
+        // -1 means "no bus frame was issued for this axis". In every
+        // short-circuit path (idempotent_short_circuit or wait_exhausted)
+        // the function returns before any EnableTorque() call, so both
+        // bus-return fields keep this -1 default (Issue #171).
         int yaw_bus_return = -1;
         int pitch_bus_return = -1;
         bool yaw_ok = false;
         bool pitch_ok = false;
-        bool short_circuited = false;
+        // Issue #171: the old single `short_circuited` flag was overloaded
+        // (set both for idempotent no-ops AND for wait-budget exhaustion),
+        // so callers could not distinguish degraded-bus wait-exhaustion from
+        // a legitimate no-op success. These two flags are orthogonal and
+        // mutually exclusive: at most one is ever true.
+        //   * idempotent_short_circuit: returned without a bus frame because
+        //     the per-axis state already matched the request (success no-op).
+        //   * wait_exhausted: returned without a bus frame because
+        //     WaitForKReleasingToClear() hit its budget while still
+        //     kReleasing (failure: the requested transition did not happen).
+        bool idempotent_short_circuit = false;
+        bool wait_exhausted = false;
     };
 
     class MotionDriver {
@@ -3155,26 +3170,47 @@ private:
 #endif
         };
 
-        auto log_result = [&](bool short_circuited) {
-            result.short_circuited = short_circuited;
+        // Issue #171: classify each exit path with a single 3-valued tag so
+        // that idempotent_short_circuit and wait_exhausted can never both be
+        // set. A one-bool flag could not express the two orthogonal outcomes;
+        // a single enum makes "both true" structurally unrepresentable.
+        //   * kBusAction:     a real EnableTorque() bus write was attempted
+        //                     (or the servo subsystem was unavailable); the
+        //                     outcome is carried by yaw_ok/pitch_ok. Neither
+        //                     short-circuit flag is set.
+        //   * kIdempotent:    returned without a bus frame, state already
+        //                     matched the request (success no-op).
+        //   * kWaitExhausted: returned without a bus frame, the kReleasing
+        //                     wait budget was exhausted (failure).
+        enum class ExitKind { kBusAction, kIdempotent, kWaitExhausted };
+
+        auto log_result = [&](ExitKind kind) {
+            result.idempotent_short_circuit = (kind == ExitKind::kIdempotent);
+            result.wait_exhausted = (kind == ExitKind::kWaitExhausted);
+            // Defensive: the enum makes this impossible, but assert anyway so
+            // any future direct field mutation is caught in debug builds.
+            assert(!(result.idempotent_short_circuit && result.wait_exhausted));
             ESP_LOGI(TAG,
                      "set_servo_torque (reason=%s): servo_ok=%d "
                      "yaw_enabled=%d (r=%d) pitch_enabled=%d (r=%d) "
-                     "short_circuited=%d",
+                     "idempotent_short_circuit=%d wait_exhausted=%d",
                      ReleaseReasonName(reason),
                      servo_ok_ ? 1 : 0,
                      yaw_enabled ? 1 : 0, result.yaw_bus_return,
                      pitch_enabled ? 1 : 0, result.pitch_bus_return,
-                     short_circuited ? 1 : 0);
+                     result.idempotent_short_circuit ? 1 : 0,
+                     result.wait_exhausted ? 1 : 0);
         };
 
-        auto finish = [&](bool short_circuited) -> ServoTorqueResult {
-            log_result(short_circuited);
+        auto finish = [&](ExitKind kind) -> ServoTorqueResult {
+            log_result(kind);
             return result;
         };
 
         if (!servo_ok_ || scs_bus_mutex_ == nullptr) {
-            return finish(false);
+            // Servo subsystem unavailable: not a short-circuit and not a
+            // wait timeout. yaw_ok/pitch_ok stay false, so ok is false.
+            return finish(ExitKind::kBusAction);
         }
 
         // Fully-symmetric re-engage remains bus-ordered even when it becomes
@@ -3195,7 +3231,9 @@ private:
                                  "not clearing within wait budget; skipping "
                                  "bus frames, caller may retry.",
                                  ReleaseReasonName(reason));
-                        log_result(true);
+                        // Pre-mutex wait budget exhausted: no bus frame went
+                        // out, the requested ON did not happen (Issue #171).
+                        log_result(ExitKind::kWaitExhausted);
                         return result;
                     }
                     // After the wait, state may be kEngaged (OFF failed and
@@ -3227,7 +3265,9 @@ private:
                                  "frames, caller may retry.",
                                  ReleaseReasonName(reason),
                                  attempt);
-                        log_result(true);
+                        // Post-mutex re-check wait budget exhausted: no bus
+                        // frame, requested ON did not happen (Issue #171).
+                        log_result(ExitKind::kWaitExhausted);
                         return result;
                     }
                     continue;
@@ -3235,7 +3275,10 @@ private:
 
                 if (torque_state_.load(std::memory_order_acquire) ==
                     TorqueState::kEngaged) {
-                    log_result(true);
+                    // Already engaged (reached here only after any kReleasing
+                    // wait already cleared): legitimate no-op success, so ok
+                    // stays true (Issue #171).
+                    log_result(ExitKind::kIdempotent);
                     xSemaphoreGive(scs_bus_mutex_);
                     return result;
                 }
@@ -3251,7 +3294,8 @@ private:
                     pitch_torque_enabled_ = true;
                 }
                 PublishTorqueState();
-                log_result(false);
+                // Real bus write attempted; ok is governed by yaw_ok/pitch_ok.
+                log_result(ExitKind::kBusAction);
                 xSemaphoreGive(scs_bus_mutex_);
                 return result;
             }
@@ -3261,7 +3305,9 @@ private:
                      "all %d post-mutex retries; skipping bus frames.",
                      ReleaseReasonName(reason),
                      kMaxManualReengageRetries);
-            log_result(true);
+            // All retries exhausted while still kReleasing: no bus frame, the
+            // requested ON did not happen (Issue #171).
+            log_result(ExitKind::kWaitExhausted);
             return result;
         } else {
             if (!yaw_enabled && !pitch_enabled) {
@@ -3270,7 +3316,9 @@ private:
                     torque_state_.load(std::memory_order_acquire) ==
                     TorqueState::kReleased;
                 if (already_released) {
-                    log_result(true);
+                    // Already released for an OFF request: legitimate no-op
+                    // success, so ok stays true (Issue #171).
+                    log_result(ExitKind::kIdempotent);
                     xSemaphoreGive(scs_bus_mutex_);
                     return result;
                 }
@@ -3286,8 +3334,10 @@ private:
                 if (reason == ReleaseReason::kAutoIdle &&
                     (yaw_motion_.moving || pitch_motion_.moving ||
                      servo_wobble_active_.load(std::memory_order_acquire))) {
+                    // Auto-idle deferring because motion is still in progress:
+                    // a benign no-op (no wait budget consumed), not a timeout.
                     xSemaphoreGive(motion_mutex_);
-                    return finish(true);
+                    return finish(ExitKind::kIdempotent);
                 }
                 if (!yaw_enabled) {
                     yaw_motion_.moving = false;
@@ -3327,7 +3377,9 @@ private:
                              (unsigned)expected_release_epoch,
                              (int)current_state);
                     xSemaphoreGive(scs_bus_mutex_);
-                    log_result(true);
+                    // Stale auto-release OFF superseded by a newer epoch/state:
+                    // the OFF is already obsolete, a benign no-op (Issue #171).
+                    log_result(ExitKind::kIdempotent);
                     return result;
                 }
             }
@@ -3343,7 +3395,8 @@ private:
                 pitch_torque_enabled_ = pitch_enabled;
             }
             PublishTorqueState();
-            log_result(false);
+            // Real bus write attempted; ok is governed by yaw_ok/pitch_ok.
+            log_result(ExitKind::kBusAction);
             xSemaphoreGive(scs_bus_mutex_);
             return result;
         }
@@ -3455,7 +3508,12 @@ private:
                 torque_state_.load(std::memory_order_acquire);
             if (state_after == TorqueState::kReleased) {
                 last_motion_end_valid_ = false;
-            } else if (r.short_circuited) {
+            } else if (r.idempotent_short_circuit || r.wait_exhausted) {
+                // Either short-circuit flag means the OFF returned without a
+                // completed bus frame (Issue #171 split the old
+                // short_circuited flag; for this kAutoIdle path only the
+                // idempotent flag can fire, but the OR keeps the "no bus
+                // action" intent explicit and future-proof).
                 uint32_t current_epoch =
                     torque_release_epoch_.load(std::memory_order_acquire);
                 if (current_epoch == my_pre_epoch) {
@@ -5048,13 +5106,22 @@ private:
                 cJSON_AddNumberToObject(root, "pitch_bus_return",
                                         torque_result.pitch_bus_return);
                 cJSON_AddBoolToObject(root, "servo_ok", servo_ok_);
+                // Issue #171: ok counts an idempotent no-op as success but a
+                // wait-budget exhaustion as failure (the requested torque
+                // transition did not actually happen on the bus).
                 cJSON_AddBoolToObject(
                     root, "ok",
-                    servo_ok_ && (torque_result.short_circuited ||
+                    servo_ok_ && (torque_result.idempotent_short_circuit ||
                                   (torque_result.yaw_ok &&
                                    torque_result.pitch_ok)));
-                cJSON_AddBoolToObject(root, "short_circuited",
-                                      torque_result.short_circuited);
+                // Issue #171: the old single `short_circuited` field is
+                // removed (no alias). These two orthogonal, mutually
+                // exclusive flags let callers distinguish a degraded-bus
+                // wait-exhaustion from an idempotent no-op success.
+                cJSON_AddBoolToObject(root, "idempotent_short_circuit",
+                                      torque_result.idempotent_short_circuit);
+                cJSON_AddBoolToObject(root, "wait_exhausted",
+                                      torque_result.wait_exhausted);
                 if (!servo_ok_) {
                     cJSON_AddStringToObject(root, "error",
                                             "Servo bus not initialized.");

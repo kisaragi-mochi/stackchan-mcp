@@ -32,6 +32,8 @@ documented-only.
 
 ### Firmware
 
+- Changed: split `set_servo_torque` MCP response field `short_circuited` into orthogonal `idempotent_short_circuit` and `wait_exhausted` flags to distinguish degraded-bus wait-budget exhaustion (where no `EnableTorque` bus frame went out) from idempotent no-op success (where state already matched the request). The `ok` field now correctly returns `false` on wait-exhaustion. **Breaking change** for callers reading the old `short_circuited` field directly. (#171)
+
 - Fixed: empty WebSocket gateway discovery results now fall through to the shared reconnect failure path, clearing the intentional-close latch so retries continue after a gateway restart.
 
 - Fixed: post-handshake WebSocket disconnects re-arm the existing reconnect timer without double-advancing backoff.
