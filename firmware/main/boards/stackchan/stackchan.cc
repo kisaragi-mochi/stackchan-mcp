@@ -3213,22 +3213,39 @@ private:
             return result;
         };
 
-        auto publish_after_bus_attempt = [&]() {
+        auto publish_after_bus_attempt = [&](TorqueState pre_bus_state) {
             const bool any_axis_bus_failed =
                 !result.yaw_ok || !result.pitch_ok;
             if (!any_axis_bus_failed) {
+                // Success-path cached-state ownership is pre-existing and
+                // tracked separately under Issue #172.
                 PublishTorqueState();
                 return;
             }
-            ESP_LOGW(TAG,
-                     "set_servo_torque (reason=%s): publishing kUncertain; "
-                     "bus confirmation failed for yaw_failed=%d (r=%d) "
-                     "pitch_failed=%d (r=%d)",
-                     ReleaseReasonName(reason),
-                     result.yaw_ok ? 0 : 1, result.yaw_bus_return,
-                     result.pitch_ok ? 0 : 1, result.pitch_bus_return);
-            torque_state_.store(TorqueState::kUncertain,
-                                std::memory_order_release);
+            TorqueState expected = pre_bus_state;
+            if (torque_state_.compare_exchange_strong(
+                    expected,
+                    TorqueState::kUncertain,
+                    std::memory_order_release,
+                    std::memory_order_acquire)) {
+                ESP_LOGW(TAG,
+                         "set_servo_torque (reason=%s): publishing kUncertain; "
+                         "bus confirmation failed for yaw_failed=%d (r=%d) "
+                         "pitch_failed=%d (r=%d)",
+                         ReleaseReasonName(reason),
+                         result.yaw_ok ? 0 : 1, result.yaw_bus_return,
+                         result.pitch_ok ? 0 : 1, result.pitch_bus_return);
+            } else {
+                ESP_LOGW(TAG,
+                         "set_servo_torque (reason=%s): kUncertain publish "
+                         "skipped; torque_state_ advanced from %d to %d "
+                         "(likely MarkReleasing()); leaving concurrent state "
+                         "intact. bus_return yaw=%d pitch=%d",
+                         ReleaseReasonName(reason),
+                         static_cast<int>(pre_bus_state),
+                         static_cast<int>(expected),
+                         result.yaw_bus_return, result.pitch_bus_return);
+            }
         };
 
         if (!servo_ok_ || scs_bus_mutex_ == nullptr) {
@@ -3307,6 +3324,8 @@ private:
                     xSemaphoreGive(scs_bus_mutex_);
                     return result;
                 }
+                const TorqueState pre_bus_state =
+                    torque_state_.load(std::memory_order_acquire);
                 result.yaw_bus_return =
                     scs_bus_.EnableTorque(SERVO_YAW_ID, 1);
                 result.pitch_bus_return =
@@ -3318,7 +3337,7 @@ private:
                 if (result.pitch_ok) {
                     pitch_torque_enabled_ = true;
                 }
-                publish_after_bus_attempt();
+                publish_after_bus_attempt(pre_bus_state);
                 // Real bus write attempted; ok is governed by yaw_ok/pitch_ok.
                 log_result(ExitKind::kBusAction);
                 xSemaphoreGive(scs_bus_mutex_);
@@ -3408,6 +3427,8 @@ private:
                     return result;
                 }
             }
+            const TorqueState pre_bus_state =
+                torque_state_.load(std::memory_order_acquire);
             result.yaw_bus_return = scs_bus_.EnableTorque(
                 SERVO_YAW_ID, yaw_enabled ? 1 : 0);
             result.pitch_bus_return = scs_bus_.EnableTorque(
@@ -3419,7 +3440,7 @@ private:
             if (result.pitch_ok) {
                 pitch_torque_enabled_ = pitch_enabled;
             }
-            publish_after_bus_attempt();
+            publish_after_bus_attempt(pre_bus_state);
             // Real bus write attempted; ok is governed by yaw_ok/pitch_ok.
             log_result(ExitKind::kBusAction);
             xSemaphoreGive(scs_bus_mutex_);

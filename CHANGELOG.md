@@ -32,12 +32,15 @@ documented-only.
 
 ### Firmware
 
-- Add `kUncertain` state to `TorqueState`: an `EnableTorque(OFF)` (or `ON`)
-  attempt that loses its ACK no longer publishes `kEngaged` from cached state.
-  Subsequent motion or manual `set_servo_torque(...)` calls now issue a real
-  bus frame instead of short-circuiting on stale state, guaranteeing forward
-  progress without requiring a PMIC OFF/ON cycle. Closes the Phase 4 ACK-loss
-  trade-off carved out from #168. (#170)
+- Add `kUncertain` state to `TorqueState`: an `EnableTorque(OFF)` (or
+  `ON`) attempt that loses its ACK no longer publishes `kEngaged` from
+  cached state. Subsequent motion or manual `set_servo_torque(...)`
+  calls now issue a real bus frame instead of short-circuiting on stale
+  state, guaranteeing forward progress without requiring a PMIC OFF/ON
+  cycle. The `kUncertain` publish itself is guarded by a
+  `compare_exchange` against a pre-bus state observation, so a
+  concurrent `MarkReleasing()` is not erased. Closes the Phase 4
+  ACK-loss trade-off carved out from #168. (#170)
 
 - Changed: split `set_servo_torque` MCP response field `short_circuited` into orthogonal `idempotent_short_circuit` and `wait_exhausted` flags to distinguish degraded-bus wait-budget exhaustion (where no `EnableTorque` bus frame went out) from idempotent no-op success (where state already matched the request). The `ok` field now correctly returns `false` on wait-exhaustion. **Breaking change** for callers reading the old `short_circuited` field directly. (#171)
 
