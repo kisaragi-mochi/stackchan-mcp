@@ -580,10 +580,22 @@ def _run_preflight() -> int:
 
 async def _run(*, advertise_mdns: bool = True) -> None:
     """Start both the ESP32 WebSocket server and the stdio MCP server."""
+    import signal
+
     from .gateway import get_gateway
     from .stdio_server import run_stdio_server
 
     gateway = get_gateway()
+
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+
+    def _handle_sigterm() -> None:
+        if main_task and not main_task.done():
+            main_task.cancel()
+
+    if sys.platform != "win32":
+        loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
 
     await gateway.start(advertise_mdns=advertise_mdns)
     logger.info("Gateway started, waiting for ESP32 connections...")
@@ -591,6 +603,8 @@ async def _run(*, advertise_mdns: bool = True) -> None:
     try:
         # Run stdio MCP server (blocks until MCP client disconnects)
         await run_stdio_server()
+    except asyncio.CancelledError:
+        logger.info("Received termination signal, shutting down...")
     finally:
         await gateway.stop()
 

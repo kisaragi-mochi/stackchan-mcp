@@ -51,6 +51,15 @@ def _load_zeroconf_classes() -> tuple[type[Any], type[Any]]:
     return AsyncZeroconf, ServiceInfo
 
 
+def _load_non_unique_name_exception() -> type[Exception]:
+    try:
+        from zeroconf import NonUniqueNameException
+    except ImportError:  # pragma: no cover - compatibility with older zeroconf
+        from zeroconf._exceptions import NonUniqueNameException
+
+    return NonUniqueNameException
+
+
 def _is_usable_ipv4(address: str) -> bool:
     try:
         ip = ipaddress.ip_address(address)
@@ -132,16 +141,13 @@ def _is_wildcard_host(host: str) -> bool:
 
 
 def _build_service_hostname() -> str:
-    label = socket.gethostname().split(".", 1)[0]
-    safe_label = "".join(
-        char.lower()
-        if char.isascii() and (char.isalnum() or char == "-")
-        else "-"
-        for char in label
-    ).strip("-")
-    if not safe_label:
-        return FALLBACK_SERVICE_HOSTNAME
-    return f"{safe_label}.local."
+    """Return a service-specific mDNS hostname for the SRV record.
+
+    Uses a fixed name to avoid advertising A records that overlap with
+    the system's own Bonjour hostname registration, which can trigger
+    macOS to change the user's LocalHostName.
+    """
+    return FALLBACK_SERVICE_HOSTNAME
 
 
 def _iter_ifaddr_ipv4_addresses() -> list[tuple[str, int | None]]:
@@ -281,8 +287,18 @@ class MdnsAdvertiser:
             server=advertisement.server,
             parsed_addresses=advertisement.parsed_addresses,
         )
+        name_conflict_exception = _load_non_unique_name_exception()
         try:
-            await zeroconf.async_register_service(info, allow_name_change=True)
+            await zeroconf.async_register_service(info, allow_name_change=False)
+        except name_conflict_exception:
+            logger.warning(
+                "mDNS service name conflict detected (a previous gateway instance "
+                "may not have shut down cleanly). mDNS advertisement disabled for "
+                "this session. The ESP32 will fall back to the configured "
+                "WebSocket URL."
+            )
+            await zeroconf.async_close()
+            return
         except Exception:
             await zeroconf.async_close()
             raise

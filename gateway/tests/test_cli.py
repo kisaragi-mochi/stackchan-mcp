@@ -7,7 +7,9 @@ covered by ``test_stdio_server.py`` and ``test_gateway.py``.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import signal
 import socket
 from pathlib import Path
 
@@ -193,6 +195,47 @@ def test_main_no_mdns_disables_advertisement(
     main(["--no-mdns"])
 
     assert called == {"advertise_mdns": False}
+
+
+@pytest.mark.asyncio
+async def test_run_sigterm_handler_cancels_and_stops_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if cli.sys.platform == "win32":
+        pytest.skip("POSIX signal handlers are not registered on Windows")
+
+    from stackchan_mcp import gateway as gateway_module
+    from stackchan_mcp import stdio_server
+
+    events: list[object] = []
+    registered_handlers: dict[int, object] = {}
+
+    class FakeGateway:
+        async def start(self, *, advertise_mdns: bool = True) -> None:
+            events.append(("start", advertise_mdns))
+
+        async def stop(self) -> None:
+            events.append("stop")
+
+    async def fake_run_stdio_server() -> None:
+        events.append("stdio")
+        handler = registered_handlers[signal.SIGTERM]
+        assert callable(handler)
+        handler()
+        await asyncio.sleep(0)
+
+    def fake_add_signal_handler(signum: int, callback: object) -> None:
+        registered_handlers[signum] = callback
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "add_signal_handler", fake_add_signal_handler)
+    monkeypatch.setattr(gateway_module, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(stdio_server, "run_stdio_server", fake_run_stdio_server)
+
+    await cli._run(advertise_mdns=False)
+
+    assert registered_handlers.keys() == {signal.SIGTERM}
+    assert events == [("start", False), "stdio", "stop"]
 
 
 def test_main_check_flag_remains_side_effect_free_with_no_mdns(
