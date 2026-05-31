@@ -231,7 +231,7 @@ async def test_advertiser_registers_service(monkeypatch: pytest.MonkeyPatch) -> 
     zeroconf = instances[0]
     assert len(zeroconf.registered) == 1
     info, allow_name_change = zeroconf.registered[0]
-    assert allow_name_change is False
+    assert allow_name_change is True
     assert info.type == "_stackchan-mcp._tcp.local."
     assert info.name == "stackchan-mcp._stackchan-mcp._tcp.local."
     assert info.kwargs["port"] == 8765
@@ -245,14 +245,12 @@ async def test_advertiser_registers_service(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_advertiser_disables_mdns_when_service_name_conflicts(
+async def test_advertiser_warns_when_service_name_changes(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    instances: list[ConflictingAsyncZeroconf] = []
-
-    class NameConflict(Exception):
-        pass
+    instances: list[RenamingAsyncZeroconf] = []
+    renamed_service_name = "stackchan-mcp-2._stackchan-mcp._tcp.local."
 
     class FakeServiceInfo:
         def __init__(self, service_type: str, service_name: str, **kwargs) -> None:
@@ -260,9 +258,10 @@ async def test_advertiser_disables_mdns_when_service_name_conflicts(
             self.name = service_name
             self.kwargs = kwargs
 
-    class ConflictingAsyncZeroconf:
+    class RenamingAsyncZeroconf:
         def __init__(self) -> None:
             self.registered = []
+            self.unregistered = []
             self.closed = False
             instances.append(self)
 
@@ -270,7 +269,10 @@ async def test_advertiser_disables_mdns_when_service_name_conflicts(
             self, info: FakeServiceInfo, *, allow_name_change: bool = False
         ) -> None:
             self.registered.append((info, allow_name_change))
-            raise NameConflict("duplicate service name")
+            info.name = renamed_service_name
+
+        async def async_unregister_service(self, info: FakeServiceInfo) -> None:
+            self.unregistered.append(info)
 
         async def async_close(self) -> None:
             self.closed = True
@@ -278,10 +280,7 @@ async def test_advertiser_disables_mdns_when_service_name_conflicts(
     monkeypatch.setattr(
         mdns,
         "_load_zeroconf_classes",
-        lambda: (ConflictingAsyncZeroconf, FakeServiceInfo),
-    )
-    monkeypatch.setattr(
-        mdns, "_load_non_unique_name_exception", lambda: NameConflict
+        lambda: (RenamingAsyncZeroconf, FakeServiceInfo),
     )
     caplog.set_level("WARNING", logger=mdns.__name__)
 
@@ -291,12 +290,19 @@ async def test_advertiser_disables_mdns_when_service_name_conflicts(
     assert len(instances) == 1
     zeroconf = instances[0]
     assert len(zeroconf.registered) == 1
-    _info, allow_name_change = zeroconf.registered[0]
-    assert allow_name_change is False
+    info, allow_name_change = zeroconf.registered[0]
+    assert allow_name_change is True
+    assert info.name == renamed_service_name
+    assert zeroconf.closed is False
+    assert advertiser._zeroconf is zeroconf
+    assert advertiser._service_info is info
+    assert "modified name" in caplog.text
+    assert renamed_service_name in caplog.text
+
+    await advertiser.stop()
+
+    assert zeroconf.unregistered == [info]
     assert zeroconf.closed is True
-    assert advertiser._zeroconf is None
-    assert advertiser._service_info is None
-    assert "mDNS service name conflict detected" in caplog.text
 
 
 @pytest.mark.asyncio

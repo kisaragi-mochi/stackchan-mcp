@@ -51,15 +51,6 @@ def _load_zeroconf_classes() -> tuple[type[Any], type[Any]]:
     return AsyncZeroconf, ServiceInfo
 
 
-def _load_non_unique_name_exception() -> type[Exception]:
-    try:
-        from zeroconf import NonUniqueNameException
-    except ImportError:  # pragma: no cover - compatibility with older zeroconf
-        from zeroconf._exceptions import NonUniqueNameException
-
-    return NonUniqueNameException
-
-
 def _is_usable_ipv4(address: str) -> bool:
     try:
         ip = ipaddress.ip_address(address)
@@ -287,26 +278,27 @@ class MdnsAdvertiser:
             server=advertisement.server,
             parsed_addresses=advertisement.parsed_addresses,
         )
-        name_conflict_exception = _load_non_unique_name_exception()
         try:
-            await zeroconf.async_register_service(info, allow_name_change=False)
-        except name_conflict_exception:
-            logger.warning(
-                "mDNS service name conflict detected (a previous gateway instance "
-                "may not have shut down cleanly). mDNS advertisement disabled for "
-                "this session. The ESP32 will fall back to the configured "
-                "WebSocket URL."
-            )
-            await zeroconf.async_close()
-            return
+            await zeroconf.async_register_service(info, allow_name_change=True)
         except Exception:
             await zeroconf.async_close()
             raise
         self._zeroconf = zeroconf
         self._service_info = info
+        registered_name = getattr(info, "name", advertisement.service_name)
+        if registered_name != advertisement.service_name:
+            logger.warning(
+                "mDNS service registered under a modified name %s (requested %s). "
+                "A previous gateway instance may not have shut down cleanly and its "
+                "registration is still visible on the network. The ESP32 still "
+                "discovers this gateway by service type, so auto-discovery keeps "
+                "working; the stale entry clears when its mDNS TTL expires.",
+                registered_name,
+                advertisement.service_name,
+            )
         logger.info(
             "mDNS advertising %s on port %d with addresses %s",
-            getattr(info, "name", advertisement.service_name),
+            registered_name,
             advertisement.port,
             ", ".join(advertisement.parsed_addresses),
         )
