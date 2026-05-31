@@ -9,6 +9,9 @@
 #if CONFIG_STACKCHAN_MDNS_DISCOVERY
 #include <esp_err.h>
 #include <esp_netif_ip_addr.h>
+#include <esp_wifi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <mdns.h>
 #endif
 
@@ -21,6 +24,9 @@ constexpr char kProtocol[] = "_tcp";
 constexpr size_t kMaxResults = 8;
 
 #if CONFIG_STACKCHAN_MDNS_DISCOVERY
+
+constexpr int kQueryAttempts = 3;
+constexpr uint32_t kQueryRetryGapMs = 200;
 
 std::string SafeString(const char* value) {
     return value == nullptr ? std::string() : std::string(value);
@@ -125,12 +131,52 @@ std::optional<std::vector<MdnsGatewayCandidate>> DiscoverStackchanGateway(uint32
         return std::nullopt;
     }
 
-    err = mdns_query_ptr(kServiceType, kProtocol, timeout_ms, kMaxResults, &results);
+    wifi_ps_type_t previous_ps_mode = WIFI_PS_MIN_MODEM;
+    esp_err_t ps_get_err = esp_wifi_get_ps(&previous_ps_mode);
+    if (ps_get_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to read WiFi power-save mode before mDNS browse: %s",
+                 esp_err_to_name(ps_get_err));
+    }
+
+    esp_err_t ps_set_err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ps_set_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to disable WiFi power-save during mDNS browse: %s",
+                 esp_err_to_name(ps_set_err));
+    }
+
+    auto restore_wifi_power_save = [&]() {
+        esp_err_t ps_restore_err = esp_wifi_set_ps(previous_ps_mode);
+        if (ps_restore_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to restore WiFi power-save mode after mDNS browse: %s",
+                     esp_err_to_name(ps_restore_err));
+        }
+    };
+
+    for (int attempt = 0; attempt < kQueryAttempts; ++attempt) {
+        if (attempt > 0) {
+            vTaskDelay(pdMS_TO_TICKS(kQueryRetryGapMs));
+        }
+
+        err = mdns_query_ptr(kServiceType, kProtocol, timeout_ms, kMaxResults, &results);
+        if (err == ESP_OK && results != nullptr) {
+            break;
+        }
+
+        if (results != nullptr) {
+            mdns_query_results_free(results);
+            results = nullptr;
+        }
+        ESP_LOGI(TAG, "mDNS query attempt %d/%d returned no results",
+                 attempt + 1, kQueryAttempts);
+    }
+
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "mDNS gateway query failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "mDNS gateway query failed after %d attempts: %s",
+                 kQueryAttempts, esp_err_to_name(err));
         if (results != nullptr) {
             mdns_query_results_free(results);
         }
+        restore_wifi_power_save();
         mdns_free();
         return std::nullopt;
     }
@@ -201,6 +247,7 @@ std::optional<std::vector<MdnsGatewayCandidate>> DiscoverStackchanGateway(uint32
     if (results != nullptr) {
         mdns_query_results_free(results);
     }
+    restore_wifi_power_save();
     mdns_free();
     return selected;
 #else

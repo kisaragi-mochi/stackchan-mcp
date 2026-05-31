@@ -246,6 +246,12 @@ documented-only.
   to ease real slow-AP debugging. Contributed via
   [PR #186](https://github.com/kisaragi-mochi/stackchan-mcp/pull/186).
 
+- mDNS browse reliability fixes (Issue #245):
+  - Raise the caller-side `DiscoverStackchanGateway` timeout from 1500ms to 5000ms to accommodate typical Wi-Fi multicast round trips
+  - Add a 3-attempt in-call retry loop with a 200ms gap around `mdns_query_ptr` to mitigate single-packet multicast drops
+  - Disable Wi-Fi power-save (`esp_wifi_set_ps(WIFI_PS_NONE)`) around the browse window and restore the previous mode after the browse completes, to reduce multicast frame loss while the STA is otherwise in `LOW_POWER (MAX_MODEM)`
+  - Boot-time passive browse pre-warm (Issue #245 Step C) is deferred for evaluation after Steps A/B/D have been verified in the field
+
 ### Gateway
 
 - Fixed: mDNS advertiser no longer interferes with the host OS Bonjour

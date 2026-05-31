@@ -265,7 +265,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
         AddGatewayCandidate(gateway_candidates, nvs_url, "websocket.url");
         if (nvs_url.empty()) {
 #ifdef CONFIG_STACKCHAN_MDNS_DISCOVERY
-            auto mdns_candidates = DiscoverStackchanGateway(1500);
+            auto mdns_candidates = DiscoverStackchanGateway(5000);
             if (mdns_candidates.has_value()) {
                 for (const auto& mdns_candidate : *mdns_candidates) {
                     AddGatewayCandidate(gateway_candidates,
