@@ -32,6 +32,10 @@ documented-only.
 
 ### Firmware
 
+- Fixed: empty WebSocket gateway discovery results now fall through to the shared reconnect failure path, clearing the intentional-close latch so retries continue after a gateway restart.
+
+- Fixed: post-handshake WebSocket disconnects re-arm the existing reconnect timer without double-advancing backoff.
+
 - Changed: the device no longer auto-enters Listening after a TTS
   utterance ends. The `Application::OnIncomingJson` handler for the
   `tts.stop` event used to fall through to

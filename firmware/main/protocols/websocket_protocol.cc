@@ -42,6 +42,7 @@ WebsocketProtocol::WebsocketProtocol() {
                 if (!alive->load()) {
                     return;
                 }
+                protocol->reconnect_timer_armed_.store(false);
                 // Re-check intent on the main task. esp_timer_stop() does
                 // not cancel work that the timer has already re-posted via
                 // Application::Schedule, so a CloseAudioChannel() or
@@ -344,10 +345,14 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
     auto network = Board::GetInstance().GetNetwork();
     if (gateway_candidates.empty()) {
         ESP_LOGE(TAG, "WS_URL not configured: no websocket gateway URL candidates available");
-        if (report_error) {
-            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
-        }
-        return false;
+        // Do not return early here: fall through to the shared failure exit so
+        // intentional_close_ is cleared and ScheduleReconnect() can arm the
+        // next retry. Returning here left the latch set from the prologue, so
+        // ScheduleReconnect() later refused the retry after a single mDNS
+        // 0-result on gateway restart (Issue #61 real-device finding). The
+        // loop below naturally performs zero iterations for an empty vector,
+        // and the shared exit reports SERVER_NOT_CONNECTED because
+        // server_hello_timed_out remains false on this path.
     }
 
     if (!token.empty() && token.find(" ") == std::string::npos) {
@@ -475,7 +480,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             // before resetting the socket. A false reading here means
             // either the candidate never completed handshake or the
             // close was intentional — neither should reconnect.
-            if (!notify_disconnect->load()) {
+            if (!notify_disconnect->load(std::memory_order_acquire)) {
                 ESP_LOGI(TAG, "Websocket disconnected (no reconnect: candidate failed or intentional close)");
                 return;
             }
@@ -627,10 +632,15 @@ void WebsocketProtocol::ScheduleReconnect() {
         ESP_LOGI(TAG, "Reconnect not scheduled (intentional close in progress)");
         return;
     }
+    bool expected = false;
+    if (!reconnect_timer_armed_.compare_exchange_strong(expected, true)) {
+        ESP_LOGI(TAG, "Reconnect already scheduled");
+        return;
+    }
 
-    StopReconnectTimer();
     esp_err_t err = esp_timer_start_once(reconnect_timer_, reconnect_interval_ms_ * 1000);
     if (err != ESP_OK) {
+        reconnect_timer_armed_.store(false);
         ESP_LOGW(TAG, "Failed to start reconnect timer (err=%d); reconnect not scheduled", err);
         return;
     }
@@ -639,6 +649,7 @@ void WebsocketProtocol::ScheduleReconnect() {
 }
 
 void WebsocketProtocol::StopReconnectTimer() {
+    reconnect_timer_armed_.store(false);
     if (reconnect_timer_ == nullptr) {
         return;
     }
