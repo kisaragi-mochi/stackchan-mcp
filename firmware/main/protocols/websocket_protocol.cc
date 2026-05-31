@@ -345,10 +345,14 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
     auto network = Board::GetInstance().GetNetwork();
     if (gateway_candidates.empty()) {
         ESP_LOGE(TAG, "WS_URL not configured: no websocket gateway URL candidates available");
-        if (report_error) {
-            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
-        }
-        return false;
+        // Do not return early here: fall through to the shared failure exit so
+        // intentional_close_ is cleared and ScheduleReconnect() can arm the
+        // next retry. Returning here left the latch set from the prologue, so
+        // ScheduleReconnect() later refused the retry after a single mDNS
+        // 0-result on gateway restart (Issue #61 real-device finding). The
+        // loop below naturally performs zero iterations for an empty vector,
+        // and the shared exit reports SERVER_NOT_CONNECTED because
+        // server_hello_timed_out remains false on this path.
     }
 
     if (!token.empty() && token.find(" ") == std::string::npos) {
