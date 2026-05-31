@@ -3512,10 +3512,17 @@ private:
             last_motion_end_valid_ = false;
         }
         // Keep the idle window scoped to the currently engaged interval.
-        // Released/partial/releasing/uncertain states must not age a stale
-        // timer into the next re-engage.
-        if (torque_state_.load(std::memory_order_acquire) !=
-            TorqueState::kEngaged) {
+        // Released/partial/releasing states must not age a stale timer
+        // into the next re-engage. kUncertain is treated as engaged for
+        // auto-release purposes: if the kAutoIdle OFF bus frame was lost
+        // on the UART path, the auto-release retry must continue so the
+        // device does not strand with torque physically ON; if the OFF
+        // was actually delivered, the next retry short-circuits via the
+        // idempotent path (Issue #170 follow-up).
+        auto current_state =
+            torque_state_.load(std::memory_order_acquire);
+        if (current_state != TorqueState::kEngaged &&
+            current_state != TorqueState::kUncertain) {
             last_motion_end_valid_ = false;
             return;
         }
