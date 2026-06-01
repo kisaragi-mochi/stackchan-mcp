@@ -796,9 +796,11 @@ private:
     static constexpr uint32_t MOTION_TICK_MS = 20;
     static constexpr uint32_t MOTION_DEFAULT_DURATION_MS = 600;
     // Speed-based motion API (Issue #129).
-    // MIN_SMOOTH_SPEED_DPS is the on-device measured smoothness floor.
-    // Below this, motion looks stepped on SCS0009 at MOTION_TICK_MS=20 ms
-    // (5 step/tick "transition out", measured 2026-05-15).
+    // MIN_SMOOTH_SPEED_DPS is the on-device measured smoothness floor
+    // (5 step/tick "transition out", measured 2026-05-15). Speeds below
+    // this look textured on SCS0009 at MOTION_TICK_MS=20 ms; the firmware
+    // permits sub-floor speeds (logged with ESP_LOGW) so callers like the
+    // gateway "low" preset (30 dps) can deliver deliberately slow motion.
     static constexpr int MIN_SMOOTH_SPEED_DPS = 72;
     // MAX_SPEED_DPS is the SCS0009 datasheet reliability test working speed
     // (60 deg / 0.25 s = 240 deg/s, validated for >50k cycles at 1/2 rated load).
@@ -3667,9 +3669,13 @@ private:
         if (safe_speed <= 0) {
             safe_speed = DEFAULT_SPEED_DPS;
         } else if (safe_speed < MIN_SMOOTH_SPEED_DPS) {
-            ESP_LOGW(TAG, "WriteHeadAngles: speed_dps=%d below MIN_SMOOTH_SPEED_DPS=%d, clamping",
+            // Below the on-device measured smoothness floor -- motion will look
+            // textured on SCS0009 at MOTION_TICK_MS=20 ms. This is intentionally
+            // permitted (the gateway "low" preset is 30 dps, deliberately below
+            // the floor for slow, expressive motion per Issue #129 design).
+            // Log once so callers can see they are below the smooth zone.
+            ESP_LOGW(TAG, "WriteHeadAngles: speed_dps=%d below MIN_SMOOTH_SPEED_DPS=%d (textured motion is expected)",
                      speed_dps, MIN_SMOOTH_SPEED_DPS);
-            safe_speed = MIN_SMOOTH_SPEED_DPS;
         } else if (safe_speed > MAX_SPEED_DPS) {
             ESP_LOGW(TAG, "WriteHeadAngles: speed_dps=%d above MAX_SPEED_DPS=%d, clamping",
                      speed_dps, MAX_SPEED_DPS);

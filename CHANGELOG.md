@@ -32,7 +32,7 @@ documented-only.
 
 ### Firmware
 
-- Added `WriteHeadAngles(yaw, pitch, speed_dps)` overload for speed-based motion control on the user-driven `move_head` path. Existing duration-based overload preserved; boot-init path unchanged in this PR. Adds `MIN_SMOOTH_SPEED_DPS=72` (on-device measured floor) and `MAX_SPEED_DPS=240` (SCS0009 datasheet ceiling) clamping constants. (#129)
+- Added `WriteHeadAngles(yaw, pitch, speed_dps)` overload for speed-based motion control on the user-driven `move_head` path. Existing duration-based overload preserved; boot-init path unchanged in this PR. Adds `MAX_SPEED_DPS=240` (SCS0009 datasheet ceiling) safety clamp and `MIN_SMOOTH_SPEED_DPS=72` documented smoothness floor (sub-floor speeds are permitted with an `ESP_LOGW` warning so the gateway `"low"` preset can deliver deliberately slow motion). (#129)
 
 - Add `kUncertain` state to `TorqueState`: an `EnableTorque(OFF)` (or
   `ON`) attempt that loses its ACK no longer publishes `kEngaged` from
