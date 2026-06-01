@@ -420,6 +420,10 @@ documented-only.
 
 ### Docs
 
+- Add Issue #178 Phase A spike doc — HTTP transport choice analysis
+  (SSE vs streamable HTTP), API sketch, #177 / #169 / #73 compatibility
+  checks. Implementation deferred to follow-up PRs. (#178)
+
 - Added: tracked `AGENTS.md` files at four levels (root, `gateway/`,
   `firmware/`, `firmware/main/boards/stackchan/`) with review guidelines
   for automated code review and public developer guides covering build,
