@@ -30,6 +30,13 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Added: function-dark #178 Phase B chunk 1 command queue module with an
+  environment-configurable bounded FIFO, correlation metadata for response
+  routing, a single-flight dispatcher loop, and a standardized queue-full
+  error payload helper.
+
 ### Firmware
 
 - Added `WriteHeadAngles(yaw, pitch, speed_dps)` overload for speed-based motion control on the user-driven `move_head` path. Existing duration-based overload preserved; boot-init path unchanged in this PR. Adds `MAX_SPEED_DPS=240` (SCS0009 datasheet ceiling) safety clamp and `MIN_SMOOTH_SPEED_DPS=72` documented smoothness floor (sub-floor speeds are permitted with an `ESP_LOGW` warning so the gateway `"low"` preset can deliver deliberately slow motion). (#129)
