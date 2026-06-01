@@ -58,7 +58,12 @@ documented-only.
   gateway path and the streamable-http placeholder. `acquire_lock` itself
   also now rejects `http_endpoint` and `started_by` metadata when
   `mode="stdio"` so daemon-mode diagnostics cannot silently leak into
-  `#177`-baseline stdio lock files via public API misuse.
+  `#177`-baseline stdio lock files via public API misuse. `read_lock` now
+  treats invalid or unknown optional metadata (for example a future-mode
+  value or a non-string `http_endpoint`) as missing fields rather than as
+  a full read failure, so the four required `#177` base fields remain
+  authoritative for the claim/refuse decision and `acquire_lock` cannot
+  silently unlink a live owner's lock under schema drift.
 
 ### Firmware
 

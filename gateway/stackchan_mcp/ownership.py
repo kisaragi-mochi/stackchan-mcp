@@ -130,23 +130,27 @@ def read_lock(path: Path = LOCK_PATH) -> LockInfo | None:
         "host": host,
     }
 
-    if "mode" in raw:
-        mode = raw["mode"]
-        if mode not in ("stdio", "streamable-http"):
-            return None
+    # Optional metadata: silently ignore unknown or malformed values so a
+    # schema-drift writer (for example a future-mode lock file or a
+    # partially compatible external writer) cannot cause read_lock to
+    # return None and trick acquire_lock into unlinking a live owner's
+    # lock file. The four required #177 base fields above are
+    # authoritative for the claim/refuse decision; validating optional
+    # metadata is a separate diagnostic concern.
+
+    mode = raw.get("mode")
+    if mode in ("stdio", "streamable-http"):
         info["mode"] = mode
 
     if "http_endpoint" in raw:
         http_endpoint = raw["http_endpoint"]
-        if http_endpoint is not None and not isinstance(http_endpoint, str):
-            return None
-        info["http_endpoint"] = http_endpoint
+        if http_endpoint is None or isinstance(http_endpoint, str):
+            info["http_endpoint"] = http_endpoint
 
     if "started_by" in raw:
         started_by = raw["started_by"]
-        if started_by is not None and not isinstance(started_by, str):
-            return None
-        info["started_by"] = started_by
+        if started_by is None or isinstance(started_by, str):
+            info["started_by"] = started_by
 
     return info
 
