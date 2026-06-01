@@ -45,12 +45,20 @@ documented-only.
   `--transport stdio` compatibility and a Streamable HTTP daemon
   placeholder that releases ownership before the chunk 4 wiring lands.
 
-- Fixed: #178 Phase B chunk 2+3 streamable-http serve placeholder now
-  releases the ownership lock under every failure path between lock claim
-  and the `NotImplementedError` chunk 4 boundary; `acquire_lock` now
-  rejects `http_endpoint` and `started_by` metadata when `mode="stdio"` so
-  daemon-mode diagnostics cannot silently leak into `#177`-baseline stdio
-  lock files via public API misuse.
+- Fixed: #178 Phase B chunk 2+3 ownership lock cleanup safety. The
+  streamable-http `serve` placeholder now guards its `finally` cleanup with
+  an `acquired` flag so an `OwnershipError` raised by an existing owner is
+  not followed by an erroneous `release_lock()` that would unlink the
+  existing owner's lock file. The shared `_acquire_startup_lock` helper
+  now wraps the post-claim ack-print plus `atexit.register` step in a
+  `try/except BaseException` that releases the just-claimed lock and
+  re-raises, so a stderr-write failure (or any other intermediate failure
+  between `acquire_lock` returning and the caller's own `try/finally`)
+  cannot strand a live-pid lock — this safety now covers both the stdio
+  gateway path and the streamable-http placeholder. `acquire_lock` itself
+  also now rejects `http_endpoint` and `started_by` metadata when
+  `mode="stdio"` so daemon-mode diagnostics cannot silently leak into
+  `#177`-baseline stdio lock files via public API misuse.
 
 ### Firmware
 

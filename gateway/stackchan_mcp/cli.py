@@ -711,12 +711,17 @@ def _acquire_startup_lock(
         print(str(exc), file=sys.stderr)
         sys.exit(1)
 
-    print(
-        "stackchan-mcp: acquired ownership lock "
-        f"(owner_id={info['owner_id']}, pid={info['pid']})",
-        file=sys.stderr,
-    )
-    atexit.register(release_lock)
+    try:
+        print(
+            "stackchan-mcp: acquired ownership lock "
+            f"(owner_id={info['owner_id']}, pid={info['pid']})",
+            file=sys.stderr,
+        )
+        atexit.register(release_lock)
+    except BaseException:
+        release_lock()
+        raise
+
     return info
 
 
@@ -757,15 +762,18 @@ def _run_streamable_http_placeholder() -> None:
 
     _configure_gateway_startup()
     host, port = _resolve_mcp_http_endpoint()
+    acquired = False
     try:
         _acquire_startup_lock(
             mode=_STREAMABLE_HTTP_TRANSPORT,
             http_endpoint=f"{host}:{port}",
             started_by="cli-serve",
         )
+        acquired = True
         raise NotImplementedError("Streamable HTTP daemon lands in #178 chunk 4")
     finally:
-        release_lock()
+        if acquired:
+            release_lock()
 
 
 def main(argv: list[str] | None = None) -> None:
