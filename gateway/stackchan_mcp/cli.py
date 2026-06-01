@@ -22,9 +22,13 @@ import shutil
 import socket
 import subprocess
 import sys
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from . import __version__
+
+if TYPE_CHECKING:
+    from .ownership import LockInfo, LockMode
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +61,18 @@ Environment variables:
                            (default 8765).
   CAPTURE_PORT             Port for the HTTP capture server
                            (default 8766).
+  MCP_HTTP_HOST            Bind address for the Streamable HTTP MCP server
+                           (default 127.0.0.1).
+  MCP_HTTP_PORT            Port for the Streamable HTTP MCP server
+                           (default 8767).
 
 See gateway/README.md and the top-level README.md for full setup,
 including pairing the ESP32 firmware and configuring the WiFi gateway URL.
 """
+
+_STDIO_TRANSPORT = "stdio"
+_STREAMABLE_HTTP_TRANSPORT = "streamable-http"
+_TRANSPORT_CHOICES = (_STDIO_TRANSPORT, _STREAMABLE_HTTP_TRANSPORT)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -92,6 +104,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-mdns",
+        action="store_true",
+        help="Disable mDNS/DNS-SD advertisement for the WebSocket endpoint.",
+    )
+    subparsers = parser.add_subparsers(dest="command", metavar="{serve}")
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Start the StackChan gateway.",
+        description="Start the StackChan gateway using the selected transport.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    serve_parser.add_argument(
+        "--transport",
+        choices=_TRANSPORT_CHOICES,
+        default=_STDIO_TRANSPORT,
+        help="Gateway transport to serve (default: stdio).",
+    )
+    serve_parser.add_argument(
+        "--no-mdns",
+        dest="serve_no_mdns",
         action="store_true",
         help="Disable mDNS/DNS-SD advertisement for the WebSocket endpoint.",
     )
@@ -411,10 +442,16 @@ def _run_ownership_check() -> int:
         print("ownership preflight: ready")
         print("Result: ready. Exit 0.")
     elif is_pid_alive(info["pid"]):
-        print(
-            f"owner_id={info['owner_id']} pid={info['pid']} "
-            f"start_ts={info['start_ts']} host={info['host']}"
-        )
+        fields = [
+            f"owner_id={info['owner_id']}",
+            f"pid={info['pid']}",
+            f"start_ts={info['start_ts']}",
+            f"host={info['host']}",
+        ]
+        for key in ("mode", "http_endpoint", "started_by"):
+            if key in info:
+                fields.append(f"{key}={info[key]}")
+        print(" ".join(fields))
     else:
         print(f"stale lock found: pid {info['pid']} not alive")
     return 0
@@ -634,14 +671,111 @@ async def _run(*, advertise_mdns: bool = True) -> None:
         await gateway.stop()
 
 
+def _configure_gateway_startup() -> None:
+    """Load runtime configuration and logging for gateway startup paths."""
+    _load_dotenv()
+    _ensure_libopus_findable()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+
+def _acquire_startup_lock(
+    *,
+    mode: "LockMode" = _STDIO_TRANSPORT,
+    http_endpoint: str | None = None,
+    started_by: str | None = None,
+) -> "LockInfo":
+    """Claim the gateway ownership lock and register normal cleanup."""
+    from .ownership import (
+        OwnershipError,
+        acquire_lock,
+        generate_owner_id,
+        release_lock,
+    )
+
+    owner_id = generate_owner_id()
+    try:
+        if mode == _STDIO_TRANSPORT and http_endpoint is None and started_by is None:
+            info = acquire_lock(owner_id)
+        else:
+            info = acquire_lock(
+                owner_id,
+                mode=mode,
+                http_endpoint=http_endpoint,
+                started_by=started_by,
+            )
+    except OwnershipError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    print(
+        "stackchan-mcp: acquired ownership lock "
+        f"(owner_id={info['owner_id']}, pid={info['pid']})",
+        file=sys.stderr,
+    )
+    atexit.register(release_lock)
+    return info
+
+
+def _prepare_stdio_startup() -> "LockInfo":
+    """Prepare the existing stdio gateway flow without changing its lock shape."""
+    _configure_gateway_startup()
+    return _acquire_startup_lock()
+
+
+def _run_stdio_gateway(*, advertise_mdns: bool = True) -> None:
+    """Run the existing stdio MCP gateway flow."""
+    from .ownership import release_lock
+
+    _prepare_stdio_startup()
+    try:
+        try:
+            asyncio.run(_run(advertise_mdns=advertise_mdns))
+        except KeyboardInterrupt:
+            pass
+    finally:
+        release_lock()
+
+
+def _resolve_mcp_http_endpoint() -> tuple[str, int]:
+    """Resolve the Streamable HTTP daemon endpoint from environment."""
+    host = os.getenv("MCP_HTTP_HOST", "127.0.0.1")
+    raw_port = os.getenv("MCP_HTTP_PORT", "8767")
+    port, source = _validate_port_value(raw_port, "MCP_HTTP_PORT")
+    if port is None:
+        print(f"stackchan-mcp: invalid MCP_HTTP_PORT: {source}", file=sys.stderr)
+        sys.exit(1)
+    return host, port
+
+
+def _run_streamable_http_placeholder() -> None:
+    """Claim daemon ownership, then stop at the chunk 4 HTTP wiring boundary."""
+    from .ownership import release_lock
+
+    _configure_gateway_startup()
+    host, port = _resolve_mcp_http_endpoint()
+    _acquire_startup_lock(
+        mode=_STREAMABLE_HTTP_TRANSPORT,
+        http_endpoint=f"{host}:{port}",
+        started_by="cli-serve",
+    )
+    try:
+        raise NotImplementedError("Streamable HTTP daemon lands in #178 chunk 4")
+    finally:
+        release_lock()
+
+
 def main(argv: list[str] | None = None) -> None:
     """Console-script entry point.
 
     Parses ``--help`` / ``--version`` / ``--check`` / ``--preflight`` early
-    (without starting the server), then loads ``.env``, configures logging,
-    claims gateway ownership, and starts the gateway. Side effects are
-    intentionally scoped to this function so that ``import stackchan_mcp``
-    stays clean.
+    (without starting the server), then dispatches either the legacy
+    zero-subcommand stdio flow or the ``serve`` subcommand. Side effects
+    are intentionally scoped below argument parsing so that
+    ``import stackchan_mcp`` stays clean.
     """
     parser = _build_arg_parser()
     # argparse exits with status 0 on --help / --version before reaching
@@ -656,42 +790,19 @@ def main(argv: list[str] | None = None) -> None:
         # via the path below.
         sys.exit(_run_preflight())
 
-    _load_dotenv()
-    _ensure_libopus_findable()
+    if args.command is None:
+        _run_stdio_gateway(advertise_mdns=not args.no_mdns)
+        return
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-
-    from .ownership import (
-        OwnershipError,
-        acquire_lock,
-        generate_owner_id,
-        release_lock,
-    )
-
-    owner_id = generate_owner_id()
-    try:
-        info = acquire_lock(owner_id)
-    except OwnershipError as exc:
-        print(str(exc), file=sys.stderr)
-        sys.exit(1)
-
-    print(
-        "stackchan-mcp: acquired ownership lock "
-        f"(owner_id={info['owner_id']}, pid={info['pid']})",
-        file=sys.stderr,
-    )
-    atexit.register(release_lock)
-
-    try:
-        try:
-            asyncio.run(_run(advertise_mdns=not args.no_mdns))
-        except KeyboardInterrupt:
-            pass
-    finally:
-        release_lock()
+    if args.command == "serve":
+        if args.transport == _STDIO_TRANSPORT:
+            advertise_mdns = not (
+                args.no_mdns or getattr(args, "serve_no_mdns", False)
+            )
+            _run_stdio_gateway(advertise_mdns=advertise_mdns)
+            return
+        _run_streamable_http_placeholder()
+        return
 
 
 if __name__ == "__main__":

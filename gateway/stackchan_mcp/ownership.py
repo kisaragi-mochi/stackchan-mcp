@@ -9,17 +9,26 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 LOCK_DIR = Path.home() / ".stackchan-mcp"
 LOCK_PATH = LOCK_DIR / "owner.lock"
 
 
-class LockInfo(TypedDict):
+LockMode = Literal["stdio", "streamable-http"]
+
+
+class _BaseLockInfo(TypedDict):
     owner_id: str
     pid: int
     start_ts: str
     host: str
+
+
+class LockInfo(_BaseLockInfo, total=False):
+    mode: LockMode
+    http_endpoint: str | None
+    started_by: str | None
 
 
 class OwnershipError(RuntimeError):
@@ -114,12 +123,32 @@ def read_lock(path: Path = LOCK_PATH) -> LockInfo | None:
     ):
         return None
 
-    return {
+    info: LockInfo = {
         "owner_id": owner_id,
         "pid": pid,
         "start_ts": start_ts,
         "host": host,
     }
+
+    if "mode" in raw:
+        mode = raw["mode"]
+        if mode not in ("stdio", "streamable-http"):
+            return None
+        info["mode"] = mode
+
+    if "http_endpoint" in raw:
+        http_endpoint = raw["http_endpoint"]
+        if http_endpoint is not None and not isinstance(http_endpoint, str):
+            return None
+        info["http_endpoint"] = http_endpoint
+
+    if "started_by" in raw:
+        started_by = raw["started_by"]
+        if started_by is not None and not isinstance(started_by, str):
+            return None
+        info["started_by"] = started_by
+
+    return info
 
 
 def _write_lock_atomic(info: LockInfo, path: Path = LOCK_PATH) -> None:
@@ -135,8 +164,24 @@ def _write_lock_atomic(info: LockInfo, path: Path = LOCK_PATH) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def acquire_lock(owner_id: str, path: Path = LOCK_PATH) -> LockInfo:
-    """Acquire the ownership lock. Raise OwnershipError on refuse."""
+def acquire_lock(
+    owner_id: str,
+    path: Path = LOCK_PATH,
+    *,
+    mode: LockMode = "stdio",
+    http_endpoint: str | None = None,
+    started_by: str | None = None,
+) -> LockInfo:
+    """Acquire the ownership lock. Raise OwnershipError on refuse.
+
+    The default stdio-mode call writes the original #177 lock shape so
+    older lock readers and ``stackchan-mcp --check`` output remain
+    compatible. Daemon transports can attach optional metadata for
+    diagnostics without changing the atomic hardlink claim.
+    """
+    if mode not in ("stdio", "streamable-http"):
+        raise ValueError(f"unsupported lock mode: {mode!r}")
+
     while True:
         existing = read_lock(path)
         if existing is not None:
@@ -160,6 +205,13 @@ def acquire_lock(owner_id: str, path: Path = LOCK_PATH) -> LockInfo:
             "start_ts": _now_iso(),
             "host": socket.gethostname(),
         }
+        if mode != "stdio":
+            info["mode"] = mode
+        if http_endpoint is not None:
+            info["http_endpoint"] = http_endpoint
+        if started_by is not None:
+            info["started_by"] = started_by
+
         try:
             _write_lock_atomic(info, path)
         except FileExistsError:

@@ -37,6 +37,14 @@ documented-only.
   routing, a single-flight dispatcher loop, and a standardized queue-full
   error payload helper.
 
+- Added: #178 Phase B chunk 2 ownership lock diagnostics metadata
+  (`mode`, `http_endpoint`, `started_by`) while preserving #177-format
+  stdio lock files and existing-format `--check` output.
+
+- Added: #178 Phase B chunk 3 `stackchan-mcp serve` CLI with permanent
+  `--transport stdio` compatibility and a Streamable HTTP daemon
+  placeholder that releases ownership before the chunk 4 wiring lands.
+
 ### Firmware
 
 - Added `WriteHeadAngles(yaw, pitch, speed_dps)` overload for speed-based motion control on the user-driven `move_head` path. Existing duration-based overload preserved; boot-init path unchanged in this PR. Adds `MAX_SPEED_DPS=240` (SCS0009 datasheet ceiling) safety clamp and `MIN_SMOOTH_SPEED_DPS=72` documented smoothness floor (sub-floor speeds are permitted with an `ESP_LOGW` warning so the gateway `"low"` preset can deliver deliberately slow motion). (#129)
