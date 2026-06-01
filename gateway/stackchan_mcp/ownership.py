@@ -229,8 +229,42 @@ def acquire_lock(
 
 
 def release_lock(path: Path = LOCK_PATH) -> None:
-    """Remove the lock file. Idempotent."""
+    """Remove the lock file. Idempotent.
+
+    This is the legacy, owner-unaware release primitive kept for backward
+    compatibility. New callers should prefer :func:`release_lock_if_owner`
+    so that a stale cleanup callback cannot unlink a successor process's
+    live lock.
+    """
     try:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def release_lock_if_owner(info: LockInfo, path: Path = LOCK_PATH) -> bool:
+    """Remove the lock file only if it still belongs to ``info``.
+
+    Returns ``True`` if the lock was removed, ``False`` if the on-disk
+    lock has a different ``owner_id`` / ``pid`` / ``start_ts`` or no
+    longer exists. This is the owner-scoped counterpart to
+    :func:`release_lock` and is intended for cleanup paths (``finally``
+    blocks, ``atexit.register``) where the caller may have lost ownership
+    between claim and cleanup — for example after the gateway exited and
+    a second process acquired the lock before the first process's
+    interpreter exit callbacks ran.
+    """
+    existing = read_lock(path)
+    if existing is None:
+        return False
+    if (
+        existing.get("owner_id") != info.get("owner_id")
+        or existing.get("pid") != info.get("pid")
+        or existing.get("start_ts") != info.get("start_ts")
+    ):
+        return False
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False

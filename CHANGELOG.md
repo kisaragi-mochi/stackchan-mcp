@@ -63,7 +63,17 @@ documented-only.
   value or a non-string `http_endpoint`) as missing fields rather than as
   a full read failure, so the four required `#177` base fields remain
   authoritative for the claim/refuse decision and `acquire_lock` cannot
-  silently unlink a live owner's lock under schema drift.
+  silently unlink a live owner's lock under schema drift. The shared
+  ownership-cleanup path is now owner-scoped via a new
+  `release_lock_if_owner(info)` helper that only unlinks the lock file
+  when `owner_id`, `pid`, and `start_ts` still match the caller's
+  claimed `LockInfo`. Both the `atexit.register` callback inside
+  `_acquire_startup_lock` and the explicit `finally` cleanup in the
+  stdio gateway and streamable-http placeholder now use this
+  owner-aware release, so a stale exit-callback from a previously-
+  released first process cannot unlink a successor process's live
+  lock. The legacy `release_lock()` primitive is kept for backward
+  compatibility but is no longer used by chunk 2+3 CLI cleanup paths.
 
 ### Firmware
 

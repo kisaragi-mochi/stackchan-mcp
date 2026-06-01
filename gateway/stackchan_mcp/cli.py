@@ -693,7 +693,7 @@ def _acquire_startup_lock(
         OwnershipError,
         acquire_lock,
         generate_owner_id,
-        release_lock,
+        release_lock_if_owner,
     )
 
     owner_id = generate_owner_id()
@@ -717,9 +717,9 @@ def _acquire_startup_lock(
             f"(owner_id={info['owner_id']}, pid={info['pid']})",
             file=sys.stderr,
         )
-        atexit.register(release_lock)
+        atexit.register(release_lock_if_owner, info)
     except BaseException:
-        release_lock()
+        release_lock_if_owner(info)
         raise
 
     return info
@@ -733,16 +733,16 @@ def _prepare_stdio_startup() -> "LockInfo":
 
 def _run_stdio_gateway(*, advertise_mdns: bool = True) -> None:
     """Run the existing stdio MCP gateway flow."""
-    from .ownership import release_lock
+    from .ownership import release_lock_if_owner
 
-    _prepare_stdio_startup()
+    info = _prepare_stdio_startup()
     try:
         try:
             asyncio.run(_run(advertise_mdns=advertise_mdns))
         except KeyboardInterrupt:
             pass
     finally:
-        release_lock()
+        release_lock_if_owner(info)
 
 
 def _resolve_mcp_http_endpoint() -> tuple[str, int]:
@@ -758,22 +758,21 @@ def _resolve_mcp_http_endpoint() -> tuple[str, int]:
 
 def _run_streamable_http_placeholder() -> None:
     """Claim daemon ownership, then stop at the chunk 4 HTTP wiring boundary."""
-    from .ownership import release_lock
+    from .ownership import release_lock_if_owner
 
     _configure_gateway_startup()
     host, port = _resolve_mcp_http_endpoint()
-    acquired = False
+    info: LockInfo | None = None
     try:
-        _acquire_startup_lock(
+        info = _acquire_startup_lock(
             mode=_STREAMABLE_HTTP_TRANSPORT,
             http_endpoint=f"{host}:{port}",
             started_by="cli-serve",
         )
-        acquired = True
         raise NotImplementedError("Streamable HTTP daemon lands in #178 chunk 4")
     finally:
-        if acquired:
-            release_lock()
+        if info is not None:
+            release_lock_if_owner(info)
 
 
 def main(argv: list[str] | None = None) -> None:
