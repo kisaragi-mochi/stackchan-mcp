@@ -45,6 +45,13 @@ documented-only.
   `--transport stdio` compatibility and a Streamable HTTP daemon
   placeholder that releases ownership before the chunk 4 wiring lands.
 
+- Fixed: #178 Phase B chunk 2+3 streamable-http serve placeholder now
+  releases the ownership lock under every failure path between lock claim
+  and the `NotImplementedError` chunk 4 boundary; `acquire_lock` now
+  rejects `http_endpoint` and `started_by` metadata when `mode="stdio"` so
+  daemon-mode diagnostics cannot silently leak into `#177`-baseline stdio
+  lock files via public API misuse.
+
 ### Firmware
 
 - Added `WriteHeadAngles(yaw, pitch, speed_dps)` overload for speed-based motion control on the user-driven `move_head` path. Existing duration-based overload preserved; boot-init path unchanged in this PR. Adds `MAX_SPEED_DPS=240` (SCS0009 datasheet ceiling) safety clamp and `MIN_SMOOTH_SPEED_DPS=72` documented smoothness floor (sub-floor speeds are permitted with an `ESP_LOGW` warning so the gateway `"low"` preset can deliver deliberately slow motion). (#129)

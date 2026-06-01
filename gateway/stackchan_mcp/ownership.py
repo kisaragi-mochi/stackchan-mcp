@@ -181,6 +181,11 @@ def acquire_lock(
     """
     if mode not in ("stdio", "streamable-http"):
         raise ValueError(f"unsupported lock mode: {mode!r}")
+    if mode == "stdio" and (http_endpoint is not None or started_by is not None):
+        raise ValueError(
+            "stdio-mode ownership locks must not carry http_endpoint or "
+            "started_by; these fields are reserved for non-stdio transports"
+        )
 
     while True:
         existing = read_lock(path)

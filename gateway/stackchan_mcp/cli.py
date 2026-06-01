@@ -757,12 +757,12 @@ def _run_streamable_http_placeholder() -> None:
 
     _configure_gateway_startup()
     host, port = _resolve_mcp_http_endpoint()
-    _acquire_startup_lock(
-        mode=_STREAMABLE_HTTP_TRANSPORT,
-        http_endpoint=f"{host}:{port}",
-        started_by="cli-serve",
-    )
     try:
+        _acquire_startup_lock(
+            mode=_STREAMABLE_HTTP_TRANSPORT,
+            http_endpoint=f"{host}:{port}",
+            started_by="cli-serve",
+        )
         raise NotImplementedError("Streamable HTTP daemon lands in #178 chunk 4")
     finally:
         release_lock()
