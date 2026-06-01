@@ -30,6 +30,13 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Added: function-dark #178 Phase B chunk 1 command queue module with an
+  environment-configurable bounded FIFO, correlation metadata for response
+  routing, a single-flight dispatcher loop, and a standardized queue-full
+  error payload helper.
+
 ### Firmware
 
 - Add `kUncertain` state to `TorqueState`: an `EnableTorque(OFF)` (or
