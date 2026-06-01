@@ -795,6 +795,19 @@ private:
 #endif
     static constexpr uint32_t MOTION_TICK_MS = 20;
     static constexpr uint32_t MOTION_DEFAULT_DURATION_MS = 600;
+    // Speed-based motion API (Issue #129).
+    // MIN_SMOOTH_SPEED_DPS is the on-device measured smoothness floor
+    // (5 step/tick "transition out", measured 2026-05-15). Speeds below
+    // this look textured on SCS0009 at MOTION_TICK_MS=20 ms; the firmware
+    // permits sub-floor speeds (logged with ESP_LOGW) so callers like the
+    // gateway "low" preset (30 dps) can deliver deliberately slow motion.
+    static constexpr int MIN_SMOOTH_SPEED_DPS = 72;
+    // MAX_SPEED_DPS is the SCS0009 datasheet reliability test working speed
+    // (60 deg / 0.25 s = 240 deg/s, validated for >50k cycles at 1/2 rated load).
+    static constexpr int MAX_SPEED_DPS = 240;
+    // DEFAULT_SPEED_DPS is used when the caller passes speed_dps <= 0.
+    // Matches the gateway "mid" preset.
+    static constexpr int DEFAULT_SPEED_DPS = 120;
     static constexpr uint32_t MOTION_PER_WRITE_TIME_MS = 30;
     static constexpr uint32_t MOTION_POLL_INTERVAL_MS = 50;
     static constexpr uint32_t AUTO_TORQUE_RELEASE_MIN_MS = 500;
@@ -3647,6 +3660,37 @@ private:
         xSemaphoreGive(motion_mutex_);
     }
 
+    void WriteHeadAngles(int yaw_deg, int pitch_deg, int speed_dps) {
+        if (!servo_ok_ || motion_driver_ == nullptr) {
+            ESP_LOGW(TAG, "WriteHeadAngles(speed_dps) skipped: servo not initialized");
+            return;
+        }
+        int safe_speed = speed_dps;
+        if (safe_speed <= 0) {
+            safe_speed = DEFAULT_SPEED_DPS;
+        } else if (safe_speed < MIN_SMOOTH_SPEED_DPS) {
+            // Below the on-device measured smoothness floor -- motion will look
+            // textured on SCS0009 at MOTION_TICK_MS=20 ms. This is intentionally
+            // permitted (the gateway "low" preset is 30 dps, deliberately below
+            // the floor for slow, expressive motion per Issue #129 design).
+            // Log once so callers can see they are below the smooth zone.
+            ESP_LOGW(TAG, "WriteHeadAngles: speed_dps=%d below MIN_SMOOTH_SPEED_DPS=%d (textured motion is expected)",
+                     speed_dps, MIN_SMOOTH_SPEED_DPS);
+        } else if (safe_speed > MAX_SPEED_DPS) {
+            ESP_LOGW(TAG, "WriteHeadAngles: speed_dps=%d above MAX_SPEED_DPS=%d, clamping",
+                     speed_dps, MAX_SPEED_DPS);
+            safe_speed = MAX_SPEED_DPS;
+        }
+
+        int yaw_delta = std::abs(yaw_deg - static_cast<int>(motion_driver_->GetYawDeg()));
+        int pitch_delta = std::abs(pitch_deg - static_cast<int>(motion_driver_->GetPitchDeg()));
+        int max_delta = std::max(yaw_delta, pitch_delta);
+        uint32_t duration_ms = std::max<uint32_t>(
+            MOTION_TICK_MS,
+            static_cast<uint32_t>(max_delta) * 1000U / static_cast<uint32_t>(safe_speed));
+        WriteHeadAngles(yaw_deg, pitch_deg, duration_ms);
+    }
+
     // Servo wobble: yaw -A -> +A -> -A -> 0. Each step is dispatched only
     // after the active MotionDriver reports idle, so the delegated path never
     // overwrites an in-flight SCS0009 internal motion.
@@ -4974,7 +5018,7 @@ private:
         // spot) above, plus Issue #80 / #98.
         mcp_server.AddTool(
             "self.robot.set_head_angles",
-            "Set the head angles of the robot. yaw: horizontal (-90 to 90). pitch: vertical. M5Stack-recommended operating range is 5 to 85 degrees per https://docs.m5stack.com/en/StackChan (\"Motion Angle Notice\"). The firmware also accepts values up to 88 degrees (the hard clamp guards against the audible sub-stall observed at pitch=89 on real hardware), but values outside 5-85 degrees are not officially endorsed and may stress the servo over time. Requests below 0 degrees or above 88 degrees are silently clamped with an ESP_LOGW. See README \"Hardware safety notes\".",
+            "Set the head angles of the robot. yaw: horizontal (-90 to 90). pitch: vertical. M5Stack-recommended operating range is 5 to 85 degrees per https://docs.m5stack.com/en/StackChan (\"Motion Angle Notice\"). The firmware also accepts values up to 88 degrees (the hard clamp guards against the audible sub-stall observed at pitch=89 on real hardware), but values outside 5-85 degrees are not officially endorsed and may stress the servo over time. Requests below 0 degrees or above 88 degrees are silently clamped with an ESP_LOGW. Optional speed_dps: angular speed in degrees per second. If omitted or zero, the existing duration-based default applies. See README \"Hardware safety notes\".",
             // Pitch schema range is intentionally permissive across the
             // entire `int` value range (std::numeric_limits<int>::min/max):
             // the authoritative Tier 1 enforcement lives in the handler
@@ -4993,10 +5037,14 @@ private:
             PropertyList({Property("yaw", kPropertyTypeInteger, 0, -90, 90),
                           Property("pitch", kPropertyTypeInteger, 0,
                                    std::numeric_limits<int>::min(),
+                                   std::numeric_limits<int>::max()),
+                          Property("speed_dps", kPropertyTypeInteger, 0,
+                                   std::numeric_limits<int>::min(),
                                    std::numeric_limits<int>::max())}),
             [this](const PropertyList& properties) -> ReturnValue {
                 int yaw = properties["yaw"].value<int>();
                 int pitch = properties["pitch"].value<int>();
+                int speed_dps = properties["speed_dps"].value<int>();
                 // Issue #80 / #98: two-tier pitch guard.
                 //
                 // Tier 1 (hard clamp): silently clamp to [SAFE_PITCH_MIN,
@@ -5025,7 +5073,11 @@ private:
                 }
                 int yaw_pos = YawDegToPos(yaw);
                 int pitch_pos = PitchDegToPos(pitch);
-                WriteHeadAngles(yaw, pitch);
+                if (speed_dps > 0) {
+                    WriteHeadAngles(yaw, pitch, speed_dps);
+                } else {
+                    WriteHeadAngles(yaw, pitch);
+                }
                 bool yaw_motion_started = false;
                 bool pitch_motion_started = false;
                 if (servo_ok_) {

@@ -5,7 +5,7 @@ import json
 import pytest
 from mcp.types import CallToolRequest, ListToolsRequest
 
-from stackchan_mcp.stdio_server import create_server
+from stackchan_mcp.stdio_server import SPEED_DESCRIPTION, create_server, _resolve_speed_dps
 from stackchan_mcp.tts import get_registry
 
 
@@ -410,6 +410,38 @@ async def test_list_tools_move_head_declares_recommended_pitch_range():
     # reading it can pick the right alternative for permissive use cases.
     assert "set_head_angles" in tool.description
 
+    speed_schema = tool.inputSchema["properties"]["speed"]
+    assert speed_schema["oneOf"] == [
+        {"enum": ["low", "mid", "high"]},
+        {"type": "integer", "minimum": 1, "maximum": 10000},
+    ]
+    assert speed_schema["description"] == SPEED_DESCRIPTION
+
+
+@pytest.mark.parametrize(
+    ("speed", "expected_dps"),
+    [
+        ("low", 30),
+        ("mid", 120),
+        ("high", 240),
+        (None, None),
+        (200, 200),
+        (1, 1),
+        (10000, 10000),
+    ],
+)
+def test_resolve_speed_dps_valid(speed, expected_dps):
+    assert _resolve_speed_dps(speed) == expected_dps
+
+
+@pytest.mark.parametrize(
+    "bad_speed",
+    ["fast", "slow", "", 0, -1, 10001, True, False, 1.5, [120], {}],
+)
+def test_resolve_speed_dps_invalid(bad_speed):
+    with pytest.raises((ValueError, TypeError)):
+        _resolve_speed_dps(bad_speed)
+
 
 def _make_fake_gateway(monkeypatch):
     """Helper: wire a FakeESP32/FakeGateway into the stdio_server module.
@@ -444,10 +476,16 @@ def _make_fake_gateway(monkeypatch):
     return calls
 
 
-def _move_head_request(yaw, pitch):
+_MISSING = object()
+
+
+def _move_head_request(yaw, pitch, speed=_MISSING):
+    arguments = {"yaw": yaw, "pitch": pitch}
+    if speed is not _MISSING:
+        arguments["speed"] = speed
     return CallToolRequest(
         method="tools/call",
-        params={"name": "move_head", "arguments": {"yaw": yaw, "pitch": pitch}},
+        params={"name": "move_head", "arguments": arguments},
     )
 
 
@@ -538,6 +576,42 @@ async def test_move_head_accepts_pitch_inside_recommended(monkeypatch, pitch):
     name, arguments = calls[0]
     assert name == "self.robot.set_head_angles"
     assert arguments == {"yaw": 0, "pitch": pitch}
+
+    payload = json.loads(result.root.content[0].text)
+    assert "error" not in payload
+
+
+@pytest.mark.asyncio
+async def test_move_head_speed_mid_forwards_speed_dps(monkeypatch):
+    calls = _make_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _move_head_request(yaw=10, pitch=45, speed="mid")
+    )
+
+    assert len(calls) == 1
+    name, arguments = calls[0]
+    assert name == "self.robot.set_head_angles"
+    assert arguments == {"yaw": 10, "pitch": 45, "speed_dps": 120}
+
+    payload = json.loads(result.root.content[0].text)
+    assert "error" not in payload
+
+
+@pytest.mark.asyncio
+async def test_move_head_without_speed_omits_speed_dps(monkeypatch):
+    calls = _make_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _move_head_request(yaw=10, pitch=45)
+    )
+
+    assert len(calls) == 1
+    name, arguments = calls[0]
+    assert name == "self.robot.set_head_angles"
+    assert arguments == {"yaw": 10, "pitch": 45}
 
     payload = json.loads(result.root.content[0].text)
     assert "error" not in payload
