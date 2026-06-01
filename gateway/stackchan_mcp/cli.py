@@ -11,6 +11,7 @@ working.
 
 from __future__ import annotations
 
+import atexit
 import argparse
 import asyncio
 import errno
@@ -78,10 +79,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check",
         action="store_true",
+        help="Print the current gateway ownership lock status and exit.",
+    )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
         help=(
-            "Run a non-destructive preflight (configuration, port "
-            "availability, derived URLs) and exit. Exit 0 if ready to run, "
-            "non-zero if at least one blocking issue is found."
+            "Run a non-destructive configuration and port preflight, then "
+            "exit. Exit 0 if ready to run, non-zero if at least one "
+            "blocking issue is found."
         ),
     )
     parser.add_argument(
@@ -395,6 +401,25 @@ def _load_dotenv() -> None:
     load_dotenv()
 
 
+def _run_ownership_check() -> int:
+    """Print the current ownership lock status and exit cleanly."""
+    from .ownership import is_pid_alive, read_lock
+
+    info = read_lock()
+    if info is None:
+        print("no current owner")
+        print("ownership preflight: ready")
+        print("Result: ready. Exit 0.")
+    elif is_pid_alive(info["pid"]):
+        print(
+            f"owner_id={info['owner_id']} pid={info['pid']} "
+            f"start_ts={info['start_ts']} host={info['host']}"
+        )
+    else:
+        print(f"stale lock found: pid {info['pid']} not alive")
+    return 0
+
+
 # Default Homebrew prefixes that ship libopus.dylib on macOS. Apple
 # Silicon installs default to ``/opt/homebrew``; Intel Macs use
 # ``/usr/local``. Keeping both keeps the helper portable across
@@ -612,10 +637,11 @@ async def _run(*, advertise_mdns: bool = True) -> None:
 def main(argv: list[str] | None = None) -> None:
     """Console-script entry point.
 
-    Parses ``--help`` / ``--version`` / ``--check`` early (without
-    starting the server), then loads ``.env``, configures logging, and
-    starts the gateway. Side effects are intentionally scoped to this
-    function so that ``import stackchan_mcp`` stays clean.
+    Parses ``--help`` / ``--version`` / ``--check`` / ``--preflight`` early
+    (without starting the server), then loads ``.env``, configures logging,
+    claims gateway ownership, and starts the gateway. Side effects are
+    intentionally scoped to this function so that ``import stackchan_mcp``
+    stays clean.
     """
     parser = _build_arg_parser()
     # argparse exits with status 0 on --help / --version before reaching
@@ -623,6 +649,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.check:
+        sys.exit(_run_ownership_check())
+
+    if args.preflight:
         # ``_run_preflight`` loads ``.env`` itself; do not double-load
         # via the path below.
         sys.exit(_run_preflight())
@@ -635,7 +664,34 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    asyncio.run(_run(advertise_mdns=not args.no_mdns))
+    from .ownership import (
+        OwnershipError,
+        acquire_lock,
+        generate_owner_id,
+        release_lock,
+    )
+
+    owner_id = generate_owner_id()
+    try:
+        info = acquire_lock(owner_id)
+    except OwnershipError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    print(
+        "stackchan-mcp: acquired ownership lock "
+        f"(owner_id={info['owner_id']}, pid={info['pid']})",
+        file=sys.stderr,
+    )
+    atexit.register(release_lock)
+
+    try:
+        try:
+            asyncio.run(_run(advertise_mdns=not args.no_mdns))
+        except KeyboardInterrupt:
+            pass
+    finally:
+        release_lock()
 
 
 if __name__ == "__main__":

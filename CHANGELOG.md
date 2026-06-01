@@ -269,6 +269,14 @@ documented-only.
 
 ### Gateway
 
+- Add ownership lock for concurrent gateway startup (refuse-mode MVP).
+  Second process refuses with deterministic stderr error and exit code 1
+  instead of silently breaking the first owner's WebSocket. Lock file:
+  `~/.stackchan-mcp/owner.lock`. Use `stackchan-mcp --check` to inspect
+  current owner. The previous configuration/port diagnostic remains
+  available as `stackchan-mcp --preflight`. Queue and preempt modes are
+  follow-ups. (#177)
+
 - Fixed: mDNS advertiser no longer interferes with the host OS Bonjour
   hostname. The SRV `server` field is now a fixed `stackchan-mcp.local.`
   instead of the system hostname, so the Python zeroconf library does
