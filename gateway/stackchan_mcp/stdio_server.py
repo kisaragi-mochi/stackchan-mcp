@@ -20,6 +20,41 @@ from .tts import synthesize_and_send
 
 logger = logging.getLogger(__name__)
 
+PRESET_DPS = {
+    "low": 30,
+    "mid": 120,
+    "high": 240,
+}
+SPEED_DPS_MAX = 10000
+SPEED_DESCRIPTION = """speed (optional): How fast to move the head.
+  - "low"  — slow, deliberate, ~30°/s. Good for curious tilts or gentle look-toward.
+  - "mid"  — default natural turn, ~120°/s. Use for conversational eye contact.
+  - "high" — quick reaction, ~240°/s. Use for surprise / double-take.
+  - Or a raw degrees-per-second integer if you need a specific value."""
+
+
+def _resolve_speed_dps(speed: Any) -> int | None:
+    """Return an int speed_dps to forward, or None to omit the field."""
+    if speed is None:
+        return None
+    if isinstance(speed, bool):
+        raise TypeError("speed must be a preset string or an integer, not bool")
+    if isinstance(speed, str):
+        if speed not in PRESET_DPS:
+            raise ValueError(
+                f"speed preset must be one of {list(PRESET_DPS)}, got {speed!r}"
+            )
+        return PRESET_DPS[speed]
+    if isinstance(speed, int):
+        if speed < 1:
+            raise ValueError(f"speed integer must be >= 1, got {speed}")
+        if speed > SPEED_DPS_MAX:
+            raise ValueError(f"speed integer must be <= {SPEED_DPS_MAX}, got {speed}")
+        return speed
+    raise TypeError(
+        f"speed must be 'low' / 'mid' / 'high' / int / None, got {type(speed).__name__}"
+    )
+
 
 def create_server() -> Server:
     """Create and configure the MCP server with tool handlers."""
@@ -131,6 +166,17 @@ def create_server() -> Server:
                             ),
                             "minimum": 5,
                             "maximum": 85,
+                        },
+                        "speed": {
+                            "oneOf": [
+                                {"enum": ["low", "mid", "high"]},
+                                {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": SPEED_DPS_MAX,
+                                },
+                            ],
+                            "description": SPEED_DESCRIPTION,
                         },
                     },
                     "required": ["yaw", "pitch"],
@@ -894,6 +940,18 @@ def create_server() -> Server:
                         ),
                     )
                 ]
+            try:
+                speed_dps = _resolve_speed_dps(arguments.get("speed"))
+            except (TypeError, ValueError) as exc:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": str(exc)}),
+                    )
+                ]
+            arguments = {"yaw": yaw_val, "pitch": pitch_val}
+            if speed_dps is not None:
+                arguments["speed_dps"] = speed_dps
 
         # Map MCP client tool names to ESP32 MCP tool names (self.* prefix)
         tool_map: dict[str, tuple[str, dict[str, Any]]] = {

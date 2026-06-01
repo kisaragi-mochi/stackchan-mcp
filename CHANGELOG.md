@@ -32,6 +32,8 @@ documented-only.
 
 ### Firmware
 
+- Added `WriteHeadAngles(yaw, pitch, speed_dps)` overload for speed-based motion control on the user-driven `move_head` path. Existing duration-based overload preserved; boot-init path unchanged in this PR. Adds `MIN_SMOOTH_SPEED_DPS=72` (on-device measured floor) and `MAX_SPEED_DPS=240` (SCS0009 datasheet ceiling) clamping constants. (#129)
+
 - Add `kUncertain` state to `TorqueState`: an `EnableTorque(OFF)` (or
   `ON`) attempt that loses its ACK no longer publishes `kEngaged` from
   cached state. Subsequent motion or manual `set_servo_torque(...)`
@@ -276,6 +278,8 @@ documented-only.
   current owner. The previous configuration/port diagnostic remains
   available as `stackchan-mcp --preflight`. Queue and preempt modes are
   follow-ups. (#177)
+
+- Added optional `speed` parameter to `move_head` MCP tool. Accepts `"low"` / `"mid"` / `"high"` presets or a raw degrees-per-second integer. Internal resolution forwards `speed_dps` to the firmware; omitting `speed` preserves prior behavior. (#129)
 
 - Fixed: mDNS advertiser no longer interferes with the host OS Bonjour
   hostname. The SRV `server` field is now a fixed `stackchan-mcp.local.`
