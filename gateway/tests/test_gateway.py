@@ -52,7 +52,11 @@ def _patch_gateway_network(monkeypatch: pytest.MonkeyPatch, gw: Gateway) -> list
             calls.append(("http_start", self.host, self.port))
 
     gw.esp32 = FakeEsp32()
-    monkeypatch.setattr(gw_mod, "create_capture_app", lambda capture_token="": object())
+    monkeypatch.setattr(
+        gw_mod,
+        "create_capture_app",
+        lambda capture_token="", pcm_token="", gateway=None: object(),
+    )
     monkeypatch.setattr(gw_mod.web, "AppRunner", FakeAppRunner)
     monkeypatch.setattr(gw_mod.web, "TCPSite", FakeTCPSite)
     return calls
