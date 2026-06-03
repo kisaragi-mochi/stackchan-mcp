@@ -32,6 +32,13 @@ documented-only.
 
 ### Firmware
 
+- Added: active firmware-side WebSocket keepalive that detects silent
+  network breaks and triggers the existing reconnect path. A periodic
+  Ping (every 15 s) probes the connection; the Pong response refreshes
+  a liveness timestamp via the new `WebSocket::OnPong` callback
+  (esp-ml307 #49). If no frame of any kind arrives within 60 s, the
+  connection is considered dead and a graceful reconnect is forced —
+  no device reboot required. Closes #239.
 - Changed: the device no longer auto-enters Listening after a TTS
   utterance ends. The `Application::OnIncomingJson` handler for the
   `tts.stop` event used to fall through to

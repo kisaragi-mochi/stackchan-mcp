@@ -499,6 +499,18 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             last_incoming_time_ = std::chrono::steady_clock::now();
         });
 
+        websocket_->OnPong([this](const char* data, size_t len) {
+            // A Pong answering our own keepalive Ping() is proof the path is
+            // alive even when no application data is flowing. This is the
+            // primary liveness signal during idle: it does not depend on the
+            // gateway generating periodic data frames (a bare stackchan-mcp
+            // deployment has long idle windows with no such traffic). See
+            // issue #239.
+            (void)data;
+            (void)len;
+            last_received_us_.store(esp_timer_get_time(), std::memory_order_release);
+        });
+
         websocket_->OnDisconnected([this, notify_disconnect, disconnected_after_hello]() {
             audio_channel_open_.store(false);
             transport_connected_.store(false);
@@ -755,7 +767,7 @@ void WebsocketProtocol::OnKeepaliveTick() {
         // any sensible dead-threshold.
         uint32_t silence_ms = (uint32_t)(silence_us / 1000ULL);
         ESP_LOGW(TAG,
-                 "Keepalive timeout: no data frame received in %u ms (>= %d s threshold) — forcing reconnect",
+                 "Keepalive timeout: no frame received in %u ms (>= %d s threshold) — forcing reconnect",
                  (unsigned)silence_ms,
                  (int)(WEBSOCKET_KEEPALIVE_DEAD_TIMEOUT_MS / 1000));
         // Resetting the WebSocket fires OnDisconnected (with
@@ -766,12 +778,13 @@ void WebsocketProtocol::OnKeepaliveTick() {
         return;
     }
 
-    // Path appears healthy: emit a ping to actively probe it and refresh
-    // any intermediate NAT / router state. The library's Ping() is
-    // fire-and-forget (the server's PONG response is handled internally
-    // and is not surfaced through OnData), so we cannot use the PONG as
-    // a liveness signal — that is what the receive-timestamp check
-    // above is for.
+    // Path appears healthy: emit a Ping to actively probe it. On a live
+    // connection the peer answers with a Pong, which OnPong() turns into a
+    // last_received_us_ refresh — so our own keepalive traffic keeps the
+    // liveness signal fresh during idle, with no dependence on the gateway
+    // generating periodic application data frames. On a silent path break
+    // the Pong never arrives, last_received_us_ goes stale, and the
+    // dead-threshold check above forces a reconnect. See issue #239.
     websocket_->Ping();
 }
 
