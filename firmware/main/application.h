@@ -108,6 +108,7 @@ public:
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
+    void SendStackChanEvent(const char* event_type, const char* subtype, uint64_t duration_ms);
 
     // Phase 4.5 avatar: thread-safe generic WS text frame send.
     // Wraps Protocol::SendText through the main-task Schedule for the

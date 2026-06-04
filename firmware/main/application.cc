@@ -1168,6 +1168,35 @@ void Application::SendMcpMessage(const std::string& payload) {
     });
 }
 
+void Application::SendStackChanEvent(
+    const char* event_type, const char* subtype, uint64_t duration_ms) {
+    std::string event_type_str = event_type ? event_type : "";
+    std::string subtype_str = subtype ? subtype : "";
+    Schedule([this, event_type_str, subtype_str, duration_ms]() {
+        if (!protocol_ || !protocol_->IsTransportConnected()) {
+            return;
+        }
+
+        cJSON* root = cJSON_CreateObject();
+        if (root == nullptr) {
+            return;
+        }
+        cJSON_AddStringToObject(root, "session_id", protocol_->session_id().c_str());
+        cJSON_AddStringToObject(root, "type", "stackchan-event");
+        cJSON_AddStringToObject(root, "event_type", event_type_str.c_str());
+        cJSON_AddStringToObject(root, "subtype", subtype_str.c_str());
+        cJSON_AddNumberToObject(root, "duration_ms", static_cast<double>(duration_ms));
+        cJSON_AddNumberToObject(root, "ts", static_cast<double>(esp_timer_get_time() / 1000ULL));
+
+        char* str = cJSON_PrintUnformatted(root);
+        if (str != nullptr) {
+            protocol_->SendText(std::string(str));
+            cJSON_free(str);
+        }
+        cJSON_Delete(root);
+    });
+}
+
 void Application::SendJsonString(const std::string& json_str) {
     // Thread-safe generic WS text frame send. Used by board-initiated
     // notifications such as avatar_set_loaded (Phase 4.5 avatar). Mirrors
@@ -1220,4 +1249,3 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
-

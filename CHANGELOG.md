@@ -32,6 +32,15 @@ documented-only.
 
 ### Gateway
 
+- Added: `stackchan/event` experimental MCP capability and server-initiated
+  notification bridge for firmware-originated touch events (`tap` /
+  `stroke`) forwarded from additive `stackchan-event` WebSocket frames.
+  Pinned the `mcp` runtime dependency to `>=1.27,<2.0` and added a
+  startup compatibility guard for the private SDK members the bridge
+  depends on (`Server._experimental_handlers` /
+  `Server._handle_message`) so any incompatible future SDK shape fails
+  fast with a clear error instead of silent breakage. (#260)
+
 - Added: function-dark #178 Phase B chunk 1 command queue module with an
   environment-configurable bounded FIFO, correlation metadata for response
   routing, a single-flight dispatcher loop, and a standardized queue-full
@@ -76,6 +85,11 @@ documented-only.
   compatibility but is no longer used by chunk 2+3 CLI cleanup paths.
 
 ### Firmware
+
+- Added: `Application::SendStackChanEvent(...)` and appended touch-event
+  emission after the existing Si12T tap / stroke local reaction flow so
+  connected gateways can receive additive `stackchan-event` WebSocket
+  frames. (#260)
 
 - Added `WriteHeadAngles(yaw, pitch, speed_dps)` overload for speed-based motion control on the user-driven `move_head` path. Existing duration-based overload preserved; boot-init path unchanged in this PR. Adds `MAX_SPEED_DPS=240` (SCS0009 datasheet ceiling) safety clamp and `MIN_SMOOTH_SPEED_DPS=72` documented smoothness floor (sub-floor speeds are permitted with an `ESP_LOGW` warning so the gateway `"low"` preset can deliver deliberately slow motion). (#129)
 

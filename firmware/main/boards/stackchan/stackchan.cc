@@ -3868,6 +3868,7 @@ private:
         // not pop the avatar back over the WiFi config / settings screens.
         SetAvatarExpressionIfActive("surprised");
         ScheduleIdleRevert();
+        Application::GetInstance().SendStackChanEvent("touch", "tap", duration_ms);
     }
 
     void HandleStroke(uint64_t duration_ms) {
@@ -3877,6 +3878,7 @@ private:
         SetAvatarExpressionIfActive("embarrassed");
         StartServoWobble();
         ScheduleIdleRevert();
+        Application::GetInstance().SendStackChanEvent("touch", "stroke", duration_ms);
     }
 
     // 200 ms periodic poll. Reads the sensor, applies a 2-sample debounce on

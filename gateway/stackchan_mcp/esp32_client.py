@@ -601,6 +601,9 @@ class ESP32Manager:
                     # the SAIVerse repository).
                     connection.handle_avatar_set_loaded(data)
 
+                elif msg_type == "stackchan-event":
+                    await self._emit_stackchan_event(data)
+
                 elif msg_type == "listen":
                     # Device-driven listening start/stop notification
                     # (wake word, button press, LCD touch — anything
@@ -722,6 +725,56 @@ class ESP32Manager:
             )
         else:
             logger.error("ESP32 MCP initialization failed")
+
+    async def _emit_stackchan_event(self, payload: dict[str, Any]) -> None:
+        """Forward a firmware-originated stackchan event to the MCP client."""
+        event_type = payload.get("event_type")
+        subtype = payload.get("subtype")
+        duration_ms = payload.get("duration_ms")
+        ts = payload.get("ts")
+        session_id = payload.get("session_id")
+
+        if event_type != "touch":
+            logger.warning("Malformed stackchan-event frame: event_type=%r", event_type)
+            return
+        if subtype not in {"tap", "stroke"}:
+            logger.warning("Malformed stackchan-event frame: subtype=%r", subtype)
+            return
+        if (
+            isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, int)
+            or duration_ms < 0
+        ):
+            logger.warning(
+                "Malformed stackchan-event frame: duration_ms=%r",
+                duration_ms,
+            )
+            return
+        if isinstance(ts, bool) or not isinstance(ts, int) or ts < 0:
+            logger.warning("Malformed stackchan-event frame: ts=%r", ts)
+            return
+        if not isinstance(session_id, str) or not session_id:
+            logger.warning("Malformed stackchan-event frame: session_id=%r", session_id)
+            return
+
+        params = {
+            "event_type": event_type,
+            "subtype": subtype,
+            "duration_ms": duration_ms,
+            "ts": ts,
+            "session_id": session_id,
+        }
+        logger.info(
+            "stackchan-event: %s/%s duration=%sms ts=%s session=%s",
+            event_type,
+            subtype,
+            duration_ms,
+            ts,
+            session_id,
+        )
+        from .stdio_server import notify_stackchan_event
+
+        await notify_stackchan_event("stackchan/event", params)
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any]

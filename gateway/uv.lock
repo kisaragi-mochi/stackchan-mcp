@@ -2062,7 +2062,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3" },
     { name = "faster-whisper", marker = "extra == 'stt-faster-whisper'", specifier = ">=1.0" },
     { name = "httpx", marker = "extra == 'tts'", specifier = ">=0.27" },
-    { name = "mcp", specifier = ">=1.0" },
+    { name = "mcp", specifier = ">=1.27,<2.0" },
     { name = "openai", marker = "extra == 'stt-openai'", specifier = ">=1.0" },
     { name = "opuslib", marker = "extra == 'stt'", specifier = ">=3" },
     { name = "opuslib", marker = "extra == 'tts'", specifier = ">=3" },

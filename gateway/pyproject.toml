@@ -33,7 +33,16 @@ dependencies = [
     "websockets>=12",
     "pydantic>=2",
     "python-dotenv",
-    "mcp>=1.0",
+    # The stdio server captures the active ServerSession via a subclassed
+    # Server.run() loop because the public MCP SDK does not yet expose a
+    # stable hook for server-side notifications. That subclass relies on
+    # `Server._experimental_handlers` and `Server._handle_message`, which
+    # are private members. We pin to the verified 1.x line and gate access
+    # behind a startup compatibility guard (see stdio_server.py) so a
+    # future SDK release cannot silently break the gateway via PyPI
+    # auto-resolution. Bump the upper bound after verifying the next
+    # major line.
+    "mcp>=1.27,<2.0",
     "aiohttp>=3",
     "zeroconf>=0.149",
 ]

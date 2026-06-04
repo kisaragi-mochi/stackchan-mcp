@@ -6,19 +6,36 @@ Each tool call is relayed to the connected ESP32 device.
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
+import inspect
 import json
 import logging
-from typing import Any
+from typing import Any, Literal, cast
 
-from mcp.server import Server
+import anyio
+from mcp.server import InitializationOptions, NotificationOptions, Server
+from mcp.server.session import ServerSession
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import Notification, TextContent, Tool
 
+from . import __version__
 from .gateway import get_gateway
 from .stt import listen_and_transcribe
 from .tts import synthesize_and_send
 
 logger = logging.getLogger(__name__)
+
+STACKCHAN_EVENT_METHOD = "stackchan/event"
+STACKCHAN_EVENT_INSTRUCTIONS = (
+    "Stack-chan physical events arrive as server-initiated "
+    "notifications with method='stackchan/event'. Params include "
+    "event_type ('touch'), subtype ('tap' or 'stroke'), "
+    "duration_ms, ts, session_id. When such a notification "
+    "arrives, react naturally using existing tools "
+    "(set_avatar, say, set_mouth, set_leds, move_head). There is "
+    "no dedicated reply tool — the existing tool palette is the "
+    "reaction surface."
+)
 
 PRESET_DPS = {
     "low": 30,
@@ -31,6 +48,172 @@ SPEED_DESCRIPTION = """speed (optional): How fast to move the head.
   - "mid"  — default natural turn, ~120°/s. Use for conversational eye contact.
   - "high" — quick reaction, ~240°/s. Use for surprise / double-take.
   - Or a raw degrees-per-second integer if you need a specific value."""
+
+_active_session: Any | None = None
+
+
+class StackChanEventNotification(
+    Notification[dict[str, Any], Literal["stackchan/event"]]
+):
+    method: Literal["stackchan/event"] = "stackchan/event"
+    params: dict[str, Any]
+
+
+class StackChanServer(Server):
+    async def run(
+        self,
+        read_stream: Any,
+        write_stream: Any,
+        initialization_options: InitializationOptions,
+        raise_exceptions: bool = False,
+        stateless: bool = False,
+    ) -> None:
+        global _active_session
+        try:
+            async with AsyncExitStack() as stack:
+                lifespan_context = await stack.enter_async_context(self.lifespan(self))
+                session = await stack.enter_async_context(
+                    ServerSession(
+                        read_stream,
+                        write_stream,
+                        initialization_options,
+                        stateless=stateless,
+                    )
+                )
+                _active_session = session
+
+                task_support = (
+                    self._experimental_handlers.task_support
+                    if self._experimental_handlers
+                    else None
+                )
+                if task_support is not None:
+                    task_support.configure_session(session)
+                    await stack.enter_async_context(task_support.run())
+
+                async with anyio.create_task_group() as tg:
+                    try:
+                        async for message in session.incoming_messages:
+                            logger.debug("Received message: %s", message)
+                            tg.start_soon(
+                                self._handle_message,
+                                message,
+                                session,
+                                lifespan_context,
+                                raise_exceptions,
+                            )
+                    finally:
+                        tg.cancel_scope.cancel()
+        finally:
+            _active_session = None
+
+    async def _handle_message(
+        self,
+        message: Any,
+        session: Any,
+        lifespan_context: Any,
+        raise_exceptions: bool = False,
+    ) -> None:
+        global _active_session
+        _active_session = session
+        await super()._handle_message(
+            message,
+            session,
+            lifespan_context,
+            raise_exceptions,
+        )
+
+
+async def notify_stackchan_event(method: str, params: dict[str, Any]) -> None:
+    """Forward a stackchan event to the connected MCP client."""
+    if method != STACKCHAN_EVENT_METHOD:
+        logger.warning("Unsupported stackchan event notification method: %s", method)
+        return
+
+    session = _active_session
+    if session is None:
+        logger.warning("Cannot emit stackchan/event notification: no active MCP session")
+        return
+
+    notification = StackChanEventNotification(params=params)
+    try:
+        await session.send_notification(cast(Any, notification))
+    except Exception as exc:  # pragma: no cover - depends on client transport failure
+        logger.warning("Failed to emit stackchan/event notification: %s", exc)
+
+
+def _create_initialization_options(server: Server) -> InitializationOptions:
+    return InitializationOptions(
+        server_name="stackchan-mcp",
+        server_version=__version__,
+        capabilities=server.get_capabilities(
+            notification_options=NotificationOptions(),
+            experimental_capabilities={STACKCHAN_EVENT_METHOD: {}},
+        ),
+        instructions=STACKCHAN_EVENT_INSTRUCTIONS,
+    )
+
+
+def _verify_mcp_sdk_compatibility() -> None:
+    """Fail fast if the installed MCP SDK no longer exposes the private
+    attributes that ``StackChanServer`` depends on.
+
+    ``StackChanServer`` mirrors a slimmed-down copy of ``Server.run()`` so it
+    can capture the active ``ServerSession`` for server-initiated
+    ``stackchan/event`` notifications. The public MCP SDK currently does not
+    offer a stable hook for this, so the subclass touches
+    ``Server._experimental_handlers`` and ``Server._handle_message`` directly.
+
+    These private members are pinned by the ``mcp>=1.27,<2.0`` range declared
+    in ``pyproject.toml``. This guard adds an extra safety net so the gateway
+    fails with a clear ``RuntimeError`` at startup rather than silently
+    dropping notifications or crashing mid-message if a future installation
+    somehow resolves a wholly incompatible SDK shape.
+    """
+
+    probe = Server("compat-check")
+
+    if not hasattr(probe, "_experimental_handlers"):
+        raise RuntimeError(
+            "stackchan-mcp gateway requires `mcp.server.Server._experimental_handlers` "
+            "to exist on instances. The installed MCP SDK appears to have removed or "
+            "renamed this attribute; pin `mcp` to a verified 1.x release."
+        )
+
+    handle = getattr(probe, "_handle_message", None)
+    if not callable(handle) or not inspect.iscoroutinefunction(handle):
+        raise RuntimeError(
+            "stackchan-mcp gateway requires `mcp.server.Server._handle_message` to be "
+            "an async callable. The installed MCP SDK does not expose it in the "
+            "expected shape; pin `mcp` to a verified 1.x release."
+        )
+
+    try:
+        sig = inspect.signature(handle)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "stackchan-mcp gateway could not introspect "
+            "`mcp.server.Server._handle_message` signature on the installed MCP SDK; "
+            "pin `mcp` to a verified 1.x release."
+        ) from exc
+
+    positional = [
+        p
+        for p in sig.parameters.values()
+        if p.kind
+        in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.VAR_POSITIONAL,
+        )
+    ]
+    if len(positional) < 4:
+        raise RuntimeError(
+            "stackchan-mcp gateway requires `mcp.server.Server._handle_message` to "
+            "accept at least 4 positional arguments "
+            "(message, session, lifespan_context, raise_exceptions); the installed "
+            f"MCP SDK exposes {sig}. Pin `mcp` to a verified 1.x release."
+        )
 
 
 def _resolve_speed_dps(speed: Any) -> int | None:
@@ -58,7 +241,8 @@ def _resolve_speed_dps(speed: Any) -> int | None:
 
 def create_server() -> Server:
     """Create and configure the MCP server with tool handlers."""
-    server = Server("stackchan-mcp")
+    _verify_mcp_sdk_compatibility()
+    server = StackChanServer("stackchan-mcp")
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -1104,4 +1288,4 @@ async def run_stdio_server() -> None:
     server = create_server()
     async with stdio_server() as (read_stream, write_stream):
         logger.info("stdio MCP server starting")
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+        await server.run(read_stream, write_stream, _create_initialization_options(server))
