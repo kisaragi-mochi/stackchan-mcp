@@ -41,6 +41,15 @@ documented-only.
   `Server._handle_message`) so any incompatible future SDK shape fails
   fast with a clear error instead of silent breakage. (#260)
 
+- Added: JSONL event log helper that appends each validated
+  `stackchan-event` frame to `~/.claude/stackchan-events.jsonl`
+  (override via `STACKCHAN_EVENTS_PATH`) so MCP client hooks can pick
+  events up between the firmware reaction and the next conversational
+  turn. Entries older than 7 days are pruned exactly once on gateway
+  startup via an atomic rename. Persistence failures are logged and
+  swallowed; the MCP notification path remains the primary delivery
+  channel for capability-aware clients. (#260 follow-up)
+
 - Added: function-dark #178 Phase B chunk 1 command queue module with an
   environment-configurable bounded FIFO, correlation metadata for response
   routing, a single-flight dispatcher loop, and a standardized queue-full

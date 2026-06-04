@@ -644,6 +644,7 @@ async def _run(*, advertise_mdns: bool = True) -> None:
     """Start both the ESP32 WebSocket server and the stdio MCP server."""
     import signal
 
+    from .event_log import rotate_old_entries
     from .gateway import get_gateway
     from .stdio_server import run_stdio_server
 
@@ -658,6 +659,13 @@ async def _run(*, advertise_mdns: bool = True) -> None:
 
     if sys.platform != "win32":
         loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+
+    # Prune stale stackchan-event log entries (older than the helper's
+    # retention window) exactly once per startup. Long-running gateways
+    # are not re-rotated mid-flight; downstream readers filter by
+    # ``ts_unix`` themselves. Failures inside ``rotate_old_entries`` are
+    # logged and swallowed, so a broken log file cannot block startup.
+    rotate_old_entries()
 
     await gateway.start(advertise_mdns=advertise_mdns)
     logger.info("Gateway started, waiting for ESP32 connections...")

@@ -772,6 +772,30 @@ class ESP32Manager:
             ts,
             session_id,
         )
+
+        # Persist the validated event to the JSONL log so downstream
+        # consumers (e.g. an MCP client UserPromptSubmit hook that
+        # injects events into the next agent turn) can pick it up
+        # between the firmware reaction and the next conversational
+        # turn. ``log_event`` swallows OS / permission errors
+        # internally; the broad except below is a second-tier guard so
+        # any unforeseen helper bug cannot break the MCP notification
+        # path that follows.
+        from .event_log import log_event
+
+        try:
+            log_event(
+                event_type=event_type,
+                subtype=subtype,
+                duration_ms=duration_ms,
+                ts=ts,
+                session_id=session_id,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning(
+                "stackchan-event log persistence raised unexpectedly: %s", exc
+            )
+
         from .stdio_server import notify_stackchan_event
 
         await notify_stackchan_event("stackchan/event", params)
