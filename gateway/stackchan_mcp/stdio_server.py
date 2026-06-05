@@ -50,6 +50,7 @@ SPEED_DESCRIPTION = """speed (optional): How fast to move the head.
   - Or a raw degrees-per-second integer if you need a specific value."""
 
 _active_session: Any | None = None
+_active_sessions: dict[int, Any] = {}
 
 
 class StackChanEventNotification(
@@ -60,6 +61,18 @@ class StackChanEventNotification(
 
 
 class StackChanServer(Server):
+    def create_initialization_options(
+        self,
+        notification_options: NotificationOptions | None = None,
+        experimental_capabilities: dict[str, dict[str, Any]] | None = None,
+    ) -> InitializationOptions:
+        if notification_options is None and experimental_capabilities is None:
+            return _create_initialization_options(self)
+        return super().create_initialization_options(
+            notification_options=notification_options,
+            experimental_capabilities=experimental_capabilities,
+        )
+
     async def run(
         self,
         read_stream: Any,
@@ -69,6 +82,7 @@ class StackChanServer(Server):
         stateless: bool = False,
     ) -> None:
         global _active_session
+        session: Any | None = None
         try:
             async with AsyncExitStack() as stack:
                 lifespan_context = await stack.enter_async_context(self.lifespan(self))
@@ -81,6 +95,7 @@ class StackChanServer(Server):
                     )
                 )
                 _active_session = session
+                _active_sessions[id(session)] = session
 
                 task_support = (
                     self._experimental_handlers.task_support
@@ -105,7 +120,9 @@ class StackChanServer(Server):
                     finally:
                         tg.cancel_scope.cancel()
         finally:
-            _active_session = None
+            if session is not None:
+                _active_sessions.pop(id(session), None)
+            _active_session = _latest_active_session()
 
     async def _handle_message(
         self,
@@ -116,12 +133,19 @@ class StackChanServer(Server):
     ) -> None:
         global _active_session
         _active_session = session
+        _active_sessions[id(session)] = session
         await super()._handle_message(
             message,
             session,
             lifespan_context,
             raise_exceptions,
-        )
+    )
+
+
+def _latest_active_session() -> Any | None:
+    if not _active_sessions:
+        return None
+    return next(reversed(_active_sessions.values()))
 
 
 async def notify_stackchan_event(method: str, params: dict[str, Any]) -> None:
@@ -130,16 +154,19 @@ async def notify_stackchan_event(method: str, params: dict[str, Any]) -> None:
         logger.warning("Unsupported stackchan event notification method: %s", method)
         return
 
-    session = _active_session
-    if session is None:
+    sessions = list(_active_sessions.values())
+    if not sessions and _active_session is not None:
+        sessions = [_active_session]
+    if not sessions:
         logger.warning("Cannot emit stackchan/event notification: no active MCP session")
         return
 
     notification = StackChanEventNotification(params=params)
-    try:
-        await session.send_notification(cast(Any, notification))
-    except Exception as exc:  # pragma: no cover - depends on client transport failure
-        logger.warning("Failed to emit stackchan/event notification: %s", exc)
+    for session in sessions:
+        try:
+            await session.send_notification(cast(Any, notification))
+        except Exception as exc:  # pragma: no cover - depends on client transport failure
+            logger.warning("Failed to emit stackchan/event notification: %s", exc)
 
 
 def _create_initialization_options(server: Server) -> InitializationOptions:
@@ -237,6 +264,264 @@ def _resolve_speed_dps(speed: Any) -> int | None:
     raise TypeError(
         f"speed must be 'low' / 'mid' / 'high' / int / None, got {type(speed).__name__}"
     )
+
+
+async def _dispatch_mcp_tool(
+    name: str,
+    arguments: dict[str, Any],
+    gateway: Any,
+) -> list[TextContent]:
+    """Run one StackChan MCP tool against the provided gateway instance."""
+    if name == "get_status":
+        status = gateway.esp32.get_status()
+        return [TextContent(type="text", text=json.dumps(status, indent=2))]
+
+    if name == "say":
+        try:
+            result = await synthesize_and_send(arguments, gateway=gateway)
+        except (ValueError, NotImplementedError, RuntimeError) as exc:
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"error": str(exc)}),
+                )
+            ]
+        return [TextContent(type="text", text=json.dumps(result))]
+
+    if name == "listen":
+        try:
+            result = await listen_and_transcribe(arguments, gateway=gateway)
+        except (ValueError, NotImplementedError, RuntimeError) as exc:
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"error": str(exc)}),
+                )
+            ]
+        return [TextContent(type="text", text=json.dumps(result))]
+
+    if name == "load_avatar_set":
+        archive_path = arguments.get("archive_path", "")
+        mode = arguments.get("mode", "")
+        try:
+            timeout = float(arguments.get("timeout", 60.0))
+        except (TypeError, ValueError):
+            timeout = 60.0
+        if not archive_path or not isinstance(archive_path, str):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {"ok": False, "error": "archive_path is required"}
+                    ),
+                )
+            ]
+        if mode not in ("layered", "matrix"):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"ok": False, "error": f"unknown mode: {mode}"}),
+                )
+            ]
+        result = await gateway.load_avatar_set(archive_path, mode, timeout)
+        return [TextContent(type="text", text=json.dumps(result))]
+
+    if not gateway.esp32.device_connected:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {"error": "No ESP32 device connected. Please check the device."}
+                ),
+            )
+        ]
+
+    if name == "move_head":
+        yaw_val = arguments.get("yaw")
+        pitch_val = arguments.get("pitch")
+        if (
+            not isinstance(yaw_val, int)
+            or isinstance(yaw_val, bool)
+            or not (-90 <= yaw_val <= 90)
+        ):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "error": (
+                                "yaw must be an integer in -90..90 "
+                                f"(got {yaw_val!r})"
+                            )
+                        }
+                    ),
+                )
+            ]
+        if (
+            not isinstance(pitch_val, int)
+            or isinstance(pitch_val, bool)
+            or not (5 <= pitch_val <= 85)
+        ):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "error": (
+                                "pitch must be an integer in 5..85 "
+                                "(M5Stack-recommended operating range; "
+                                "for the wider firmware hard clamp "
+                                "0..88 use `set_head_angles`). got "
+                                f"{pitch_val!r}"
+                            )
+                        }
+                    ),
+                )
+            ]
+        try:
+            speed_dps = _resolve_speed_dps(arguments.get("speed"))
+        except (TypeError, ValueError) as exc:
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"error": str(exc)}),
+                )
+            ]
+        arguments = {"yaw": yaw_val, "pitch": pitch_val}
+        if speed_dps is not None:
+            arguments["speed_dps"] = speed_dps
+
+    tool_map: dict[str, tuple[str, dict[str, Any]]] = {
+        "get_device_info": (
+            "self.get_device_status",
+            {},
+        ),
+        "take_photo": (
+            "self.camera.take_photo",
+            arguments,
+        ),
+        "set_volume": (
+            "self.audio_speaker.set_volume",
+            arguments,
+        ),
+        "set_brightness": (
+            "self.screen.set_brightness",
+            arguments,
+        ),
+        "move_head": (
+            "self.robot.set_head_angles",
+            arguments,
+        ),
+        "get_head_angles": (
+            "self.robot.get_head_angles",
+            {},
+        ),
+        "gpio_test": (
+            "self.robot.gpio_test",
+            {},
+        ),
+        "uart_diag": (
+            "self.robot.uart_diag",
+            {},
+        ),
+        "check_vm_en": (
+            "self.robot.check_vm_en",
+            {},
+        ),
+        "set_avatar": (
+            "self.display.set_avatar",
+            arguments,
+        ),
+        "set_mouth": (
+            "self.display.set_mouth",
+            arguments,
+        ),
+        "set_mouth_sequence": (
+            "self.display.set_mouth_sequence",
+            {"steps_json": json.dumps(arguments.get("steps", []))},
+        ),
+        "set_blink": (
+            "self.display.set_blink",
+            arguments,
+        ),
+        "set_servo_torque": (
+            "self.robot.set_servo_torque",
+            arguments,
+        ),
+        "set_auto_torque_release": (
+            "self.robot.set_auto_torque_release",
+            arguments,
+        ),
+        "get_touch_state": (
+            "self.touch.get_touch_state",
+            {},
+        ),
+        "set_led": (
+            "self.led.set_color",
+            arguments,
+        ),
+        "set_all_leds": (
+            "self.led.set_all",
+            arguments,
+        ),
+        "set_leds": (
+            "self.led.set_many",
+            {"colors": json.dumps(arguments.get("colors", []))},
+        ),
+        "clear_leds": (
+            "self.led.clear",
+            {},
+        ),
+        "i2c_scan": (
+            "self.i2c.scan",
+            {},
+        ),
+        "i2c_read": (
+            "self.i2c.read",
+            arguments,
+        ),
+        "i2c_write": (
+            "self.i2c.write",
+            arguments,
+        ),
+        "i2c_write_read": (
+            "self.i2c.write_read",
+            arguments,
+        ),
+    }
+
+    if name not in tool_map:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": f"Unknown tool: {name}"}),
+            )
+        ]
+
+    esp32_name, esp32_args = tool_map[name]
+    result, error = await gateway.esp32.call_tool(esp32_name, esp32_args)
+
+    if error:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": error.get("message", str(error))}),
+            )
+        ]
+
+    if isinstance(result, dict):
+        content = result.get("content", [])
+        if content and isinstance(content, list):
+            texts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    texts.append(item.get("text", ""))
+            if texts:
+                return [TextContent(type="text", text="\n".join(texts))]
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    return [TextContent(type="text", text=str(result))]
 
 
 def create_server() -> Server:
@@ -994,291 +1279,7 @@ def create_server() -> Server:
     async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
         """Handle a tool call by relaying to ESP32."""
         arguments = arguments or {}
-        gw = get_gateway()
-
-        if name == "get_status":
-            # get_status is handled locally — no ESP32 needed
-            status = gw.esp32.get_status()
-            return [TextContent(type="text", text=json.dumps(status, indent=2))]
-
-        if name == "say":
-            # TTS runs on the gateway side. The orchestrator validates
-            # arguments, looks up an engine, synthesises PCM, encodes
-            # Opus, and pushes frames through the WebSocket binary
-            # channel that the device's audio decoder consumes. Errors
-            # are surfaced as clean MCP error JSON rather than letting
-            # tracebacks leak into the agent's transcript.
-            try:
-                result = await synthesize_and_send(arguments, gateway=gw)
-            except (ValueError, NotImplementedError, RuntimeError) as exc:
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps({"error": str(exc)}),
-                    )
-                ]
-            return [TextContent(type="text", text=json.dumps(result))]
-
-        if name == "listen":
-            # STT runs on the gateway side. The orchestrator drives the
-            # device's listening state via ``listen.start``/``stop``
-            # notifications, buffers the inbound Opus frames, decodes
-            # them, and hands the PCM blob to the registered engine.
-            # Same error-class discipline as say(): ValueError /
-            # NotImplementedError / RuntimeError all turn into clean
-            # MCP error JSON.
-            try:
-                result = await listen_and_transcribe(arguments, gateway=gw)
-            except (ValueError, NotImplementedError, RuntimeError) as exc:
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps({"error": str(exc)}),
-                    )
-                ]
-            return [TextContent(type="text", text=json.dumps(result))]
-
-        if name == "load_avatar_set":
-            # Phase 4.5 avatar: stage the raw RGB565 payload and notify
-            # the device via WS avatar_set_fetch; the device performs the
-            # HTTP fetch + SHA256 verify + AvatarSet::Load and replies
-            # with avatar_set_loaded. All orchestration lives in
-            # Gateway.load_avatar_set; this branch is a thin wrapper that
-            # parses arguments and returns the dict-result as MCP JSON.
-            archive_path = arguments.get("archive_path", "")
-            mode = arguments.get("mode", "")
-            try:
-                timeout = float(arguments.get("timeout", 60.0))
-            except (TypeError, ValueError):
-                timeout = 60.0
-            if not archive_path or not isinstance(archive_path, str):
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"ok": False, "error": "archive_path is required"}),
-                )]
-            if mode not in ("layered", "matrix"):
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"ok": False, "error": f"unknown mode: {mode}"}),
-                )]
-            result = await gw.load_avatar_set(archive_path, mode, timeout)
-            return [TextContent(type="text", text=json.dumps(result))]
-
-        if not gw.esp32.device_connected:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"error": "No ESP32 device connected. Please check the device."}),
-                )
-            ]
-
-        if name == "move_head":
-            # Belt-and-suspenders validation for the recommended pitch range.
-            # The Tool inputSchema already declares minimum/maximum for both
-            # yaw and pitch, but mcp Python SDK server-side enforcement of
-            # JSON Schema bounds is not guaranteed across versions and
-            # clients. Reject out-of-recommended values here as a clean
-            # MCP error JSON before any motion command reaches the device.
-            # Callers that genuinely need the firmware hard clamp 0..88
-            # should use the firmware-side `set_head_angles` device tool,
-            # which exposes the authoritative two-tier guard described in
-            # the README "Y-axis (pitch) safe range" section.
-            yaw_val = arguments.get("yaw")
-            pitch_val = arguments.get("pitch")
-            if (
-                not isinstance(yaw_val, int)
-                or isinstance(yaw_val, bool)
-                or not (-90 <= yaw_val <= 90)
-            ):
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps(
-                            {
-                                "error": (
-                                    "yaw must be an integer in -90..90 "
-                                    f"(got {yaw_val!r})"
-                                )
-                            }
-                        ),
-                    )
-                ]
-            if (
-                not isinstance(pitch_val, int)
-                or isinstance(pitch_val, bool)
-                or not (5 <= pitch_val <= 85)
-            ):
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps(
-                            {
-                                "error": (
-                                    "pitch must be an integer in 5..85 "
-                                    "(M5Stack-recommended operating range; "
-                                    "for the wider firmware hard clamp "
-                                    "0..88 use `set_head_angles`). got "
-                                    f"{pitch_val!r}"
-                                )
-                            }
-                        ),
-                    )
-                ]
-            try:
-                speed_dps = _resolve_speed_dps(arguments.get("speed"))
-            except (TypeError, ValueError) as exc:
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps({"error": str(exc)}),
-                    )
-                ]
-            arguments = {"yaw": yaw_val, "pitch": pitch_val}
-            if speed_dps is not None:
-                arguments["speed_dps"] = speed_dps
-
-        # Map MCP client tool names to ESP32 MCP tool names (self.* prefix)
-        tool_map: dict[str, tuple[str, dict[str, Any]]] = {
-            "get_device_info": (
-                "self.get_device_status",
-                {},
-            ),
-            "take_photo": (
-                "self.camera.take_photo",
-                arguments,
-            ),
-            "set_volume": (
-                "self.audio_speaker.set_volume",
-                arguments,
-            ),
-            "set_brightness": (
-                "self.screen.set_brightness",
-                arguments,
-            ),
-            "move_head": (
-                "self.robot.set_head_angles",
-                arguments,
-            ),
-            "get_head_angles": (
-                "self.robot.get_head_angles",
-                {},
-            ),
-            "gpio_test": (
-                "self.robot.gpio_test",
-                {},
-            ),
-            "uart_diag": (
-                "self.robot.uart_diag",
-                {},
-            ),
-            "check_vm_en": (
-                "self.robot.check_vm_en",
-                {},
-            ),
-            "set_avatar": (
-                "self.display.set_avatar",
-                arguments,
-            ),
-            "set_mouth": (
-                "self.display.set_mouth",
-                arguments,
-            ),
-            # The MCP Property type system on ESP32 only supports
-            # string/integer/boolean, so we serialise the steps array to
-            # a JSON string here. The firmware decodes it via cJSON.
-            "set_mouth_sequence": (
-                "self.display.set_mouth_sequence",
-                {"steps_json": json.dumps(arguments.get("steps", []))},
-            ),
-            "set_blink": (
-                "self.display.set_blink",
-                arguments,
-            ),
-            "set_servo_torque": (
-                "self.robot.set_servo_torque",
-                arguments,
-            ),
-            "set_auto_torque_release": (
-                "self.robot.set_auto_torque_release",
-                arguments,
-            ),
-            "get_touch_state": (
-                "self.touch.get_touch_state",
-                {},
-            ),
-            "set_led": (
-                "self.led.set_color",
-                arguments,
-            ),
-            "set_all_leds": (
-                "self.led.set_all",
-                arguments,
-            ),
-            # Firmware accepts colors as a JSON-encoded string (the on-device
-            # MCP layer has no array property type), so re-pack the Python
-            # list here. The schema we exposed above still lets the LLM
-            # think in real arrays.
-            "set_leds": (
-                "self.led.set_many",
-                {"colors": json.dumps(arguments.get("colors", []))},
-            ),
-            "clear_leds": (
-                "self.led.clear",
-                {},
-            ),
-            "i2c_scan": (
-                "self.i2c.scan",
-                {},
-            ),
-            "i2c_read": (
-                "self.i2c.read",
-                arguments,
-            ),
-            "i2c_write": (
-                "self.i2c.write",
-                arguments,
-            ),
-            "i2c_write_read": (
-                "self.i2c.write_read",
-                arguments,
-            ),
-        }
-
-        if name not in tool_map:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"Unknown tool: {name}"}),
-                )
-            ]
-
-        esp32_name, esp32_args = tool_map[name]
-        result, error = await gw.esp32.call_tool(esp32_name, esp32_args)
-
-        if error:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"error": error.get("message", str(error))}),
-                )
-            ]
-
-        # result from ESP32 is MCP format: {"content": [...], "isError": bool}
-        if isinstance(result, dict):
-            content = result.get("content", [])
-            if content and isinstance(content, list):
-                # Pass through content items as text
-                texts = []
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        texts.append(item.get("text", ""))
-                if texts:
-                    return [TextContent(type="text", text="\n".join(texts))]
-
-            # Fallback: dump entire result
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        return [TextContent(type="text", text=str(result))]
+        return await _dispatch_mcp_tool(name, arguments, get_gateway())
 
     return server
 

@@ -63,6 +63,11 @@ documented-only.
   `--transport stdio` compatibility and a Streamable HTTP daemon
   placeholder that releases ownership before the chunk 4 wiring lands.
 
+- feat(gateway): Streamable HTTP daemon transport with bounded command
+  queue and saturation backpressure. (#178)
+
+- docs(gateway): daemon setup and Phase B migration notes. (#178)
+
 - Fixed: #178 Phase B chunk 2+3 ownership lock cleanup safety. The
   streamable-http `serve` placeholder now guards its `finally` cleanup with
   an `acquired` flag so an `OwnershipError` raised by an existing owner is

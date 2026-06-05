@@ -65,6 +65,8 @@ Environment variables:
                            (default 127.0.0.1).
   MCP_HTTP_PORT            Port for the Streamable HTTP MCP server
                            (default 8767).
+  MCP_HTTP_ALLOWED_HOSTS   Comma-separated Host / Origin allowlist entries
+                           for non-loopback Streamable HTTP clients.
 
 See gateway/README.md and the top-level README.md for full setup,
 including pairing the ESP32 firmware and configuring the WiFi gateway URL.
@@ -531,6 +533,12 @@ def _run_preflight() -> int:
     else:
         print("  STACKCHAN_TOKEN     not set (gateway will accept any client)")
 
+    mcp_http_allowed_hosts = os.getenv("MCP_HTTP_ALLOWED_HOSTS", "")
+    if mcp_http_allowed_hosts:
+        print(f"  MCP_HTTP_ALLOWED_HOSTS {mcp_http_allowed_hosts}")
+    else:
+        print("  MCP_HTTP_ALLOWED_HOSTS not set")
+
     vision_host = os.getenv("VISION_HOST", "")
     capture_port_raw = os.getenv("CAPTURE_PORT", "8766")
     if vision_host:
@@ -580,14 +588,26 @@ def _run_preflight() -> int:
     print()
     print("Ports:")
     host = os.getenv("HOST", "0.0.0.0")
+    mcp_http_host = os.getenv("MCP_HTTP_HOST", "127.0.0.1")
     ws_port, ws_source = _resolve_ws_port()
     cap_port, cap_source = _resolve_capture_port()
+    raw_mcp_http_port = os.getenv("MCP_HTTP_PORT")
+    if raw_mcp_http_port is None:
+        mcp_http_port, mcp_http_source = (8767, "default")
+    else:
+        mcp_http_port, mcp_http_source = _validate_port_value(
+            raw_mcp_http_port,
+            "MCP_HTTP_PORT",
+        )
 
     if ws_port is None:
         print(f"  ws://{host}:???     INVALID ({ws_source})")
         issues += 1
     if cap_port is None:
         print(f"  http://{host}:???   INVALID ({cap_source})")
+        issues += 1
+    if mcp_http_port is None:
+        print(f"  http://{mcp_http_host}:???/mcp INVALID ({mcp_http_source})")
         issues += 1
 
     if (
@@ -612,6 +632,21 @@ def _run_preflight() -> int:
         )
         issues += 1
 
+    if mcp_http_port is not None:
+        for label, other_port, other_source in (
+            ("WS_PORT", ws_port, ws_source),
+            ("CAPTURE_PORT", cap_port, cap_source),
+        ):
+            if other_port is None or mcp_http_port == 0 or other_port == 0:
+                continue
+            if mcp_http_port == other_port:
+                print(
+                    f"  MCP_HTTP_PORT ({mcp_http_source}) and {label} "
+                    f"({other_source}) both resolve to {mcp_http_port}; "
+                    "the daemon needs distinct listener ports."
+                )
+                issues += 1
+
     if ws_port is not None:
         ws_available, ws_holder = _check_port(host, ws_port)
         print(
@@ -628,6 +663,22 @@ def _run_preflight() -> int:
             f"{_format_port_status(cap_available, cap_holder)}"
         )
         if not cap_available:
+            issues += 1
+
+    if mcp_http_port is not None:
+        from .http_server import validate_bind_safety
+
+        mcp_available, mcp_holder = _check_port(mcp_http_host, mcp_http_port)
+        print(
+            f"  http://{mcp_http_host}:{mcp_http_port}/mcp "
+            f"{_format_port_status(mcp_available, mcp_holder)}"
+        )
+        if not mcp_available:
+            issues += 1
+        try:
+            validate_bind_safety(mcp_http_host, token)
+        except ValueError as exc:
+            print(f"  MCP HTTP bind safety: BLOCKED ({exc})")
             issues += 1
 
     # --- Result -------------------------------------------------------------
@@ -764,12 +815,73 @@ def _resolve_mcp_http_endpoint() -> tuple[str, int]:
     return host, port
 
 
-def _run_streamable_http_placeholder() -> None:
-    """Claim daemon ownership, then stop at the chunk 4 HTTP wiring boundary."""
+async def _run_streamable_http_daemon(
+    *,
+    host: str,
+    port: int,
+    owner_id: str,
+    token: str | None,
+    advertise_mdns: bool,
+) -> None:
+    """Run the Streamable HTTP MCP daemon until the ASGI server exits."""
+    import uvicorn
+
+    from .event_log import rotate_old_entries
+    from .gateway import get_gateway
+    from .http_server import build_app, make_dispatch_fn
+    from .queue import CommandQueue
+
+    rotate_old_entries()
+
+    gateway = get_gateway()
+    queue = CommandQueue()
+    app = build_app(
+        queue,
+        gateway=gateway,
+        owner_id=owner_id,
+        host=host,
+        port=port,
+        token=token,
+        dispatch_fn=make_dispatch_fn(gateway),
+    )
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        lifespan="on",
+    )
+    server = uvicorn.Server(config)
+
+    await gateway.start(advertise_mdns=advertise_mdns)
+    logger.info(
+        "Streamable HTTP MCP daemon starting on http://%s:%d/mcp",
+        host,
+        port,
+    )
+    try:
+        await server.serve()
+    finally:
+        await gateway.stop()
+
+
+def _run_streamable_http_placeholder(*, advertise_mdns: bool = True) -> None:
+    """Run the Streamable HTTP MCP daemon."""
     from .ownership import release_lock_if_owner
+    from .http_server import (
+        get_configured_token,
+        validate_bind_safety,
+    )
 
     _configure_gateway_startup()
     host, port = _resolve_mcp_http_endpoint()
+    token = get_configured_token()
+    try:
+        validate_bind_safety(host, token)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
     info: LockInfo | None = None
     try:
         info = _acquire_startup_lock(
@@ -777,7 +889,18 @@ def _run_streamable_http_placeholder() -> None:
             http_endpoint=f"{host}:{port}",
             started_by="cli-serve",
         )
-        raise NotImplementedError("Streamable HTTP daemon lands in #178 chunk 4")
+        try:
+            asyncio.run(
+                _run_streamable_http_daemon(
+                    host=host,
+                    port=port,
+                    owner_id=info["owner_id"],
+                    token=token,
+                    advertise_mdns=advertise_mdns,
+                )
+            )
+        except KeyboardInterrupt:
+            pass
     finally:
         if info is not None:
             release_lock_if_owner(info)
@@ -810,13 +933,11 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "serve":
+        advertise_mdns = not (args.no_mdns or getattr(args, "serve_no_mdns", False))
         if args.transport == _STDIO_TRANSPORT:
-            advertise_mdns = not (
-                args.no_mdns or getattr(args, "serve_no_mdns", False)
-            )
             _run_stdio_gateway(advertise_mdns=advertise_mdns)
             return
-        _run_streamable_http_placeholder()
+        _run_streamable_http_placeholder(advertise_mdns=advertise_mdns)
         return
 
 

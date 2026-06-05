@@ -147,6 +147,7 @@ async def test_server_run_captures_active_session_before_first_message(monkeypat
 async def test_notify_stackchan_event_uses_active_session(monkeypatch):
     session = _FakeSession()
     monkeypatch.setattr(stdio_server, "_active_session", session)
+    monkeypatch.setattr(stdio_server, "_active_sessions", {})
 
     params = {
         "event_type": "touch",
@@ -166,11 +167,42 @@ async def test_notify_stackchan_event_uses_active_session(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_notify_stackchan_event_fans_out_to_active_sessions(monkeypatch):
+    session_a = _FakeSession()
+    session_b = _FakeSession()
+    monkeypatch.setattr(stdio_server, "_active_session", session_b)
+    monkeypatch.setattr(
+        stdio_server,
+        "_active_sessions",
+        {id(session_a): session_a, id(session_b): session_b},
+    )
+
+    params = {
+        "event_type": "touch",
+        "subtype": "tap",
+        "duration_ms": 350,
+        "ts": 333,
+        "session_id": "session-1",
+    }
+    await notify_stackchan_event(STACKCHAN_EVENT_METHOD, params)
+
+    expected = [
+        {
+            "method": STACKCHAN_EVENT_METHOD,
+            "params": params,
+        }
+    ]
+    assert session_a.notifications == expected
+    assert session_b.notifications == expected
+
+
+@pytest.mark.asyncio
 async def test_notify_stackchan_event_without_active_session_logs_and_returns(
     monkeypatch,
     caplog,
 ):
     monkeypatch.setattr(stdio_server, "_active_session", None)
+    monkeypatch.setattr(stdio_server, "_active_sessions", {})
 
     with caplog.at_level(logging.WARNING):
         await notify_stackchan_event(

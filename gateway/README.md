@@ -75,6 +75,25 @@ Default ports:
 - WebSocket (ESP32 -> gateway): `0.0.0.0:8765`
 - HTTP capture (ESP32 -> gateway): `0.0.0.0:8766`
 
+## Daemon mode (Phase B)
+
+For multi-client setups, run one shared Streamable HTTP daemon instead of
+letting each MCP client spawn its own stdio gateway:
+
+```bash
+uv run stackchan-mcp serve --transport streamable-http
+```
+
+The daemon exposes MCP at `http://127.0.0.1:8767/mcp` by default, keeps the
+existing ESP32 WebSocket and capture listeners, and serializes ESP32-bound
+tool calls through a bounded command queue. See
+[`../docs/178-daemon-setup.md`](../docs/178-daemon-setup.md) for environment
+variables, bearer-token rules, `MCP_HTTP_ALLOWED_HOSTS`, bind safety, and
+migration notes.
+
+The zero-subcommand stdio mode remains supported and unchanged for existing
+client configs.
+
 By default, the gateway advertises the WebSocket endpoint as
 `_stackchan-mcp._tcp.local.` via mDNS/DNS-SD so fresh firmware can discover it
 on the local LAN. Run `stackchan-mcp --no-mdns` to disable this advertisement.
@@ -90,10 +109,10 @@ again, check `get_status` from the stdio MCP side to confirm the device is back.
 ## Configuration changes
 
 The gateway reads `.env` once at process start. Because the gateway runs as a
-**stdio MCP server** (it has no standalone CLI mode beyond `--help` /
-`--version` / `--check`), editing `.env` while it is connected to an MCP
-client does not take effect on the running process — and killing the gateway
-process directly will not auto-restart it; the MCP client owns the lifecycle.
+**stdio MCP server** by default, editing `.env` while it is connected to an MCP
+client does not take effect on the running process — and killing that stdio
+gateway process directly will not auto-restart it; the MCP client owns the
+lifecycle. In daemon mode, restart the daemon process after changing `.env`.
 
 After editing `.env` (for example to update `STACKCHAN_TOKEN`, `VISION_URL`,
 or `VISION_TOKEN`):
