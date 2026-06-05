@@ -68,6 +68,14 @@ documented-only.
 
 - docs(gateway): daemon setup and Phase B migration notes. (#178)
 
+- Fixed: #178 Phase B stage 3 HTTP daemon — cancel-safe queue dispatch
+  drops items for cancelled HTTP requests before ESP32 dispatch and
+  drains pending items on lifespan shutdown with a JSON-RPC
+  server-shutdown error. Narrowed unauthenticated `/healthz` to a
+  liveness-only payload and moved device, queue, and owner detail to
+  the authenticated `/status` endpoint (now includes `owner_id`).
+  (#178)
+
 - Fixed: #178 Phase B chunk 2+3 ownership lock cleanup safety. The
   streamable-http `serve` placeholder now guards its `finally` cleanup with
   an `acquired` flag so an `OwnershipError` raised by an existing owner is

@@ -38,6 +38,8 @@ NON_LOOPBACK_TOKEN_REQUIRED_MESSAGE = (
 DISCONNECTED_DEVICE_PAYLOAD = {
     "error": "No ESP32 device connected. Please check the device."
 }
+SERVER_SHUTDOWN_ERROR_CODE = -32000
+SERVER_SHUTDOWN_ERROR_MESSAGE = "stackchan MCP HTTP server is shutting down"
 
 DispatchFn = Callable[[QueueItem], Awaitable[list[TextContent]]]
 
@@ -103,18 +105,16 @@ def build_app(
         json_response=True,
         stateless=False,
     )
-    _install_queue_tool_handler(server, queue=queue, gateway=gateway)
+    pending_items: dict[str, QueueItem] = {}
+    _install_queue_tool_handler(
+        server,
+        queue=queue,
+        gateway=gateway,
+        pending_items=pending_items,
+    )
 
     async def healthz(_request: Request) -> JSONResponse:
-        return JSONResponse(
-            {
-                "ok": True,
-                "esp32_connected": bool(gateway.esp32.device_connected),
-                "queue_depth": queue.depth,
-                "queue_capacity": queue.capacity,
-                "owner_id": owner_id,
-            }
-        )
+        return JSONResponse({"ok": True})
 
     async def status(_request: Request) -> JSONResponse:
         raw_status = gateway.esp32.get_status()
@@ -123,8 +123,10 @@ def build_app(
             status_payload["status"] = raw_status
         status_payload.update(
             {
+                "esp32_connected": bool(gateway.esp32.device_connected),
                 "queue_depth": queue.depth,
                 "queue_capacity": queue.capacity,
+                "owner_id": owner_id,
                 "connected_clients": _connected_client_count(session_manager),
             }
         )
@@ -135,7 +137,9 @@ def build_app(
         dispatcher_task: asyncio.Task[None] | None = None
         async with session_manager.run():
             if dispatch_fn is not None:
-                dispatcher_task = asyncio.create_task(queue.run_dispatcher(dispatch_fn))
+                dispatcher_task = asyncio.create_task(
+                    queue.run_dispatcher(_skip_done_dispatch(dispatch_fn))
+                )
             try:
                 yield
             finally:
@@ -143,6 +147,8 @@ def build_app(
                     dispatcher_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await dispatcher_task
+                _complete_pending_items_for_shutdown(pending_items)
+                _drain_queued_items_for_shutdown(queue)
 
     routes = [
         Route(
@@ -169,6 +175,7 @@ def _install_queue_tool_handler(
     *,
     queue: CommandQueue,
     gateway: Any,
+    pending_items: dict[str, QueueItem],
 ) -> None:
     async def handler(req: CallToolRequest) -> ServerResult | ErrorData:
         tool_name = req.params.name
@@ -207,10 +214,62 @@ def _install_queue_tool_handler(
         except QueueFull as exc:
             return ErrorData(**build_queue_full_error(exc.queue_depth))
 
-        content = await response_future
-        return _tool_result(content)
+        pending_items[item.correlation_id] = item
+        try:
+            content_or_error = await response_future
+        except asyncio.CancelledError:
+            response_future.cancel()
+            raise
+        finally:
+            if response_future.done():
+                pending_items.pop(item.correlation_id, None)
+
+        if isinstance(content_or_error, ErrorData):
+            return content_or_error
+        return _tool_result(content_or_error)
 
     server.request_handlers[CallToolRequest] = handler
+
+
+def _skip_done_dispatch(dispatch_fn: DispatchFn) -> DispatchFn:
+    async def dispatch(item: QueueItem) -> list[TextContent]:
+        if item.response_future.done():
+            return []
+        return await dispatch_fn(item)
+
+    return dispatch
+
+
+def _complete_pending_items_for_shutdown(
+    pending_items: dict[str, QueueItem],
+) -> None:
+    for item in list(pending_items.values()):
+        _complete_item_with_shutdown_error(item)
+    pending_items.clear()
+
+
+def _drain_queued_items_for_shutdown(queue: CommandQueue) -> None:
+    raw_queue = getattr(queue, "_queue")
+    while True:
+        try:
+            item = raw_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        _complete_item_with_shutdown_error(item)
+        raw_queue.task_done()
+
+
+def _complete_item_with_shutdown_error(item: QueueItem) -> None:
+    if not item.response_future.done():
+        item.response_future.set_result(_server_shutdown_error())
+
+
+def _server_shutdown_error() -> ErrorData:
+    return ErrorData(
+        code=SERVER_SHUTDOWN_ERROR_CODE,
+        message=SERVER_SHUTDOWN_ERROR_MESSAGE,
+        data={"reason": "server_shutdown"},
+    )
 
 
 def _tool_result(content: list[TextContent]) -> ServerResult:

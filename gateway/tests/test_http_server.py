@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 from mcp.server.streamable_http import MCP_SESSION_ID_HEADER
-from mcp.types import TextContent
+from mcp.types import ErrorData, TextContent
 
 from stackchan_mcp.http_server import (
     AUTH_FAILURE_MESSAGE,
@@ -123,6 +123,26 @@ async def _wait_for_queue_depth(queue: CommandQueue, depth: int) -> None:
     raise AssertionError(f"queue depth did not reach {depth}")
 
 
+class GatedCommandQueue(CommandQueue):
+    def __init__(self, capacity: int) -> None:
+        super().__init__(capacity=capacity)
+        self.allow_get = asyncio.Event()
+        self.get_started = asyncio.Event()
+        self.enqueued_task: asyncio.Task | None = None
+        self.last_enqueued_item: QueueItem | None = None
+
+    def enqueue(self, item: QueueItem) -> None:
+        task = asyncio.current_task()
+        self.enqueued_task = task if isinstance(task, asyncio.Task) else None
+        self.last_enqueued_item = item
+        super().enqueue(item)
+
+    async def get(self) -> QueueItem:
+        self.get_started.set()
+        await self.allow_get.wait()
+        return await super().get()
+
+
 @pytest.mark.asyncio
 async def test_queue_ordering_fifo_completion() -> None:
     queue = CommandQueue(capacity=3)
@@ -190,6 +210,96 @@ async def test_queue_full_returns_jsonrpc_error_response() -> None:
     payload = second.json()
     assert payload["id"] == 11
     assert payload["error"] == build_queue_full_error(1)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_client_item_is_not_dispatched() -> None:
+    queue = GatedCommandQueue(capacity=2)
+    dispatched: list[str] = []
+
+    async def dispatch(item: QueueItem):
+        dispatched.append(item.tool_name)
+        return [TextContent(type="text", text=json.dumps({"ok": True}))]
+
+    app = build_app(
+        queue,
+        gateway=FakeGateway(),
+        owner_id="owner-test",
+        host="127.0.0.1",
+        port=8767,
+        dispatch_fn=dispatch,
+    )
+
+    async with _client(app) as client:
+        session_id = await _initialize(client)
+        call_task = asyncio.create_task(
+            _call_tool(
+                client,
+                session_id=session_id,
+                name="get_device_info",
+            )
+        )
+        await _wait_for_queue_depth(queue, 1)
+
+        assert queue.enqueued_task is not None
+        queue.enqueued_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await call_task
+        assert queue.last_enqueued_item is not None
+        assert queue.last_enqueued_item.response_future.cancelled()
+
+        queue.allow_get.set()
+        await _wait_for_queue_depth(queue, 0)
+        await asyncio.sleep(0.01)
+
+    assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_drains_pending_queue_items() -> None:
+    queue = GatedCommandQueue(capacity=3)
+    dispatched: list[str] = []
+
+    async def dispatch(item: QueueItem):
+        dispatched.append(item.tool_name)
+        return [TextContent(type="text", text=json.dumps({"ok": True}))]
+
+    app = build_app(
+        queue,
+        gateway=FakeGateway(),
+        owner_id="owner-test",
+        host="127.0.0.1",
+        port=8767,
+        dispatch_fn=dispatch,
+    )
+
+    loop = asyncio.get_running_loop()
+    futures = [loop.create_future() for _ in range(2)]
+
+    async with app.router.lifespan_context(app):
+        for index, future in enumerate(futures):
+            queue.enqueue(
+                QueueItem(
+                    correlation_id=f"pending-{index}",
+                    client_session_id=None,
+                    client_request_id=index,
+                    tool_name=f"tool-{index}",
+                    arguments={},
+                    response_future=future,
+                    enqueued_at=0.0,
+                )
+            )
+        await _wait_for_queue_depth(queue, 2)
+
+    assert queue.depth == 0
+    assert dispatched == []
+    for future in futures:
+        assert future.done()
+        result = future.result()
+        assert isinstance(result, ErrorData)
+        assert result.code == -32000
+        assert result.message == "stackchan MCP HTTP server is shutting down"
+        assert result.data == {"reason": "server_shutdown"}
 
 
 @pytest.mark.asyncio
@@ -405,7 +515,7 @@ async def test_dispatcher_returns_stdio_disconnect_payload_as_tool_result() -> N
 
 
 @pytest.mark.asyncio
-async def test_healthz_and_status_shapes() -> None:
+async def test_healthz_is_liveness_only_and_status_requires_auth_for_details() -> None:
     queue = CommandQueue(capacity=2)
     app = build_app(
         queue,
@@ -413,22 +523,27 @@ async def test_healthz_and_status_shapes() -> None:
         owner_id="owner-test",
         host="127.0.0.1",
         port=8767,
+        token="secret",
     )
 
     async with _client(app) as client:
         health = await client.get("/healthz")
-        status = await client.get("/status")
+        unauthenticated_status = await client.get("/status")
+        status = await client.get("/status", headers=_headers(token="secret"))
 
-    assert health.json() == {
-        "ok": True,
-        "esp32_connected": True,
-        "queue_depth": 0,
-        "queue_capacity": 2,
-        "owner_id": "owner-test",
-    }
-    assert status.json()["connected"] is True
-    assert status.json()["queue_depth"] == 0
-    assert status.json()["connected_clients"] == 0
+    assert health.status_code == 200
+    assert health.json() == {"ok": True}
+    assert set(health.json()) == {"ok"}
+    assert unauthenticated_status.status_code == 401
+
+    status_payload = status.json()
+    assert status.status_code == 200
+    assert status_payload["connected"] is True
+    assert status_payload["esp32_connected"] is True
+    assert status_payload["queue_depth"] == 0
+    assert status_payload["queue_capacity"] == 2
+    assert status_payload["owner_id"] == "owner-test"
+    assert status_payload["connected_clients"] == 0
 
 
 @pytest.mark.asyncio
