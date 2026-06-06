@@ -64,13 +64,13 @@ documented-only.
   pre-plugin wiring.
 
   The README startup command for the Channels path now includes the
-  required `--channels stackchan-mcp` argument (loading the plugin via
+  required `--channels server:stackchan-mcp` argument (loading the plugin via
   `--plugin-dir` alone is insufficient: Claude Code only attaches a
   channel source and injects `<channel source="stackchan-mcp" ...>`
   blocks when the server is explicitly registered in the session's
   channels list). When allowlist restrictions block development
   servers, the documented fallback is
-  `--dangerously-load-development-channels stackchan-mcp`. (#266)
+  `--dangerously-load-development-channels server:stackchan-mcp`. (#266)
 
 - Added: `stackchan/event` experimental MCP capability and server-initiated
   notification bridge for firmware-originated touch events (`tap` /

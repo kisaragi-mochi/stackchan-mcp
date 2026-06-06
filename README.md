@@ -516,19 +516,19 @@ To enable Channels notifications:
      gateway.
 
      ```bash
-     claude --plugin-dir /path/to/stackchan-mcp --channels stackchan-mcp --agent <your-agent>
+     claude --plugin-dir /path/to/stackchan-mcp --channels server:stackchan-mcp --agent <your-agent>
      ```
 
      For one-session local development, point `--plugin-dir` at your
      working copy of this repository; Claude Code starts the gateway
      under `${CLAUDE_PLUGIN_ROOT}/gateway` via the bundled `.mcp.json`.
-     The `--channels stackchan-mcp` argument is what makes Claude Code
+     The `--channels server:stackchan-mcp` argument is what makes Claude Code
      attach the channel source to this server and inject
      `<channel source="stackchan-mcp" ...>` blocks into the session;
      without it the plugin loads but channels notifications are
      silently dropped on the receiving side. If allowlist restrictions
      block a development server from being added, use
-     `--dangerously-load-development-channels stackchan-mcp` instead.
+     `--dangerously-load-development-channels server:stackchan-mcp` instead.
      Marketplace publication (`--channels plugin:stackchan-mcp@<marketplace>`)
      is tracked as a follow-up and will land once the manifest is
      submitted to a marketplace.

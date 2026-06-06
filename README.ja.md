@@ -466,19 +466,19 @@ Channels 通知を有効にするには:
      Claude Code が購読するようにします。
 
      ```bash
-     claude --plugin-dir /path/to/stackchan-mcp --channels stackchan-mcp --agent <your-agent>
+     claude --plugin-dir /path/to/stackchan-mcp --channels server:stackchan-mcp --agent <your-agent>
      ```
 
      1 セッション限定のローカル開発では `--plugin-dir` に本リポジトリの
      作業コピーを指定してください。Claude Code は同梱の `.mcp.json`
      経由で `${CLAUDE_PLUGIN_ROOT}/gateway` 配下の gateway を起動します。
-     `--channels stackchan-mcp` 引数を付けることで Claude Code がこの
+     `--channels server:stackchan-mcp` 引数を付けることで Claude Code がこの
      server を channel source として attach し、session に
      `<channel source="stackchan-mcp" ...>` blocks を inject します。
      付けないと plugin は読み込まれますが、channels の notification は
      受信側で silent に drop されます。allowlist 制限により開発用 server
      が登録できない場合は、代わりに
-     `--dangerously-load-development-channels stackchan-mcp` を使って
+     `--dangerously-load-development-channels server:stackchan-mcp` を使って
      ください。Marketplace 公開
      (`--channels plugin:stackchan-mcp@<marketplace>`) は follow-up
      として追跡し、manifest を marketplace へ提出したタイミングで
