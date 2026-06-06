@@ -154,6 +154,37 @@ def test_addresses_without_prefix_are_not_excluded(
     assert advertisement.parsed_addresses == ["192.168.0.0", "192.168.0.10"]
 
 
+def test_socket_source_inherits_ifaddr_prefix_for_network_address_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: an interface can end up holding its subnet's network address
+    # (e.g. ``192.168.1.0/24`` with both subnet and ifaddr-reported IP equal to
+    # ``192.168.1.0``) under unusual host routing or bridge configurations.
+    # The ifaddr source reports it with the correct prefix; the socket source
+    # (via ``getaddrinfo``) returns the same address with no prefix. Without
+    # bridging the two, the socket entry would slip past
+    # ``_is_network_or_broadcast_address`` and zeroconf would later crash with
+    # ``EADDRNOTAVAIL`` trying to ``sendto`` that address. The enumerator must
+    # adopt the ifaddr prefix for matching socket addresses so the existing
+    # network/broadcast filter applies uniformly.
+    monkeypatch.setattr(
+        mdns,
+        "_iter_ifaddr_ipv4_addresses",
+        lambda: [("192.168.1.42", 24), ("192.168.1.0", 24)],
+    )
+    monkeypatch.setattr(
+        mdns,
+        "_iter_socket_ipv4_addresses",
+        lambda: [("192.168.1.0", None), ("192.168.1.42", None)],
+    )
+
+    advertisement = build_advertisement(host="0.0.0.0", port=8765)
+
+    assert advertisement is not None
+    assert "192.168.1.0" not in advertisement.parsed_addresses
+    assert "192.168.1.42" in advertisement.parsed_addresses
+
+
 def test_mixed_tier_ordering_preserves_within_tier_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -204,7 +235,8 @@ async def test_advertiser_registers_service(monkeypatch: pytest.MonkeyPatch) -> 
             self.kwargs = kwargs
 
     class FakeAsyncZeroconf:
-        def __init__(self) -> None:
+        def __init__(self, *, interfaces=None) -> None:
+            self.interfaces = interfaces
             self.registered = []
             self.unregistered = []
             self.closed = False
@@ -259,7 +291,8 @@ async def test_advertiser_warns_when_service_name_changes(
             self.kwargs = kwargs
 
     class RenamingAsyncZeroconf:
-        def __init__(self) -> None:
+        def __init__(self, *, interfaces=None) -> None:
+            self.interfaces = interfaces
             self.registered = []
             self.unregistered = []
             self.closed = False
@@ -318,7 +351,8 @@ async def test_advertiser_closes_zeroconf_when_registration_fails(
             self.kwargs = kwargs
 
     class FailingAsyncZeroconf:
-        def __init__(self) -> None:
+        def __init__(self, *, interfaces=None) -> None:
+            self.interfaces = interfaces
             self.closed = False
             instances.append(self)
 

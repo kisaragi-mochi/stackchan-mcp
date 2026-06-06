@@ -195,8 +195,29 @@ def _iter_socket_ipv4_addresses() -> list[tuple[str, int | None]]:
 
 
 def _enumerate_usable_ipv4_addresses() -> list[str]:
+    ifaddr_entries = _iter_ifaddr_ipv4_addresses()
+    socket_entries = _iter_socket_ipv4_addresses()
+
+    # The socket-based source carries no subnet prefix, so on its own it cannot
+    # exclude network/broadcast addresses. When the same address also appears
+    # in the ifaddr source (which does carry a prefix), adopt that prefix so
+    # ``_is_network_or_broadcast_address`` can recognise and drop the entry.
+    # Without this, a host whose ``getaddrinfo``-resolved set includes an
+    # interface's subnet network base (which can happen when an interface ends
+    # up with its own subnet's network address as its host IP) would be
+    # advertised and then crash the zeroconf socket with ``EADDRNOTAVAIL``.
+    prefix_by_address = {
+        address: prefix
+        for address, prefix in ifaddr_entries
+        if prefix is not None
+    }
+    enriched_socket_entries = [
+        (address, prefix_by_address.get(address, prefix))
+        for address, prefix in socket_entries
+    ]
+
     return _select_advertised_addresses(
-        [*_iter_ifaddr_ipv4_addresses(), *_iter_socket_ipv4_addresses()]
+        [*ifaddr_entries, *enriched_socket_entries]
     )
 
 
@@ -269,7 +290,15 @@ class MdnsAdvertiser:
             return
 
         AsyncZeroconf, ServiceInfo = _load_zeroconf_classes()
-        zeroconf = AsyncZeroconf()
+        # Constrain zeroconf to the IPv4 interfaces we actually advertise on.
+        # The default ``InterfaceChoice.All`` makes zeroconf bind a socket on
+        # every host IPv4 address it can find, which on a host with several
+        # interfaces can include addresses the kernel refuses ``sendto`` on
+        # (the engine then never finishes starting, and the gateway hangs in
+        # ``async_wait_for_start``). Passing the same set of addresses we put
+        # into the SRV record keeps zeroconf in sync with our advertisement
+        # and skips the unusable interfaces entirely.
+        zeroconf = AsyncZeroconf(interfaces=advertisement.parsed_addresses)
         info = ServiceInfo(
             advertisement.service_type,
             advertisement.service_name,
