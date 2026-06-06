@@ -460,15 +460,20 @@ Channels 通知を有効にするには:
 
 2. 受け口側 — ホストごとに開き方が異なります。
 
-   - **Claude Code**: 本 gateway が宣言する `claude/channel` capability
-     を Claude Code が購読するように、起動時にフラグを付けます。
+   - **Claude Code**: 本リポジトリを CC plugin として読み込み、
+     gateway が宣言する `claude/channel` capability を Claude Code が
+     購読するようにします。
 
      ```bash
-     claude --dangerously-load-development-channels server:stackchan-mcp
+     claude --plugin-dir /path/to/stackchan-mcp --agent <your-agent>
      ```
 
-     将来 plugin パッケージ版がリリースされたら
-     `--channels plugin:<name>@<marketplace>` に置き換わります。
+     1 セッション限定のローカル開発では `--plugin-dir` に本リポジトリの
+     作業コピーを指定してください。Claude Code は同梱の `.mcp.json`
+     経由で `${CLAUDE_PLUGIN_ROOT}/gateway` 配下の gateway を起動します。
+     Marketplace 公開 (`--channels plugin:stackchan-mcp@<marketplace>`)
+     は follow-up として追跡し、manifest を marketplace へ提出した
+     タイミングで利用可能になります。
 
    - **`claude/channel` 互換の受け口を持つ他ホスト**: 当該ホストの
      ドキュメントに従って受け口を開いてください。Claude Code 以外の

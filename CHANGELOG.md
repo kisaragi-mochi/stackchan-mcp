@@ -48,10 +48,11 @@ documented-only.
   ```
 
   README now documents the host-side receiver setup required to consume
-  the Channels path, including the Claude Code experimental
-  `--dangerously-load-development-channels server:stackchan-mcp` startup
-  flag and the JSONL fallback for hosts without a Channels receiver.
-  (#266)
+  the Channels path: load this repository as a Claude Code plugin via
+  `claude --plugin-dir <repo-checkout>` so Claude Code subscribes to the
+  advertised `claude/channel` capability. Marketplace publication is
+  tracked as a follow-up. The JSONL fallback remains for hosts without
+  a Channels receiver. (#266)
 
 - Added: `stackchan/event` experimental MCP capability and server-initiated
   notification bridge for firmware-originated touch events (`tap` /

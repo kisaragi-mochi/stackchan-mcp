@@ -510,16 +510,20 @@ To enable Channels notifications:
 
 2. Receiver side — open a receiver on your host:
 
-   - **Claude Code**: start with the channels flag so Claude Code
-     subscribes to the `claude/channel` capability advertised by this
-     gateway.
+   - **Claude Code**: load this repository as a CC plugin so Claude
+     Code subscribes to the `claude/channel` capability advertised by
+     this gateway.
 
      ```bash
-     claude --dangerously-load-development-channels server:stackchan-mcp
+     claude --plugin-dir /path/to/stackchan-mcp --agent <your-agent>
      ```
 
-     A future plugin-packaged release will replace this with
-     `--channels plugin:<name>@<marketplace>`.
+     For one-session local development, point `--plugin-dir` at your
+     working copy of this repository; Claude Code starts the gateway
+     under `${CLAUDE_PLUGIN_ROOT}/gateway` via the bundled `.mcp.json`.
+     Marketplace publication (`--channels plugin:stackchan-mcp@<marketplace>`)
+     is tracked as a follow-up and will land once the manifest is
+     submitted to a marketplace.
 
    - **Other hosts with a `claude/channel`-compatible receiver**: open
      that receiver per the host's documentation. Compatibility with
