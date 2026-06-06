@@ -47,6 +47,12 @@ documented-only.
     path: ~/.claude/stackchan-events.jsonl
   ```
 
+  README now documents the host-side receiver setup required to consume
+  the Channels path, including the Claude Code experimental
+  `--dangerously-load-development-channels server:stackchan-mcp` startup
+  flag and the JSONL fallback for hosts without a Channels receiver.
+  (#266)
+
 - Added: `stackchan/event` experimental MCP capability and server-initiated
   notification bridge for firmware-originated touch events (`tap` /
   `stroke`) forwarded from additive `stackchan-event` WebSocket frames.

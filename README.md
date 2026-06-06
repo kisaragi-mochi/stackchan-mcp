@@ -495,20 +495,39 @@ the `listen` API.
 ### 6. Optional: enable event notifications
 
 Stack-chan physical events (touch tap / stroke) can be delivered through
-several notification paths, depending on host capabilities. CC users can
-receive them via the Channels mechanism; other hosts can be added later.
-If your host doesn't expose a notification receiver, the fallback JSONL
-output can be consumed by host-side integration. All paths are disabled
-by default; opt in via `~/.config/stackchan-mcp/notify.yml`. The Channels
-mechanism uses an experimental MCP capability and may evolve.
+several notification paths, depending on host capabilities. All paths are
+disabled by default; opt in via `~/.config/stackchan-mcp/notify.yml`. The
+Channels mechanism uses an experimental MCP capability and may evolve.
 
 To enable Channels notifications:
 
-```yaml
-# ~/.config/stackchan-mcp/notify.yml
-channels:
-  enabled: true
-```
+1. Gateway side — turn Channels on in `~/.config/stackchan-mcp/notify.yml`:
+
+   ```yaml
+   channels:
+     enabled: true
+   ```
+
+2. Receiver side — open a receiver on your host:
+
+   - **Claude Code**: start with the channels flag so Claude Code
+     subscribes to the `claude/channel` capability advertised by this
+     gateway.
+
+     ```bash
+     claude --dangerously-load-development-channels server:stackchan-mcp
+     ```
+
+     A future plugin-packaged release will replace this with
+     `--channels plugin:<name>@<marketplace>`.
+
+   - **Other hosts with a `claude/channel`-compatible receiver**: open
+     that receiver per the host's documentation. Compatibility with
+     hosts other than Claude Code has not been verified in this
+     repository.
+
+   - **Hosts without a Channels receiver**: use the JSONL fallback (see
+     below).
 
 To restore the previous always-on event behavior:
 
