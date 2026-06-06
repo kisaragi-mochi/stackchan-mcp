@@ -56,7 +56,6 @@ async def test_stackchan_event_frame_dispatches_to_notify_bridge(monkeypatch):
                 "duration_ms": 350,
                 "action": "head_pat",
                 "ts": 123456,
-                "ts_unix": 1717000000.25,
                 "session_id": "session-1",
             },
         )
@@ -143,9 +142,10 @@ async def test_server_run_captures_active_session_before_first_message(monkeypat
             return None
 
     monkeypatch.setattr(stdio_server, "ServerSession", FakeServerSession)
-    server = create_server()
+    config = _notify_config()
+    server = create_server(notify_config=config)
 
-    await server.run(None, None, _create_initialization_options(server))
+    await server.run(None, None, _create_initialization_options(server, config))
 
     assert len(observed) == 1
     assert isinstance(observed[0], FakeServerSession)

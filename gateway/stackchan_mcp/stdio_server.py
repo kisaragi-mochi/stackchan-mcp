@@ -82,13 +82,17 @@ class StackChanChannelNotification(
 
 
 class StackChanServer(Server):
+    def __init__(self, name: str, *, notify_config: NotifyConfig) -> None:
+        super().__init__(name)
+        self._notify_config = notify_config
+
     def create_initialization_options(
         self,
         notification_options: NotificationOptions | None = None,
         experimental_capabilities: dict[str, dict[str, Any]] | None = None,
     ) -> InitializationOptions:
         if notification_options is None and experimental_capabilities is None:
-            return _create_initialization_options(self)
+            return _create_initialization_options(self, self._notify_config)
         return super().create_initialization_options(
             notification_options=notification_options,
             experimental_capabilities=experimental_capabilities,
@@ -229,10 +233,8 @@ def _build_stackchan_event_instructions(notify_config: NotifyConfig) -> str | No
 
 def _create_initialization_options(
     server: Server,
-    notify_config: NotifyConfig | None = None,
+    notify_config: NotifyConfig,
 ) -> InitializationOptions:
-    if notify_config is None:
-        notify_config = load_notify_config()
     return InitializationOptions(
         server_name="stackchan-mcp",
         server_version=__version__,
@@ -587,10 +589,12 @@ async def _dispatch_mcp_tool(
     return [TextContent(type="text", text=str(result))]
 
 
-def create_server() -> Server:
+def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
     """Create and configure the MCP server with tool handlers."""
     _verify_mcp_sdk_compatibility()
-    server = StackChanServer("stackchan-mcp")
+    if notify_config is None:
+        notify_config = load_notify_config()
+    server = StackChanServer("stackchan-mcp", notify_config=notify_config)
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -1349,11 +1353,13 @@ def create_server() -> Server:
 
 async def run_stdio_server(notify_config: NotifyConfig | None = None) -> None:
     """Run the MCP server on stdio."""
-    server = create_server()
+    if notify_config is None:
+        notify_config = load_notify_config()
+    server = create_server(notify_config=notify_config)
     async with stdio_server() as (read_stream, write_stream):
         logger.info("stdio MCP server starting")
         await server.run(
             read_stream,
             write_stream,
-            _create_initialization_options(server, notify_config=notify_config),
+            _create_initialization_options(server, notify_config),
         )

@@ -6,11 +6,13 @@ import pytest
 
 from stackchan_mcp import esp32_client, event_log, stdio_server
 from stackchan_mcp.esp32_client import ESP32Manager
+from stackchan_mcp.http_server import build_app
 from stackchan_mcp.notify_config import (
     DEFAULT_MESSAGE_TEMPLATES,
     MessageTemplate,
     NotifyConfig,
 )
+from stackchan_mcp.queue import CommandQueue
 
 
 @pytest.mark.asyncio
@@ -69,7 +71,7 @@ async def test_emit_stackchan_event_dispatches_selected_paths(
 
     if legacy_enabled:
         legacy_params = dict(notify_calls[0][1])
-        assert legacy_params == _expected_meta()
+        assert legacy_params == _expected_legacy_params()
         assert legacy_params["action"] == "head_pat"
 
     if channels_enabled:
@@ -142,6 +144,104 @@ async def test_custom_message_overrides_action_and_channel_content(monkeypatch):
     ]
 
 
+@pytest.mark.asyncio
+async def test_legacy_event_params_exclude_ts_unix(monkeypatch):
+    notify_calls, log_calls = await _capture_emit(
+        monkeypatch,
+        _notify_config(legacy=True, channels=False, jsonl=False),
+    )
+
+    assert notify_calls == [
+        (stdio_server.STACKCHAN_EVENT_METHOD, _expected_legacy_params())
+    ]
+    assert set(notify_calls[0][1]) == {
+        "event_type",
+        "subtype",
+        "duration_ms",
+        "action",
+        "ts",
+        "session_id",
+    }
+    assert log_calls == []
+
+
+@pytest.mark.asyncio
+async def test_channels_meta_includes_ts_unix(monkeypatch):
+    notify_calls, log_calls = await _capture_emit(
+        monkeypatch,
+        _notify_config(legacy=False, channels=True, jsonl=False),
+    )
+
+    assert notify_calls == [
+        (
+            stdio_server.CHANNEL_NOTIFICATION_METHOD,
+            {"content": "(head pat)", "meta": _expected_meta()},
+        )
+    ]
+    assert notify_calls[0][1]["meta"]["ts_unix"] == 1717000000.25
+    assert log_calls == []
+
+
+@pytest.mark.asyncio
+async def test_jsonl_payload_includes_ts_unix(monkeypatch):
+    notify_calls, log_calls = await _capture_emit(
+        monkeypatch,
+        _notify_config(legacy=False, channels=False, jsonl=True),
+    )
+
+    assert notify_calls == []
+    assert log_calls[0]["ts_unix"] == 1717000000.25
+
+
+@pytest.mark.asyncio
+async def test_mixed_legacy_and_channels(monkeypatch):
+    notify_calls, log_calls = await _capture_emit(
+        monkeypatch,
+        _notify_config(legacy=True, channels=True, jsonl=False),
+    )
+
+    assert notify_calls == [
+        (stdio_server.STACKCHAN_EVENT_METHOD, _expected_legacy_params()),
+        (
+            stdio_server.CHANNEL_NOTIFICATION_METHOD,
+            {"content": "(head pat)", "meta": _expected_meta()},
+        ),
+    ]
+    legacy_params = notify_calls[0][1]
+    channel_meta = notify_calls[1][1]["meta"]
+    assert {key: channel_meta[key] for key in legacy_params} == legacy_params
+    assert "ts_unix" in channel_meta
+    assert "ts_unix" not in legacy_params
+    assert log_calls == []
+
+
+def test_http_session_uses_startup_notify_config(monkeypatch):
+    startup_config = _notify_config(legacy=False, channels=True, jsonl=False)
+    post_startup_config = _notify_config(legacy=False, channels=False, jsonl=False)
+    load_calls = []
+
+    def load_post_startup_config():
+        load_calls.append("load")
+        return post_startup_config
+
+    monkeypatch.setattr(stdio_server, "load_notify_config", load_post_startup_config)
+    app = build_app(
+        CommandQueue(),
+        gateway=_FakeGateway(),
+        owner_id="owner-test",
+        host="127.0.0.1",
+        port=8767,
+        notify_config=startup_config,
+    )
+
+    server = app.state.session_manager.app
+    options = server.create_initialization_options()
+
+    assert load_calls == []
+    assert options.capabilities.experimental == {stdio_server.CHANNEL_CAPABILITY: {}}
+    assert options.instructions == stdio_server.STACKCHAN_CHANNEL_INSTRUCTIONS
+
+
 def _notify_config(
     *,
     legacy: bool,
@@ -159,11 +259,42 @@ def _notify_config(
     )
 
 
+async def _capture_emit(monkeypatch, notify_config: NotifyConfig):
+    notify_calls: list[tuple[str, dict]] = []
+    log_calls: list[dict] = []
+
+    async def fake_notify(method, params):
+        notify_calls.append((method, params))
+
+    def fake_log_event(**kwargs):
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(stdio_server, "notify_stackchan_event", fake_notify)
+    monkeypatch.setattr(event_log, "log_event", fake_log_event)
+    monkeypatch.setattr(esp32_client.time, "time", lambda: 1717000000.25)
+
+    manager = ESP32Manager(notify_config=notify_config)
+    await manager._emit_stackchan_event(_payload())
+
+    return notify_calls, log_calls
+
+
 def _payload() -> dict:
     return {
         "event_type": "touch",
         "subtype": "tap",
         "duration_ms": 350,
+        "ts": 123456,
+        "session_id": "session-1",
+    }
+
+
+def _expected_legacy_params() -> dict:
+    return {
+        "event_type": "touch",
+        "subtype": "tap",
+        "duration_ms": 350,
+        "action": "head_pat",
         "ts": 123456,
         "session_id": "session-1",
     }
@@ -179,3 +310,14 @@ def _expected_meta() -> dict:
         "ts_unix": 1717000000.25,
         "session_id": "session-1",
     }
+
+
+class _FakeESP32:
+    device_connected = True
+
+    def get_status(self) -> dict:
+        return {"connected": True}
+
+
+class _FakeGateway:
+    esp32 = _FakeESP32()

@@ -23,6 +23,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
+from .notify_config import NotifyConfig
 from .queue import CommandQueue, QueueFull, QueueItem, build_queue_full_error
 from .stdio_server import _dispatch_mcp_tool, create_server
 
@@ -97,9 +98,10 @@ def build_app(
     port: int,
     token: str | None = None,
     dispatch_fn: DispatchFn | None = None,
+    notify_config: NotifyConfig | None = None,
 ) -> _GuardedASGIApp:
     """Build the ASGI app for Streamable HTTP MCP plus health endpoints."""
-    server = create_server()
+    server = create_server(notify_config=notify_config)
     session_manager = StreamableHTTPSessionManager(
         app=server,
         json_response=True,

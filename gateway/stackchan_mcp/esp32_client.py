@@ -775,13 +775,21 @@ class ESP32Manager:
             DEFAULT_MESSAGE_TEMPLATES[(event_type, subtype)],
         )
         ts_unix = time.time()
-        params = {
+        event_payload = {
             "event_type": event_type,
             "subtype": subtype,
             "duration_ms": duration_ms,
             "action": message.action,
             "ts": ts,
             "ts_unix": ts_unix,
+            "session_id": session_id,
+        }
+        legacy_params = {
+            "event_type": event_type,
+            "subtype": subtype,
+            "duration_ms": duration_ms,
+            "action": message.action,
+            "ts": ts,
             "session_id": session_id,
         }
         logger.info(
@@ -807,13 +815,13 @@ class ESP32Manager:
         from .stdio_server import notify_stackchan_event
 
         if config.legacy_event_enabled:
-            await notify_stackchan_event("stackchan/event", params)
+            await notify_stackchan_event("stackchan/event", legacy_params)
 
         if config.channels_enabled:
-            content = render_template(message.template, params)
+            content = render_template(message.template, event_payload)
             await notify_stackchan_event(
                 "notifications/claude/channel",
-                {"content": content, "meta": params},
+                {"content": content, "meta": event_payload},
             )
 
         if config.jsonl_enabled:

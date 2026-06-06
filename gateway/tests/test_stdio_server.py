@@ -7,6 +7,7 @@ import pytest
 from mcp.types import CallToolRequest, ListToolsRequest
 
 from stackchan_mcp.notify_config import DEFAULT_MESSAGE_TEMPLATES, NotifyConfig
+import stackchan_mcp.stdio_server as stdio_server
 from stackchan_mcp.stdio_server import (
     CHANNEL_CAPABILITY,
     CHANNEL_NOTIFICATION_METHOD,
@@ -727,6 +728,36 @@ def test_stackchan_event_capabilities_and_instructions_follow_notify_config(
     assert options.capabilities.experimental == expected_capabilities
     assert _build_stackchan_event_instructions(config) == expected_instructions
     assert options.instructions == expected_instructions
+
+
+def test_create_initialization_options_requires_notify_config():
+    server = create_server(notify_config=_notify_config())
+
+    with pytest.raises(TypeError):
+        _create_initialization_options(server)
+
+
+def test_create_initialization_options_uses_explicit_notify_config(monkeypatch):
+    all_off_config = _notify_config(legacy=False, channels=False, jsonl=False)
+    channels_config = _notify_config(legacy=False, channels=True, jsonl=False)
+
+    load_calls = []
+
+    def load_all_off_config():
+        load_calls.append("load")
+        return all_off_config
+
+    monkeypatch.setattr(stdio_server, "load_notify_config", load_all_off_config)
+    server = create_server(notify_config=all_off_config)
+
+    all_off_options = _create_initialization_options(server, all_off_config)
+    channels_options = _create_initialization_options(server, channels_config)
+
+    assert load_calls == []
+    assert all_off_options.capabilities.experimental == {}
+    assert all_off_options.instructions is None
+    assert channels_options.capabilities.experimental == {CHANNEL_CAPABILITY: {}}
+    assert channels_options.instructions == STACKCHAN_CHANNEL_INSTRUCTIONS
 
 
 @pytest.mark.asyncio

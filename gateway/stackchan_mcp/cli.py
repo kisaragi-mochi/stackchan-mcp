@@ -855,6 +855,7 @@ async def _run_streamable_http_daemon(
         port=port,
         token=token,
         dispatch_fn=make_dispatch_fn(gateway),
+        notify_config=notify_config,
     )
     config = uvicorn.Config(
         app,
