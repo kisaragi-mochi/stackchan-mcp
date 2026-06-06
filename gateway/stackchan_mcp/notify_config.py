@@ -91,10 +91,17 @@ def load_notify_config() -> NotifyConfig:
 
 
 def render_template(template: str, payload: dict[str, Any]) -> str:
-    """Render a user template while preserving unknown placeholders."""
+    """Render a user template while preserving unknown placeholders.
+
+    A malformed-but-yaml-valid template (e.g. ``{duration_ms.foo}`` or
+    ``{unknown[0]}``) can raise ``AttributeError`` or ``TypeError`` from
+    ``str.format_map``. These are caught here so a single bad user template
+    cannot crash the channels dispatch path on every physical event; the
+    original template string is returned as a defensive fallback.
+    """
     try:
         return template.format_map(_SafeFormatDict(payload))
-    except (IndexError, KeyError, ValueError):
+    except (IndexError, KeyError, ValueError, AttributeError, TypeError):
         return template
 
 

@@ -203,3 +203,29 @@ def test_render_template_substitutes_and_preserves_unknown_placeholders():
     )
 
     assert rendered == "tap 350ms {unknown}"
+
+
+def test_render_template_falls_back_on_malformed_format_strings():
+    """A schema-valid but malformed template must not crash the dispatch path.
+
+    Python ``str.format_map`` can raise ``AttributeError`` for ``{x.attr}`` on
+    a non-attribute value and ``TypeError`` for ``{x[idx]}`` on a non-
+    subscriptable value. ``render_template`` must swallow both and return
+    the original template string so a single bad user template cannot kill
+    every channels-mode tap event.
+    """
+    payload = {"duration_ms": 350}
+
+    # ``{duration_ms.foo}`` triggers AttributeError on int's .foo access.
+    attr_template = "tap {duration_ms.foo}ms"
+    assert render_template(attr_template, payload) == attr_template
+
+    # ``{duration_ms[bad]}`` triggers TypeError on int subscript.
+    item_template = "tap {duration_ms[bad]}ms"
+    assert render_template(item_template, payload) == item_template
+
+    # ``{unknown.foo}`` exercises the _SafeFormatDict missing key path
+    # combined with a downstream attribute access; the fallback should also
+    # return the original template here rather than raise.
+    unknown_attr_template = "tap {unknown.foo}ms"
+    assert render_template(unknown_attr_template, payload) == unknown_attr_template
