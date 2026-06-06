@@ -52,7 +52,16 @@ documented-only.
   `claude --plugin-dir <repo-checkout>` so Claude Code subscribes to the
   advertised `claude/channel` capability. Marketplace publication is
   tracked as a follow-up. The JSONL fallback remains for hosts without
-  a Channels receiver. (#266)
+  a Channels receiver.
+
+  The Channels notification instructions now use `source="stackchan-mcp"`
+  to match the plugin / MCP server identifier (Claude Code derives the
+  channel source from the loaded plugin name, not from notification
+  params). README EN/JP also document that pre-plugin `~/.claude.json`
+  wiring does not receive `<channel ...>` injections, that switching
+  paths requires releasing the existing ESP32 ownership lock, and that
+  `legacy_event` / `jsonl` remain compatible for users who keep the
+  pre-plugin wiring. (#266)
 
 - Added: `stackchan/event` experimental MCP capability and server-initiated
   notification bridge for firmware-originated touch events (`tap` /

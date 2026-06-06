@@ -475,6 +475,17 @@ Channels 通知を有効にするには:
      は follow-up として追跡し、manifest を marketplace へ提出した
      タイミングで利用可能になります。
 
+     重要 — plugin 以前の起動経路では Channels が届きません: 以前
+     `~/.claude.json` の `mcpServers` 経由でこの gateway を起動して
+     いた場合、その旧経路では `<channel ...>` の inject は届きません。
+     Claude Code は plugin 経由で起動された MCP server のみに channel
+     source を付ける仕様です。plugin 経路に移行する前に、既存の
+     stackchan-mcp gateway プロセスを停止して ESP32 ownership lock
+     を解放してください。そうしないと plugin 経由で起動した gateway
+     が lock 取得に失敗します。`~/.claude.json` 経由のまま使いたい
+     場合は、`channels` ではなく `legacy_event` / `jsonl` を使って
+     ください。どちらも plugin loading なしで動作します。
+
    - **`claude/channel` 互換の受け口を持つ他ホスト**: 当該ホストの
      ドキュメントに従って受け口を開いてください。Claude Code 以外の
      ホストとの互換性は当リポジトリでは未検証です。

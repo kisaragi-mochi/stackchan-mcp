@@ -525,6 +525,17 @@ To enable Channels notifications:
      is tracked as a follow-up and will land once the manifest is
      submitted to a marketplace.
 
+     Important — pre-plugin wiring does not receive Channels: if you
+     previously wired this gateway via `~/.claude.json` `mcpServers`
+     (the pre-plugin path), that wiring does not receive `<channel ...>`
+     injections. Claude Code only attaches a channel source to
+     plugin-loaded MCP servers. Before switching to the plugin path,
+     stop any existing stackchan-mcp gateway process to release the
+     ESP32 ownership lock; the plugin-loaded gateway will otherwise
+     fail to acquire it. If you prefer to keep the `~/.claude.json`
+     wiring, use `legacy_event` and `jsonl` instead of `channels` —
+     both work without plugin loading.
+
    - **Other hosts with a `claude/channel`-compatible receiver**: open
      that receiver per the host's documentation. Compatibility with
      hosts other than Claude Code has not been verified in this

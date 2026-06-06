@@ -42,7 +42,7 @@ STACKCHAN_EVENT_INSTRUCTIONS = (
 )
 STACKCHAN_CHANNEL_INSTRUCTIONS = (
     'Stack-chan physical events arrive as Channels notifications under '
-    '<channel source="stackchan" action="..." subtype="..." '
+    '<channel source="stackchan-mcp" action="..." subtype="..." '
     'duration_ms="...">. React naturally using existing tools '
     '(set_avatar, say, set_mouth, set_leds, move_head).'
 )
