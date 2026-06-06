@@ -2025,6 +2025,7 @@ dependencies = [
     { name = "mcp" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "websockets" },
     { name = "zeroconf" },
 ]
@@ -2068,6 +2069,7 @@ requires-dist = [
     { name = "opuslib", marker = "extra == 'tts'", specifier = ">=3" },
     { name = "pydantic", specifier = ">=2" },
     { name = "python-dotenv" },
+    { name = "pyyaml", specifier = ">=6" },
     { name = "stackchan-mcp", extras = ["stt"], marker = "extra == 'stt-faster-whisper'" },
     { name = "stackchan-mcp", extras = ["stt"], marker = "extra == 'stt-openai'" },
     { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-voicevox'" },

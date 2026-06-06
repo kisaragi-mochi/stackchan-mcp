@@ -440,6 +440,36 @@ Face キャッシュにダウンロードされ、以降は再利用されます
 Vosk・whisper.cpp・他のクラウドサービス等を `listen` API を変えずに
 後から追加できます。
 
+### 6. オプション: イベント通知の有効化
+
+Stack-chan の物理イベント（touch tap / stroke）は、ホスト側の対応状況に
+合わせて複数の通知経路で届けられます。CC ユーザーは Channels 機構で
+受け取れます。その他のホスト向け経路は今後追加できます。ホストが通知の
+受け取り口を持っていない場合は、フォールバックとして JSONL 出力を
+ホスト側 integration から読むこともできます。すべての経路はデフォルトで
+無効です。有効化するには `~/.config/stackchan-mcp/notify.yml` で opt-in
+してください。Channels 機構は実験的な MCP capability を使っており、
+今後変わる可能性があります。
+
+Channels 通知を有効にする最小設定:
+
+```yaml
+# ~/.config/stackchan-mcp/notify.yml
+channels:
+  enabled: true
+```
+
+以前の常時有効だったイベント動作に戻す設定:
+
+```yaml
+# ~/.config/stackchan-mcp/notify.yml
+legacy_event:
+  enabled: true
+jsonl:
+  enabled: true
+  path: ~/.claude/stackchan-events.jsonl
+```
+
 ## アバター画像について
 
 `firmware/main/boards/stackchan/avatar_images.cc` は **真っ黒 RGB565 のプレースホルダ** です。ビルドは通りますが、画面には何も表示されません。

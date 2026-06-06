@@ -65,6 +65,32 @@ def test_log_event_appends_line_to_jsonl(monkeypatch, tmp_path):
     }
 
 
+def test_log_event_accepts_action_and_explicit_path(tmp_path):
+    path = tmp_path / "configured-events.jsonl"
+
+    log_event(
+        event_type="touch",
+        subtype="tap",
+        duration_ms=350,
+        ts=123456,
+        session_id="session-1",
+        action="head_pat",
+        path=path,
+        ts_unix=1717000000.5,
+    )
+
+    entry = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+    assert entry == {
+        "event_type": "touch",
+        "subtype": "tap",
+        "duration_ms": 350,
+        "ts": 123456,
+        "ts_unix": 1717000000.5,
+        "session_id": "session-1",
+        "action": "head_pat",
+    }
+
+
 def test_log_event_appends_multiple_lines_in_order(monkeypatch, tmp_path):
     path = tmp_path / "events.jsonl"
     monkeypatch.setenv(PATH_ENV_VAR, str(path))

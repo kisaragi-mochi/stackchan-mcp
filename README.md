@@ -492,6 +492,35 @@ success. The STT framework is engine-agnostic — additional engines
 (Vosk, whisper.cpp, cloud providers) can be added without changing
 the `listen` API.
 
+### 6. Optional: enable event notifications
+
+Stack-chan physical events (touch tap / stroke) can be delivered through
+several notification paths, depending on host capabilities. CC users can
+receive them via the Channels mechanism; other hosts can be added later.
+If your host doesn't expose a notification receiver, the fallback JSONL
+output can be consumed by host-side integration. All paths are disabled
+by default; opt in via `~/.config/stackchan-mcp/notify.yml`. The Channels
+mechanism uses an experimental MCP capability and may evolve.
+
+To enable Channels notifications:
+
+```yaml
+# ~/.config/stackchan-mcp/notify.yml
+channels:
+  enabled: true
+```
+
+To restore the previous always-on event behavior:
+
+```yaml
+# ~/.config/stackchan-mcp/notify.yml
+legacy_event:
+  enabled: true
+jsonl:
+  enabled: true
+  path: ~/.claude/stackchan-events.jsonl
+```
+
 ## About the avatar images
 
 `firmware/main/boards/stackchan/avatar_images.cc` is a **pure black RGB565 placeholder**. The firmware builds and runs, but the screen will display nothing.

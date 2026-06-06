@@ -11,6 +11,7 @@ from collections.abc import Sequence
 import json
 import logging
 import os
+import time
 import uuid
 from typing import Any
 
@@ -25,6 +26,12 @@ from .audio_stream import (
     is_recording_session,
     start_recording,
     stop_recording,
+)
+from .notify_config import (
+    DEFAULT_MESSAGE_TEMPLATES,
+    NotifyConfig,
+    load_notify_config,
+    render_template,
 )
 from .protocol import HelloResponse, make_mcp_message, parse_jsonrpc_response
 
@@ -354,10 +361,11 @@ class ESP32Manager:
     Currently supports a single device connection.
     """
 
-    def __init__(self):
+    def __init__(self, notify_config: NotifyConfig | None = None):
         self._connection: ESP32Connection | None = None
         self._server: Any = None
         self._lock = asyncio.Lock()
+        self._notify_config = notify_config or load_notify_config()
         self._init_tasks: list[asyncio.Task] = []
         self._vision_url: str = ""
         self._vision_token: str = ""
@@ -417,6 +425,10 @@ class ESP32Manager:
             "status": asyncio.Lock(),
             "default": asyncio.Lock(),
         }
+
+    def set_notify_config(self, notify_config: NotifyConfig) -> None:
+        """Replace the startup notification config used for future events."""
+        self._notify_config = notify_config
 
     @property
     def device_connected(self) -> bool:
@@ -757,48 +769,74 @@ class ESP32Manager:
             logger.warning("Malformed stackchan-event frame: session_id=%r", session_id)
             return
 
+        config = self._notify_config
+        message = config.messages.get(
+            (event_type, subtype),
+            DEFAULT_MESSAGE_TEMPLATES[(event_type, subtype)],
+        )
+        ts_unix = time.time()
         params = {
             "event_type": event_type,
             "subtype": subtype,
             "duration_ms": duration_ms,
+            "action": message.action,
             "ts": ts,
+            "ts_unix": ts_unix,
             "session_id": session_id,
         }
         logger.info(
-            "stackchan-event: %s/%s duration=%sms ts=%s session=%s",
+            "stackchan-event: %s/%s action=%s duration=%sms ts=%s session=%s",
             event_type,
             subtype,
+            message.action,
             duration_ms,
             ts,
             session_id,
         )
 
-        # Persist the validated event to the JSONL log so downstream
-        # consumers (e.g. an MCP client UserPromptSubmit hook that
-        # injects events into the next agent turn) can pick it up
-        # between the firmware reaction and the next conversational
-        # turn. ``log_event`` swallows OS / permission errors
-        # internally; the broad except below is a second-tier guard so
-        # any unforeseen helper bug cannot break the MCP notification
-        # path that follows.
-        from .event_log import log_event
-
-        try:
-            log_event(
-                event_type=event_type,
-                subtype=subtype,
-                duration_ms=duration_ms,
-                ts=ts,
-                session_id=session_id,
+        if not (
+            config.legacy_event_enabled
+            or config.channels_enabled
+            or config.jsonl_enabled
+        ):
+            logger.info(
+                "stackchan-event received and dropped: notification paths disabled"
             )
-        except Exception as exc:  # pragma: no cover - defensive guard
-            logger.warning(
-                "stackchan-event log persistence raised unexpectedly: %s", exc
-            )
+            return
 
         from .stdio_server import notify_stackchan_event
 
-        await notify_stackchan_event("stackchan/event", params)
+        if config.legacy_event_enabled:
+            await notify_stackchan_event("stackchan/event", params)
+
+        if config.channels_enabled:
+            content = render_template(message.template, params)
+            await notify_stackchan_event(
+                "notifications/claude/channel",
+                {"content": content, "meta": params},
+            )
+
+        if config.jsonl_enabled:
+            # ``log_event`` swallows OS / permission errors internally; the
+            # broad except below is a second-tier guard so any unforeseen
+            # helper bug cannot break the in-band notification paths above.
+            from .event_log import log_event
+
+            try:
+                log_event(
+                    event_type=event_type,
+                    subtype=subtype,
+                    duration_ms=duration_ms,
+                    ts=ts,
+                    session_id=session_id,
+                    action=message.action,
+                    path=config.jsonl_path,
+                    ts_unix=ts_unix,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.warning(
+                    "stackchan-event log persistence raised unexpectedly: %s", exc
+                )
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any]

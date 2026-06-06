@@ -1,15 +1,13 @@
 """Event log writer for firmware-originated stackchan events.
 
-The gateway appends each successfully-validated ``stackchan-event`` frame
-to a JSONL file (default ``~/.claude/stackchan-events.jsonl``) so that
-downstream consumers — most notably an MCP client hook that injects the
-event into the next agent turn as additional context — can read events
-between the firmware reaction and the next conversational turn. This is
-the gateway-side half of the "touch event reaches the LLM client" path;
-the MCP notification path itself remains unchanged and is the primary
-delivery channel for capability-aware clients.
+When the JSONL notification path is enabled, the gateway appends each
+successfully-validated ``stackchan-event`` frame to a JSONL file (default
+``~/.claude/stackchan-events.jsonl``) so downstream host integrations can
+read events between the firmware reaction and the next conversational
+turn. MCP notification paths are configured independently.
 
-The log file path is overridable via ``STACKCHAN_EVENTS_PATH``. Entries
+The log file path is overridable via ``STACKCHAN_EVENTS_PATH`` or an
+explicit caller-provided path. Entries
 whose ``ts_unix`` is older than ``RETENTION_DAYS`` are pruned exactly
 once on gateway startup via :func:`rotate_old_entries`. Long-running
 gateways are not re-rotated mid-flight; downstream readers are expected
@@ -60,6 +58,8 @@ def log_event(
     ts: int,
     session_id: str,
     *,
+    action: str | None = None,
+    path: Path | None = None,
     ts_unix: float | None = None,
 ) -> None:
     """Append a single stackchan event to the JSONL log.
@@ -72,6 +72,11 @@ def log_event(
         in milliseconds (monotonic); ``ts_unix`` is the wall-clock
         moment the gateway recorded the event and is what hook
         consumers should use for ``"how long ago"`` calculations.
+    action
+        Optional human-axis avatar action to include in the JSONL payload.
+    path
+        Optional resolved log path from notify.yml. When omitted, the legacy
+        ``STACKCHAN_EVENTS_PATH`` / default path resolution is used.
     ts_unix
         Optional override for the wall-clock timestamp. Defaults to
         ``time.time()`` at append time. Exposed for tests.
@@ -82,7 +87,8 @@ def log_event(
     if ts_unix is None:
         ts_unix = time.time()
 
-    path = resolve_log_path()
+    if path is None:
+        path = resolve_log_path()
     line = {
         "event_type": event_type,
         "subtype": subtype,
@@ -91,6 +97,8 @@ def log_event(
         "ts_unix": ts_unix,
         "session_id": session_id,
     }
+    if action is not None:
+        line["action"] = action
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
@@ -104,7 +112,11 @@ def log_event(
         )
 
 
-def rotate_old_entries(*, now_unix: float | None = None) -> None:
+def rotate_old_entries(
+    *,
+    path: Path | None = None,
+    now_unix: float | None = None,
+) -> None:
     """Prune log entries older than ``RETENTION_DAYS`` from the log file.
 
     Intended to be called exactly once at gateway startup. Reads every
@@ -117,7 +129,8 @@ def rotate_old_entries(*, now_unix: float | None = None) -> None:
     rotation is logged at WARNING and swallowed so a broken log file
     cannot prevent the gateway from starting up.
     """
-    path = resolve_log_path()
+    if path is None:
+        path = resolve_log_path()
     if not path.exists():
         return
     if now_unix is None:

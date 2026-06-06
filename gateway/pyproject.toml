@@ -33,6 +33,7 @@ dependencies = [
     "websockets>=12",
     "pydantic>=2",
     "python-dotenv",
+    "PyYAML>=6",
     # The stdio server captures the active ServerSession via a subclassed
     # Server.run() loop because the public MCP SDK does not yet expose a
     # stable hook for server-side notifications. That subclass relies on
@@ -121,4 +122,5 @@ packages = ["stackchan_mcp"]
 artifacts = [
     "stackchan_mcp/_libs/opus.dll",
     "stackchan_mcp/_libs/SOURCES.md",
+    "stackchan_mcp/notify.example.yml",
 ]

@@ -1,11 +1,27 @@
 """Tests for stdio MCP server tool definitions."""
 
 import json
+from pathlib import Path
 
 import pytest
 from mcp.types import CallToolRequest, ListToolsRequest
 
-from stackchan_mcp.stdio_server import SPEED_DESCRIPTION, create_server, _resolve_speed_dps
+from stackchan_mcp.notify_config import DEFAULT_MESSAGE_TEMPLATES, NotifyConfig
+from stackchan_mcp.stdio_server import (
+    CHANNEL_CAPABILITY,
+    CHANNEL_NOTIFICATION_METHOD,
+    STACKCHAN_CHANNEL_INSTRUCTIONS,
+    STACKCHAN_EVENT_INSTRUCTIONS,
+    STACKCHAN_EVENT_METHOD,
+    STACKCHAN_JSONL_INSTRUCTIONS,
+    SPEED_DESCRIPTION,
+    _build_experimental_capabilities,
+    _build_stackchan_event_instructions,
+    _create_initialization_options,
+    _resolve_speed_dps,
+    create_server,
+    notify_stackchan_event,
+)
 from stackchan_mcp.tts import get_registry
 
 
@@ -643,3 +659,130 @@ async def test_move_head_rejects_boolean_pitch(monkeypatch, pitch):
     )
 
     _assert_rejected_without_dispatch(result, calls)
+
+
+# ---------------------------------------------------------------------------
+# Stack-chan event notification config: capabilities, instructions, allowlist
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    (
+        "legacy",
+        "channels",
+        "jsonl",
+        "expected_capabilities",
+        "expected_instructions",
+    ),
+    [
+        (
+            False,
+            True,
+            False,
+            {CHANNEL_CAPABILITY: {}},
+            STACKCHAN_CHANNEL_INSTRUCTIONS,
+        ),
+        (
+            True,
+            False,
+            False,
+            {STACKCHAN_EVENT_METHOD: {}},
+            STACKCHAN_EVENT_INSTRUCTIONS,
+        ),
+        (
+            False,
+            False,
+            True,
+            {},
+            STACKCHAN_JSONL_INSTRUCTIONS,
+        ),
+        (
+            True,
+            True,
+            False,
+            {STACKCHAN_EVENT_METHOD: {}, CHANNEL_CAPABILITY: {}},
+            STACKCHAN_CHANNEL_INSTRUCTIONS + "\n\n" + STACKCHAN_EVENT_INSTRUCTIONS,
+        ),
+        (
+            False,
+            False,
+            False,
+            {},
+            None,
+        ),
+    ],
+)
+def test_stackchan_event_capabilities_and_instructions_follow_notify_config(
+    legacy,
+    channels,
+    jsonl,
+    expected_capabilities,
+    expected_instructions,
+):
+    config = _notify_config(legacy=legacy, channels=channels, jsonl=jsonl)
+    server = create_server()
+    options = _create_initialization_options(server, notify_config=config)
+
+    assert _build_experimental_capabilities(config) == expected_capabilities
+    assert options.capabilities.experimental == expected_capabilities
+    assert _build_stackchan_event_instructions(config) == expected_instructions
+    assert options.instructions == expected_instructions
+
+
+@pytest.mark.asyncio
+async def test_notify_stackchan_event_accepts_channel_method(monkeypatch):
+    session = _FakeNotificationSession()
+    monkeypatch.setattr("stackchan_mcp.stdio_server._active_session", session)
+    monkeypatch.setattr("stackchan_mcp.stdio_server._active_sessions", {})
+
+    params = {"content": "(head pat)", "meta": {"action": "head_pat"}}
+    await notify_stackchan_event(CHANNEL_NOTIFICATION_METHOD, params)
+
+    assert session.notifications == [
+        {"method": CHANNEL_NOTIFICATION_METHOD, "params": params}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notify_stackchan_event_rejects_unsupported_method(
+    monkeypatch,
+    caplog,
+):
+    session = _FakeNotificationSession()
+    monkeypatch.setattr("stackchan_mcp.stdio_server._active_session", session)
+    monkeypatch.setattr("stackchan_mcp.stdio_server._active_sessions", {})
+
+    with caplog.at_level("WARNING"):
+        await notify_stackchan_event("notifications/other", {"ok": True})
+
+    assert session.notifications == []
+    assert "Unsupported stackchan event notification method" in caplog.text
+
+
+def _notify_config(
+    *,
+    legacy: bool = False,
+    channels: bool = False,
+    jsonl: bool = False,
+) -> NotifyConfig:
+    return NotifyConfig(
+        legacy_event_enabled=legacy,
+        channels_enabled=channels,
+        jsonl_enabled=jsonl,
+        jsonl_path=Path("/tmp/stackchan-events-test.jsonl"),
+        messages=dict(DEFAULT_MESSAGE_TEMPLATES),
+    )
+
+
+class _FakeNotificationSession:
+    def __init__(self):
+        self.notifications = []
+
+    async def send_notification(self, notification):
+        self.notifications.append(
+            notification.model_dump(
+                by_alias=True,
+                mode="json",
+                exclude_none=True,
+            )
+        )

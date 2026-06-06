@@ -20,12 +20,16 @@ from mcp.types import Notification, TextContent, Tool
 
 from . import __version__
 from .gateway import get_gateway
+from .notify_config import NotifyConfig, load_notify_config
 from .stt import listen_and_transcribe
 from .tts import synthesize_and_send
 
 logger = logging.getLogger(__name__)
 
 STACKCHAN_EVENT_METHOD = "stackchan/event"
+CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel"
+CHANNEL_CAPABILITY = "claude/channel"
+_SUPPORTED_EVENT_METHODS = {STACKCHAN_EVENT_METHOD, CHANNEL_NOTIFICATION_METHOD}
 STACKCHAN_EVENT_INSTRUCTIONS = (
     "Stack-chan physical events arrive as server-initiated "
     "notifications with method='stackchan/event'. Params include "
@@ -35,6 +39,16 @@ STACKCHAN_EVENT_INSTRUCTIONS = (
     "(set_avatar, say, set_mouth, set_leds, move_head). There is "
     "no dedicated reply tool — the existing tool palette is the "
     "reaction surface."
+)
+STACKCHAN_CHANNEL_INSTRUCTIONS = (
+    'Stack-chan physical events arrive as Channels notifications under '
+    '<channel source="stackchan" action="..." subtype="..." '
+    'duration_ms="...">. React naturally using existing tools '
+    '(set_avatar, say, set_mouth, set_leds, move_head).'
+)
+STACKCHAN_JSONL_INSTRUCTIONS = (
+    "Stack-chan physical events are persisted to the JSONL log; host "
+    "integration consumes them externally."
 )
 
 PRESET_DPS = {
@@ -57,6 +71,13 @@ class StackChanEventNotification(
     Notification[dict[str, Any], Literal["stackchan/event"]]
 ):
     method: Literal["stackchan/event"] = "stackchan/event"
+    params: dict[str, Any]
+
+
+class StackChanChannelNotification(
+    Notification[dict[str, Any], Literal["notifications/claude/channel"]]
+):
+    method: Literal["notifications/claude/channel"] = "notifications/claude/channel"
     params: dict[str, Any]
 
 
@@ -150,7 +171,7 @@ def _latest_active_session() -> Any | None:
 
 async def notify_stackchan_event(method: str, params: dict[str, Any]) -> None:
     """Forward a stackchan event to the connected MCP client."""
-    if method != STACKCHAN_EVENT_METHOD:
+    if method not in _SUPPORTED_EVENT_METHODS:
         logger.warning("Unsupported stackchan event notification method: %s", method)
         return
 
@@ -158,26 +179,68 @@ async def notify_stackchan_event(method: str, params: dict[str, Any]) -> None:
     if not sessions and _active_session is not None:
         sessions = [_active_session]
     if not sessions:
-        logger.warning("Cannot emit stackchan/event notification: no active MCP session")
+        logger.warning("Cannot emit %s notification: no active MCP session", method)
         return
 
-    notification = StackChanEventNotification(params=params)
+    notification = _build_stackchan_notification(method, params)
     for session in sessions:
         try:
             await session.send_notification(cast(Any, notification))
         except Exception as exc:  # pragma: no cover - depends on client transport failure
-            logger.warning("Failed to emit stackchan/event notification: %s", exc)
+            logger.warning("Failed to emit %s notification: %s", method, exc)
 
 
-def _create_initialization_options(server: Server) -> InitializationOptions:
+def _build_stackchan_notification(
+    method: str,
+    params: dict[str, Any],
+) -> StackChanEventNotification | StackChanChannelNotification:
+    if method == STACKCHAN_EVENT_METHOD:
+        return StackChanEventNotification(params=params)
+    return StackChanChannelNotification(params=params)
+
+
+def _build_experimental_capabilities(
+    notify_config: NotifyConfig,
+) -> dict[str, dict[str, Any]]:
+    capabilities: dict[str, dict[str, Any]] = {}
+    if notify_config.legacy_event_enabled:
+        capabilities[STACKCHAN_EVENT_METHOD] = {}
+    if notify_config.channels_enabled:
+        capabilities[CHANNEL_CAPABILITY] = {}
+    return capabilities
+
+
+def _build_stackchan_event_instructions(notify_config: NotifyConfig) -> str | None:
+    fragments = []
+    if notify_config.channels_enabled:
+        fragments.append(STACKCHAN_CHANNEL_INSTRUCTIONS)
+    if notify_config.legacy_event_enabled:
+        fragments.append(STACKCHAN_EVENT_INSTRUCTIONS)
+    if (
+        notify_config.jsonl_enabled
+        and not notify_config.channels_enabled
+        and not notify_config.legacy_event_enabled
+    ):
+        fragments.append(STACKCHAN_JSONL_INSTRUCTIONS)
+    if not fragments:
+        return None
+    return "\n\n".join(fragments)
+
+
+def _create_initialization_options(
+    server: Server,
+    notify_config: NotifyConfig | None = None,
+) -> InitializationOptions:
+    if notify_config is None:
+        notify_config = load_notify_config()
     return InitializationOptions(
         server_name="stackchan-mcp",
         server_version=__version__,
         capabilities=server.get_capabilities(
             notification_options=NotificationOptions(),
-            experimental_capabilities={STACKCHAN_EVENT_METHOD: {}},
+            experimental_capabilities=_build_experimental_capabilities(notify_config),
         ),
-        instructions=STACKCHAN_EVENT_INSTRUCTIONS,
+        instructions=_build_stackchan_event_instructions(notify_config),
     )
 
 
@@ -1284,9 +1347,13 @@ def create_server() -> Server:
     return server
 
 
-async def run_stdio_server() -> None:
+async def run_stdio_server(notify_config: NotifyConfig | None = None) -> None:
     """Run the MCP server on stdio."""
     server = create_server()
     async with stdio_server() as (read_stream, write_stream):
         logger.info("stdio MCP server starting")
-        await server.run(read_stream, write_stream, _create_initialization_options(server))
+        await server.run(
+            read_stream,
+            write_stream,
+            _create_initialization_options(server, notify_config=notify_config),
+        )

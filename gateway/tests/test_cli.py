@@ -237,7 +237,7 @@ async def test_run_sigterm_handler_cancels_and_stops_gateway(
         async def stop(self) -> None:
             events.append("stop")
 
-    async def fake_run_stdio_server() -> None:
+    async def fake_run_stdio_server(*, notify_config=None) -> None:
         events.append("stdio")
         handler = registered_handlers[signal.SIGTERM]
         assert callable(handler)
@@ -257,6 +257,67 @@ async def test_run_sigterm_handler_cancels_and_stops_gateway(
     assert registered_handlers.keys() == {signal.SIGTERM}
     assert events == [("start", False), "stdio", "stop"]
 
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("jsonl_enabled", [False, True])
+async def test_run_rotates_event_log_only_when_jsonl_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    jsonl_enabled: bool,
+) -> None:
+    from stackchan_mcp import event_log as event_log_module
+    from stackchan_mcp import gateway as gateway_module
+    from stackchan_mcp import notify_config as notify_config_module
+    from stackchan_mcp import stdio_server
+    from stackchan_mcp.notify_config import DEFAULT_MESSAGE_TEMPLATES, NotifyConfig
+
+    events: list[object] = []
+    rotate_calls: list[Path] = []
+    jsonl_path = tmp_path / "events.jsonl"
+    config = NotifyConfig(
+        legacy_event_enabled=False,
+        channels_enabled=False,
+        jsonl_enabled=jsonl_enabled,
+        jsonl_path=jsonl_path,
+        messages=dict(DEFAULT_MESSAGE_TEMPLATES),
+    )
+
+    class FakeESP32:
+        def set_notify_config(self, notify_config: NotifyConfig) -> None:
+            events.append(("set_notify_config", notify_config))
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+        async def start(self, *, advertise_mdns: bool = True) -> None:
+            events.append(("start", advertise_mdns))
+
+        async def stop(self) -> None:
+            events.append("stop")
+
+    async def fake_run_stdio_server(*, notify_config=None) -> None:
+        events.append("stdio")
+
+    def fake_rotate_old_entries(*, path: Path, now_unix: float | None = None) -> None:
+        rotate_calls.append(path)
+
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(notify_config_module, "load_notify_config", lambda: config)
+    monkeypatch.setattr(event_log_module, "rotate_old_entries", fake_rotate_old_entries)
+    monkeypatch.setattr(gateway_module, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(stdio_server, "run_stdio_server", fake_run_stdio_server)
+
+    await cli._run(advertise_mdns=False)
+
+    assert (rotate_calls == [jsonl_path]) == jsonl_enabled
+    assert events == [
+        ("set_notify_config", config),
+        ("start", False),
+        "stdio",
+        "stop",
+    ]
 
 def test_main_check_flag_remains_side_effect_free_with_no_mdns(
     monkeypatch: pytest.MonkeyPatch,

@@ -32,6 +32,21 @@ documented-only.
 
 ### Gateway
 
+- BREAKING: gateway event emission paths now default to all OFF instead of
+  legacy `stackchan/event` notifications plus JSONL logging. Added three
+  independent opt-in switches (`legacy_event`, `channels`, `jsonl`) via
+  `~/.config/stackchan-mcp/notify.yml`, plus an additive `action` field in
+  event payloads for the human-axis avatar action. To restore the previous
+  behavior, create:
+
+  ```yaml
+  legacy_event:
+    enabled: true
+  jsonl:
+    enabled: true
+    path: ~/.claude/stackchan-events.jsonl
+  ```
+
 - Added: `stackchan/event` experimental MCP capability and server-initiated
   notification bridge for firmware-originated touch events (`tap` /
   `stroke`) forwarded from additive `stackchan-event` WebSocket frames.

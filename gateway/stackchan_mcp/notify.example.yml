@@ -1,0 +1,16 @@
+# ~/.config/stackchan-mcp/notify.yml
+legacy_event:
+  enabled: false          # self-defined method "stackchan/event" (existing, backward-compat)
+channels:
+  enabled: false          # standard "notifications/claude/channel"
+jsonl:
+  enabled: false          # JSONL append for out-of-process host integration
+  path: ~/.claude/stackchan-events.jsonl
+messages:
+  touch:
+    tap:
+      action: head_pat
+      template: "(head pat)"
+    stroke:
+      action: head_stroke
+      template: "(head stroke, {duration_ms}ms)"

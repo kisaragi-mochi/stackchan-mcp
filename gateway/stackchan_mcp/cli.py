@@ -697,9 +697,15 @@ async def _run(*, advertise_mdns: bool = True) -> None:
 
     from .event_log import rotate_old_entries
     from .gateway import get_gateway
+    from .notify_config import load_notify_config
     from .stdio_server import run_stdio_server
 
+    notify_config = load_notify_config()
     gateway = get_gateway()
+    esp32 = getattr(gateway, "esp32", None)
+    set_notify_config = getattr(esp32, "set_notify_config", None)
+    if callable(set_notify_config):
+        set_notify_config(notify_config)
 
     loop = asyncio.get_running_loop()
     main_task = asyncio.current_task()
@@ -711,19 +717,18 @@ async def _run(*, advertise_mdns: bool = True) -> None:
     if sys.platform != "win32":
         loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
 
-    # Prune stale stackchan-event log entries (older than the helper's
-    # retention window) exactly once per startup. Long-running gateways
-    # are not re-rotated mid-flight; downstream readers filter by
-    # ``ts_unix`` themselves. Failures inside ``rotate_old_entries`` are
-    # logged and swallowed, so a broken log file cannot block startup.
-    rotate_old_entries()
+    # Prune stale stackchan-event log entries only when the JSONL path is
+    # explicitly enabled. With the default all-OFF notify config, gateway
+    # startup must not create or rewrite any persistent event-log files.
+    if notify_config.jsonl_enabled:
+        rotate_old_entries(path=notify_config.jsonl_path)
 
     await gateway.start(advertise_mdns=advertise_mdns)
     logger.info("Gateway started, waiting for ESP32 connections...")
 
     try:
         # Run stdio MCP server (blocks until MCP client disconnects)
-        await run_stdio_server()
+        await run_stdio_server(notify_config=notify_config)
     except asyncio.CancelledError:
         logger.info("Received termination signal, shutting down...")
     finally:
@@ -828,12 +833,19 @@ async def _run_streamable_http_daemon(
 
     from .event_log import rotate_old_entries
     from .gateway import get_gateway
+    from .notify_config import load_notify_config
     from .http_server import build_app, make_dispatch_fn
     from .queue import CommandQueue
 
-    rotate_old_entries()
+    notify_config = load_notify_config()
+    if notify_config.jsonl_enabled:
+        rotate_old_entries(path=notify_config.jsonl_path)
 
     gateway = get_gateway()
+    esp32 = getattr(gateway, "esp32", None)
+    set_notify_config = getattr(esp32, "set_notify_config", None)
+    if callable(set_notify_config):
+        set_notify_config(notify_config)
     queue = CommandQueue()
     app = build_app(
         queue,

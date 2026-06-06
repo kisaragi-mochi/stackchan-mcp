@@ -2,10 +2,13 @@
 
 import json
 import logging
+from pathlib import Path
 
 import pytest
 
+from stackchan_mcp import esp32_client
 from stackchan_mcp.esp32_client import ESP32Manager
+from stackchan_mcp.notify_config import DEFAULT_MESSAGE_TEMPLATES, NotifyConfig
 import stackchan_mcp.stdio_server as stdio_server
 from stackchan_mcp.stdio_server import (
     STACKCHAN_EVENT_INSTRUCTIONS,
@@ -24,7 +27,8 @@ async def test_stackchan_event_frame_dispatches_to_notify_bridge(monkeypatch):
         calls.append((method, params))
 
     monkeypatch.setattr(stdio_server, "notify_stackchan_event", fake_notify)
-    manager = ESP32Manager()
+    monkeypatch.setattr(esp32_client.time, "time", lambda: 1717000000.25)
+    manager = ESP32Manager(notify_config=_notify_config(legacy=True))
 
     await manager._handler(
         _FakeWebSocket(
@@ -50,7 +54,9 @@ async def test_stackchan_event_frame_dispatches_to_notify_bridge(monkeypatch):
                 "event_type": "touch",
                 "subtype": "tap",
                 "duration_ms": 350,
+                "action": "head_pat",
                 "ts": 123456,
+                "ts_unix": 1717000000.25,
                 "session_id": "session-1",
             },
         )
@@ -85,7 +91,7 @@ async def test_stackchan_event_malformed_frame_warns_without_notify(
         calls.append((method, params))
 
     monkeypatch.setattr(stdio_server, "notify_stackchan_event", fake_notify)
-    manager = ESP32Manager()
+    manager = ESP32Manager(notify_config=_notify_config())
     payload = {
         "session_id": "session-1",
         "type": "stackchan-event",
@@ -105,7 +111,10 @@ async def test_stackchan_event_malformed_frame_warns_without_notify(
 
 def test_stackchan_event_capability_and_instructions_are_declared():
     server = create_server()
-    options = _create_initialization_options(server)
+    options = _create_initialization_options(
+        server,
+        notify_config=_notify_config(legacy=True),
+    )
 
     assert options.capabilities.experimental == {STACKCHAN_EVENT_METHOD: {}}
     assert options.instructions == STACKCHAN_EVENT_INSTRUCTIONS
@@ -217,6 +226,16 @@ async def test_notify_stackchan_event_without_active_session_logs_and_returns(
         )
 
     assert "no active MCP session" in caplog.text
+
+
+def _notify_config(*, legacy: bool = False) -> NotifyConfig:
+    return NotifyConfig(
+        legacy_event_enabled=legacy,
+        channels_enabled=False,
+        jsonl_enabled=False,
+        jsonl_path=Path("/tmp/stackchan-events-test.jsonl"),
+        messages=dict(DEFAULT_MESSAGE_TEMPLATES),
+    )
 
 
 class _FakeWebSocket:
