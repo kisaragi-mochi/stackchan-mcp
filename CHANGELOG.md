@@ -61,7 +61,16 @@ documented-only.
   wiring does not receive `<channel ...>` injections, that switching
   paths requires releasing the existing ESP32 ownership lock, and that
   `legacy_event` / `jsonl` remain compatible for users who keep the
-  pre-plugin wiring. (#266)
+  pre-plugin wiring.
+
+  The README startup command for the Channels path now includes the
+  required `--channels stackchan-mcp` argument (loading the plugin via
+  `--plugin-dir` alone is insufficient: Claude Code only attaches a
+  channel source and injects `<channel source="stackchan-mcp" ...>`
+  blocks when the server is explicitly registered in the session's
+  channels list). When allowlist restrictions block development
+  servers, the documented fallback is
+  `--dangerously-load-development-channels stackchan-mcp`. (#266)
 
 - Added: `stackchan/event` experimental MCP capability and server-initiated
   notification bridge for firmware-originated touch events (`tap` /

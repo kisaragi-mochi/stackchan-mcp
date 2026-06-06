@@ -461,19 +461,28 @@ Channels 通知を有効にするには:
 2. 受け口側 — ホストごとに開き方が異なります。
 
    - **Claude Code**: 本リポジトリを CC plugin として読み込み、
-     gateway が宣言する `claude/channel` capability を Claude Code が
-     購読するようにします。
+     かつ この plugin の MCP server を Channels source として登録する
+     ことで、gateway が宣言する `claude/channel` capability を
+     Claude Code が購読するようにします。
 
      ```bash
-     claude --plugin-dir /path/to/stackchan-mcp --agent <your-agent>
+     claude --plugin-dir /path/to/stackchan-mcp --channels stackchan-mcp --agent <your-agent>
      ```
 
      1 セッション限定のローカル開発では `--plugin-dir` に本リポジトリの
      作業コピーを指定してください。Claude Code は同梱の `.mcp.json`
      経由で `${CLAUDE_PLUGIN_ROOT}/gateway` 配下の gateway を起動します。
-     Marketplace 公開 (`--channels plugin:stackchan-mcp@<marketplace>`)
-     は follow-up として追跡し、manifest を marketplace へ提出した
-     タイミングで利用可能になります。
+     `--channels stackchan-mcp` 引数を付けることで Claude Code がこの
+     server を channel source として attach し、session に
+     `<channel source="stackchan-mcp" ...>` blocks を inject します。
+     付けないと plugin は読み込まれますが、channels の notification は
+     受信側で silent に drop されます。allowlist 制限により開発用 server
+     が登録できない場合は、代わりに
+     `--dangerously-load-development-channels stackchan-mcp` を使って
+     ください。Marketplace 公開
+     (`--channels plugin:stackchan-mcp@<marketplace>`) は follow-up
+     として追跡し、manifest を marketplace へ提出したタイミングで
+     利用可能になります。
 
      重要 — plugin 以前の起動経路では Channels が届きません: 以前
      `~/.claude.json` の `mcpServers` 経由でこの gateway を起動して
