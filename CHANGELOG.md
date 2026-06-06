@@ -68,6 +68,15 @@ documented-only.
 
 - docs(gateway): daemon setup and Phase B migration notes. (#178)
 
+- Fixed: mDNS advertise list now drops interface IPs that equal their
+  subnet's network address. Previously such an address slipped past the
+  existing network/broadcast filter when it appeared in the prefix-less
+  socket source, causing zeroconf to crash with `EADDRNOTAVAIL` and
+  hang gateway startup in `async_wait_for_start`. The IPv4 enumerator
+  now adopts the ifaddr prefix for matching socket-source addresses,
+  and `AsyncZeroconf` is constrained to the advertised IPv4 set via
+  `interfaces=`. (#267)
+
 - Fixed: #178 Phase B stage 3 HTTP daemon — cancel-safe queue dispatch
   drops items for cancelled HTTP requests before ESP32 dispatch and
   drains pending items on lifespan shutdown with a JSON-RPC
