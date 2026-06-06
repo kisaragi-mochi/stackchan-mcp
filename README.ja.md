@@ -443,39 +443,21 @@ Vosk・whisper.cpp・他のクラウドサービス等を `listen` API を変え
 ### 6. オプション: イベント通知の有効化
 
 Stack-chan の物理イベント（touch tap / stroke）は、ホスト側の対応状況に
-合わせて複数の通知経路で届けられます。すべての経路はデフォルトで無効
-です。有効化するには `~/.config/stackchan-mcp/notify.yml` で opt-in
+合わせて複数の通知経路で届けられます。CC ユーザーは Channels 機構で
+受け取れます。その他のホスト向け経路は今後追加できます。ホストが通知の
+受け取り口を持っていない場合は、フォールバックとして JSONL 出力を
+ホスト側 integration から読むこともできます。すべての経路はデフォルトで
+無効です。有効化するには `~/.config/stackchan-mcp/notify.yml` で opt-in
 してください。Channels 機構は実験的な MCP capability を使っており、
 今後変わる可能性があります。
 
-Channels 通知を有効にするには:
+Channels 通知を有効にする最小設定:
 
-1. Gateway 側 — `~/.config/stackchan-mcp/notify.yml` で Channels を
-   有効化します。
-
-   ```yaml
-   channels:
-     enabled: true
-   ```
-
-2. 受け口側 — ホストごとに開き方が異なります。
-
-   - **Claude Code**: 本 gateway が宣言する `claude/channel` capability
-     を Claude Code が購読するように、起動時にフラグを付けます。
-
-     ```bash
-     claude --dangerously-load-development-channels server:stackchan-mcp
-     ```
-
-     将来 plugin パッケージ版がリリースされたら
-     `--channels plugin:<name>@<marketplace>` に置き換わります。
-
-   - **`claude/channel` 互換の受け口を持つ他ホスト**: 当該ホストの
-     ドキュメントに従って受け口を開いてください。Claude Code 以外の
-     ホストとの互換性は当リポジトリでは未検証です。
-
-   - **Channels 受け口を持たないホスト**: JSONL フォールバックを
-     使ってください（下記参照）。
+```yaml
+# ~/.config/stackchan-mcp/notify.yml
+channels:
+  enabled: true
+```
 
 以前の常時有効だったイベント動作に戻す設定:
 
