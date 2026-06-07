@@ -32,6 +32,21 @@ documented-only.
 
 ### Gateway
 
+- Changed: rephrased the default notification message templates from
+  mechanical event-name labels (`(head pat)` / `(head stroke,
+  {duration_ms}ms)`) to experiential English (`head was tapped` / `head
+  was stroked for {duration_ms}ms`) so the receiving LLM agent reads
+  them as first-person narration. `notify.example.yml` now demonstrates
+  the override surface with a casual-tone example instead of mirroring
+  the defaults, and both README.md and README.ja.md gain a "Customizing
+  event message wording" subsection documenting the experiential framing
+  intent, the override mechanism, and a worked example. Existing
+  `action` values (`head_pat` / `head_stroke`) are kept stable for
+  downstream consumers. `test_event_dispatch.py` content expectations
+  now reference `DEFAULT_MESSAGE_TEMPLATES[("touch", "tap")].template`
+  directly, decoupling dispatch-path tests from future wording edits.
+  (#270)
+
 - BREAKING: gateway event emission paths now default to all OFF instead of
   legacy `stackchan/event` notifications plus JSONL logging. Added three
   independent opt-in switches (`legacy_event`, `channels`, `jsonl`) via
