@@ -30,178 +30,7 @@ documented-only.
 
 ## [Unreleased]
 
-### Gateway
-
-- Changed: restructured the README EN/JP `Optional: enable event
-  notifications` section as a tri-channel guide. Each of `channels`,
-  `jsonl`, and `legacy_event` now has its own subsection with the
-  `notify.yml` enable block, a delivered payload example, and the
-  intended use case. The supported event subtypes are listed in a
-  structure that allows additional `touch` subtypes or new
-  top-level types to be appended without rewriting the section.
-  (#268)
-
-- Fixed: align the `stdio_server.py` `InitializationOptions.server_name`
-  and `StackChanServer` constructor argument from the legacy
-  `stackchan-mcp` string to the canonical `stackchanmcp` (no hyphen)
-  introduced in PR #266 (#265). Without this rename the host MCP
-  client logs `Channel notifications skipped: server stackchan-mcp
-  not in --channels list for this session` and the Channels delivery
-  path is blocked end-to-end. The `STACKCHAN_CHANNEL_INSTRUCTIONS`
-  prompt example tag is also synced to the on-the-wire form
-  `<channel source="plugin:stackchanmcp:stackchanmcp" ...>`, and the
-  README EN/JP `Optional: enable event notifications` section is
-  rewritten to match the post-PR-#266 reality:
-  `plugin:stackchanmcp@kisaragi-mochi-channels` as the canonical
-  `--channels` form, a Plugin installation step using
-  `claude plugin install`, a Host environment setup step covering
-  `.mcp.json` `mcpServers` key alignment, `settings.local.json`
-  `enabledMcpjsonServers` whitelist, and the system-wide
-  `/Library/Application Support/ClaudeCode/managed-settings.json`
-  `allowedChannelPlugins` entry, the
-  `--dangerously-load-development-channels` requirement noted as
-  currently required (approved-allowlist-only without this flag has
-  been verified not to deliver notifications), and a Migration
-  section listing the rename targets for users on the older
-  `stackchan-mcp` (hyphenated) server-name form. (#271)
-
-- Changed: rephrased the default notification message templates from
-  mechanical event-name labels (`(head pat)` / `(head stroke,
-  {duration_ms}ms)`) to experiential English (`head was tapped` / `head
-  was stroked for {duration_ms}ms`) so the receiving LLM agent reads
-  them as first-person narration. `notify.example.yml` now demonstrates
-  the override surface with a casual-tone example instead of mirroring
-  the defaults, and both README.md and README.ja.md gain a "Customizing
-  event message wording" subsection documenting the experiential framing
-  intent, the override mechanism, and a worked example. Existing
-  `action` values (`head_pat` / `head_stroke`) are kept stable for
-  downstream consumers. `test_event_dispatch.py` content expectations
-  now reference `DEFAULT_MESSAGE_TEMPLATES[("touch", "tap")].template`
-  directly, decoupling dispatch-path tests from future wording edits.
-  (#270)
-
-- BREAKING: gateway event emission paths now default to all OFF instead of
-  legacy `stackchan/event` notifications plus JSONL logging. Added three
-  independent opt-in switches (`legacy_event`, `channels`, `jsonl`) via
-  `~/.config/stackchan-mcp/notify.yml`, plus an additive `action` field in
-  event payloads for the human-axis avatar action. To restore the previous
-  behavior, create:
-
-  ```yaml
-  legacy_event:
-    enabled: true
-  jsonl:
-    enabled: true
-    path: ~/.claude/stackchan-events.jsonl
-  ```
-
-  README now documents the host-side receiver setup required to consume
-  the Channels path: load this repository as a Claude Code plugin via
-  `claude --plugin-dir <repo-checkout>` so Claude Code subscribes to the
-  advertised `claude/channel` capability. Marketplace publication is
-  tracked as a follow-up. The JSONL fallback remains for hosts without
-  a Channels receiver.
-
-  The Channels notification instructions now use `source="stackchan-mcp"`
-  to match the plugin / MCP server identifier (Claude Code derives the
-  channel source from the loaded plugin name, not from notification
-  params). README EN/JP also document that pre-plugin `~/.claude.json`
-  wiring does not receive `<channel ...>` injections, that switching
-  paths requires releasing the existing ESP32 ownership lock, and that
-  `legacy_event` / `jsonl` remain compatible for users who keep the
-  pre-plugin wiring.
-
-  The README startup command for the Channels path now includes the
-  required `--channels server:stackchan-mcp` argument (loading the plugin via
-  `--plugin-dir` alone is insufficient: Claude Code only attaches a
-  channel source and injects `<channel source="stackchan-mcp" ...>`
-  blocks when the server is explicitly registered in the session's
-  channels list). When allowlist restrictions block development
-  servers, the documented fallback is
-  `--dangerously-load-development-channels server:stackchan-mcp`. (#266)
-
-- Added: `stackchan/event` experimental MCP capability and server-initiated
-  notification bridge for firmware-originated touch events (`tap` /
-  `stroke`) forwarded from additive `stackchan-event` WebSocket frames.
-  Pinned the `mcp` runtime dependency to `>=1.27,<2.0` and added a
-  startup compatibility guard for the private SDK members the bridge
-  depends on (`Server._experimental_handlers` /
-  `Server._handle_message`) so any incompatible future SDK shape fails
-  fast with a clear error instead of silent breakage. (#260)
-
-- Added: JSONL event log helper that appends each validated
-  `stackchan-event` frame to `~/.claude/stackchan-events.jsonl`
-  (override via `STACKCHAN_EVENTS_PATH`) so MCP client hooks can pick
-  events up between the firmware reaction and the next conversational
-  turn. Entries older than 7 days are pruned exactly once on gateway
-  startup via an atomic rename. Persistence failures are logged and
-  swallowed; the MCP notification path remains the primary delivery
-  channel for capability-aware clients. (#260 follow-up)
-
-- Added: function-dark #178 Phase B chunk 1 command queue module with an
-  environment-configurable bounded FIFO, correlation metadata for response
-  routing, a single-flight dispatcher loop, and a standardized queue-full
-  error payload helper.
-
-- Added: #178 Phase B chunk 2 ownership lock diagnostics metadata
-  (`mode`, `http_endpoint`, `started_by`) while preserving #177-format
-  stdio lock files and existing-format `--check` output.
-
-- Added: #178 Phase B chunk 3 `stackchan-mcp serve` CLI with permanent
-  `--transport stdio` compatibility and a Streamable HTTP daemon
-  placeholder that releases ownership before the chunk 4 wiring lands.
-
-- feat(gateway): Streamable HTTP daemon transport with bounded command
-  queue and saturation backpressure. (#178)
-
-- docs(gateway): daemon setup and Phase B migration notes. (#178)
-
-- Fixed: mDNS advertise list now drops interface IPs that equal their
-  subnet's network address. Previously such an address slipped past the
-  existing network/broadcast filter when it appeared in the prefix-less
-  socket source, causing zeroconf to crash with `EADDRNOTAVAIL` and
-  hang gateway startup in `async_wait_for_start`. The IPv4 enumerator
-  now adopts the ifaddr prefix for matching socket-source addresses,
-  and `AsyncZeroconf` is constrained to the advertised IPv4 set via
-  `interfaces=`. (#267)
-
-- Fixed: #178 Phase B stage 3 HTTP daemon — cancel-safe queue dispatch
-  drops items for cancelled HTTP requests before ESP32 dispatch and
-  drains pending items on lifespan shutdown with a JSON-RPC
-  server-shutdown error. Narrowed unauthenticated `/healthz` to a
-  liveness-only payload and moved device, queue, and owner detail to
-  the authenticated `/status` endpoint (now includes `owner_id`).
-  (#178)
-
-- Fixed: #178 Phase B chunk 2+3 ownership lock cleanup safety. The
-  streamable-http `serve` placeholder now guards its `finally` cleanup with
-  an `acquired` flag so an `OwnershipError` raised by an existing owner is
-  not followed by an erroneous `release_lock()` that would unlink the
-  existing owner's lock file. The shared `_acquire_startup_lock` helper
-  now wraps the post-claim ack-print plus `atexit.register` step in a
-  `try/except BaseException` that releases the just-claimed lock and
-  re-raises, so a stderr-write failure (or any other intermediate failure
-  between `acquire_lock` returning and the caller's own `try/finally`)
-  cannot strand a live-pid lock — this safety now covers both the stdio
-  gateway path and the streamable-http placeholder. `acquire_lock` itself
-  also now rejects `http_endpoint` and `started_by` metadata when
-  `mode="stdio"` so daemon-mode diagnostics cannot silently leak into
-  `#177`-baseline stdio lock files via public API misuse. `read_lock` now
-  treats invalid or unknown optional metadata (for example a future-mode
-  value or a non-string `http_endpoint`) as missing fields rather than as
-  a full read failure, so the four required `#177` base fields remain
-  authoritative for the claim/refuse decision and `acquire_lock` cannot
-  silently unlink a live owner's lock under schema drift. The shared
-  ownership-cleanup path is now owner-scoped via a new
-  `release_lock_if_owner(info)` helper that only unlinks the lock file
-  when `owner_id`, `pid`, and `start_ts` still match the caller's
-  claimed `LockInfo`. Both the `atexit.register` callback inside
-  `_acquire_startup_lock` and the explicit `finally` cleanup in the
-  stdio gateway and streamable-http placeholder now use this
-  owner-aware release, so a stale exit-callback from a previously-
-  released first process cannot unlink a successor process's live
-  lock. The legacy `release_lock()` primitive is kept for backward
-  compatibility but is no longer used by chunk 2+3 CLI cleanup paths.
+## [firmware-v1.9.0] - 2026-06-08
 
 ### Firmware
 
@@ -447,7 +276,180 @@ documented-only.
   - Disable Wi-Fi power-save (`esp_wifi_set_ps(WIFI_PS_NONE)`) around the browse window and restore the previous mode after the browse completes, to reduce multicast frame loss while the STA is otherwise in `LOW_POWER (MAX_MODEM)`
   - Boot-time passive browse pre-warm (Issue #245 Step C) is deferred for evaluation after Steps A/B/D have been verified in the field
 
+## [0.9.0] - 2026-06-08
+
 ### Gateway
+
+- Changed: restructured the README EN/JP `Optional: enable event
+  notifications` section as a tri-channel guide. Each of `channels`,
+  `jsonl`, and `legacy_event` now has its own subsection with the
+  `notify.yml` enable block, a delivered payload example, and the
+  intended use case. The supported event subtypes are listed in a
+  structure that allows additional `touch` subtypes or new
+  top-level types to be appended without rewriting the section.
+  (#268)
+
+- Fixed: align the `stdio_server.py` `InitializationOptions.server_name`
+  and `StackChanServer` constructor argument from the legacy
+  `stackchan-mcp` string to the canonical `stackchanmcp` (no hyphen)
+  introduced in PR #266 (#265). Without this rename the host MCP
+  client logs `Channel notifications skipped: server stackchan-mcp
+  not in --channels list for this session` and the Channels delivery
+  path is blocked end-to-end. The `STACKCHAN_CHANNEL_INSTRUCTIONS`
+  prompt example tag is also synced to the on-the-wire form
+  `<channel source="plugin:stackchanmcp:stackchanmcp" ...>`, and the
+  README EN/JP `Optional: enable event notifications` section is
+  rewritten to match the post-PR-#266 reality:
+  `plugin:stackchanmcp@kisaragi-mochi-channels` as the canonical
+  `--channels` form, a Plugin installation step using
+  `claude plugin install`, a Host environment setup step covering
+  `.mcp.json` `mcpServers` key alignment, `settings.local.json`
+  `enabledMcpjsonServers` whitelist, and the system-wide
+  `/Library/Application Support/ClaudeCode/managed-settings.json`
+  `allowedChannelPlugins` entry, the
+  `--dangerously-load-development-channels` requirement noted as
+  currently required (approved-allowlist-only without this flag has
+  been verified not to deliver notifications), and a Migration
+  section listing the rename targets for users on the older
+  `stackchan-mcp` (hyphenated) server-name form. (#271)
+
+- Changed: rephrased the default notification message templates from
+  mechanical event-name labels (`(head pat)` / `(head stroke,
+  {duration_ms}ms)`) to experiential English (`head was tapped` / `head
+  was stroked for {duration_ms}ms`) so the receiving LLM agent reads
+  them as first-person narration. `notify.example.yml` now demonstrates
+  the override surface with a casual-tone example instead of mirroring
+  the defaults, and both README.md and README.ja.md gain a "Customizing
+  event message wording" subsection documenting the experiential framing
+  intent, the override mechanism, and a worked example. Existing
+  `action` values (`head_pat` / `head_stroke`) are kept stable for
+  downstream consumers. `test_event_dispatch.py` content expectations
+  now reference `DEFAULT_MESSAGE_TEMPLATES[("touch", "tap")].template`
+  directly, decoupling dispatch-path tests from future wording edits.
+  (#270)
+
+- BREAKING: gateway event emission paths now default to all OFF instead of
+  legacy `stackchan/event` notifications plus JSONL logging. Added three
+  independent opt-in switches (`legacy_event`, `channels`, `jsonl`) via
+  `~/.config/stackchan-mcp/notify.yml`, plus an additive `action` field in
+  event payloads for the human-axis avatar action. To restore the previous
+  behavior, create:
+
+  ```yaml
+  legacy_event:
+    enabled: true
+  jsonl:
+    enabled: true
+    path: ~/.claude/stackchan-events.jsonl
+  ```
+
+  README now documents the host-side receiver setup required to consume
+  the Channels path: load this repository as a Claude Code plugin via
+  `claude --plugin-dir <repo-checkout>` so Claude Code subscribes to the
+  advertised `claude/channel` capability. Marketplace publication is
+  tracked as a follow-up. The JSONL fallback remains for hosts without
+  a Channels receiver.
+
+  The Channels notification instructions now use `source="stackchan-mcp"`
+  to match the plugin / MCP server identifier (Claude Code derives the
+  channel source from the loaded plugin name, not from notification
+  params). README EN/JP also document that pre-plugin `~/.claude.json`
+  wiring does not receive `<channel ...>` injections, that switching
+  paths requires releasing the existing ESP32 ownership lock, and that
+  `legacy_event` / `jsonl` remain compatible for users who keep the
+  pre-plugin wiring.
+
+  The README startup command for the Channels path now includes the
+  required `--channels server:stackchan-mcp` argument (loading the plugin via
+  `--plugin-dir` alone is insufficient: Claude Code only attaches a
+  channel source and injects `<channel source="stackchan-mcp" ...>`
+  blocks when the server is explicitly registered in the session's
+  channels list). When allowlist restrictions block development
+  servers, the documented fallback is
+  `--dangerously-load-development-channels server:stackchan-mcp`. (#266)
+
+- Added: `stackchan/event` experimental MCP capability and server-initiated
+  notification bridge for firmware-originated touch events (`tap` /
+  `stroke`) forwarded from additive `stackchan-event` WebSocket frames.
+  Pinned the `mcp` runtime dependency to `>=1.27,<2.0` and added a
+  startup compatibility guard for the private SDK members the bridge
+  depends on (`Server._experimental_handlers` /
+  `Server._handle_message`) so any incompatible future SDK shape fails
+  fast with a clear error instead of silent breakage. (#260)
+
+- Added: JSONL event log helper that appends each validated
+  `stackchan-event` frame to `~/.claude/stackchan-events.jsonl`
+  (override via `STACKCHAN_EVENTS_PATH`) so MCP client hooks can pick
+  events up between the firmware reaction and the next conversational
+  turn. Entries older than 7 days are pruned exactly once on gateway
+  startup via an atomic rename. Persistence failures are logged and
+  swallowed; the MCP notification path remains the primary delivery
+  channel for capability-aware clients. (#260 follow-up)
+
+- Added: function-dark #178 Phase B chunk 1 command queue module with an
+  environment-configurable bounded FIFO, correlation metadata for response
+  routing, a single-flight dispatcher loop, and a standardized queue-full
+  error payload helper.
+
+- Added: #178 Phase B chunk 2 ownership lock diagnostics metadata
+  (`mode`, `http_endpoint`, `started_by`) while preserving #177-format
+  stdio lock files and existing-format `--check` output.
+
+- Added: #178 Phase B chunk 3 `stackchan-mcp serve` CLI with permanent
+  `--transport stdio` compatibility and a Streamable HTTP daemon
+  placeholder that releases ownership before the chunk 4 wiring lands.
+
+- feat(gateway): Streamable HTTP daemon transport with bounded command
+  queue and saturation backpressure. (#178)
+
+- docs(gateway): daemon setup and Phase B migration notes. (#178)
+
+- Fixed: mDNS advertise list now drops interface IPs that equal their
+  subnet's network address. Previously such an address slipped past the
+  existing network/broadcast filter when it appeared in the prefix-less
+  socket source, causing zeroconf to crash with `EADDRNOTAVAIL` and
+  hang gateway startup in `async_wait_for_start`. The IPv4 enumerator
+  now adopts the ifaddr prefix for matching socket-source addresses,
+  and `AsyncZeroconf` is constrained to the advertised IPv4 set via
+  `interfaces=`. (#267)
+
+- Fixed: #178 Phase B stage 3 HTTP daemon — cancel-safe queue dispatch
+  drops items for cancelled HTTP requests before ESP32 dispatch and
+  drains pending items on lifespan shutdown with a JSON-RPC
+  server-shutdown error. Narrowed unauthenticated `/healthz` to a
+  liveness-only payload and moved device, queue, and owner detail to
+  the authenticated `/status` endpoint (now includes `owner_id`).
+  (#178)
+
+- Fixed: #178 Phase B chunk 2+3 ownership lock cleanup safety. The
+  streamable-http `serve` placeholder now guards its `finally` cleanup with
+  an `acquired` flag so an `OwnershipError` raised by an existing owner is
+  not followed by an erroneous `release_lock()` that would unlink the
+  existing owner's lock file. The shared `_acquire_startup_lock` helper
+  now wraps the post-claim ack-print plus `atexit.register` step in a
+  `try/except BaseException` that releases the just-claimed lock and
+  re-raises, so a stderr-write failure (or any other intermediate failure
+  between `acquire_lock` returning and the caller's own `try/finally`)
+  cannot strand a live-pid lock — this safety now covers both the stdio
+  gateway path and the streamable-http placeholder. `acquire_lock` itself
+  also now rejects `http_endpoint` and `started_by` metadata when
+  `mode="stdio"` so daemon-mode diagnostics cannot silently leak into
+  `#177`-baseline stdio lock files via public API misuse. `read_lock` now
+  treats invalid or unknown optional metadata (for example a future-mode
+  value or a non-string `http_endpoint`) as missing fields rather than as
+  a full read failure, so the four required `#177` base fields remain
+  authoritative for the claim/refuse decision and `acquire_lock` cannot
+  silently unlink a live owner's lock under schema drift. The shared
+  ownership-cleanup path is now owner-scoped via a new
+  `release_lock_if_owner(info)` helper that only unlinks the lock file
+  when `owner_id`, `pid`, and `start_ts` still match the caller's
+  claimed `LockInfo`. Both the `atexit.register` callback inside
+  `_acquire_startup_lock` and the explicit `finally` cleanup in the
+  stdio gateway and streamable-http placeholder now use this
+  owner-aware release, so a stale exit-callback from a previously-
+  released first process cannot unlink a successor process's live
+  lock. The legacy `release_lock()` primitive is kept for backward
+  compatibility but is no longer used by chunk 2+3 CLI cleanup paths.
 
 - Add ownership lock for concurrent gateway startup (refuse-mode MVP).
   Second process refuses with deterministic stderr error and exit code 1
@@ -1520,7 +1522,9 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.8.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.8.0...v0.9.0
+[firmware-v1.9.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.8.0...firmware-v1.9.0
 [firmware-v1.8.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.7.0...firmware-v1.8.0
 [0.8.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.7.0...v0.8.0
 [firmware-v1.7.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.6.0...firmware-v1.7.0
