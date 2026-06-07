@@ -236,7 +236,7 @@ def _create_initialization_options(
     notify_config: NotifyConfig,
 ) -> InitializationOptions:
     return InitializationOptions(
-        server_name="stackchan-mcp",
+        server_name="stackchanmcp",
         server_version=__version__,
         capabilities=server.get_capabilities(
             notification_options=NotificationOptions(),
@@ -594,7 +594,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
     _verify_mcp_sdk_compatibility()
     if notify_config is None:
         notify_config = load_notify_config()
-    server = StackChanServer("stackchan-mcp", notify_config=notify_config)
+    server = StackChanServer("stackchanmcp", notify_config=notify_config)
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
