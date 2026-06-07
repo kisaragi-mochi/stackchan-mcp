@@ -819,9 +819,21 @@ class ESP32Manager:
 
         if config.channels_enabled:
             content = render_template(message.template, event_payload)
+            # Channel notification meta must be all-string per CC binary's
+            # Zod schema (matches public plugins: telegram/discord/imessage
+            # all use string fields like chat_id, message_id, ts in ISO).
+            channel_meta = {
+                "event_type": event_type,
+                "subtype": subtype,
+                "duration_ms": str(duration_ms),
+                "action": message.action,
+                "ts": str(ts),
+                "ts_unix": str(ts_unix),
+                "session_id": session_id,
+            }
             await notify_stackchan_event(
                 "notifications/claude/channel",
-                {"content": content, "meta": event_payload},
+                {"content": content, "meta": channel_meta},
             )
 
         if config.jsonl_enabled:
