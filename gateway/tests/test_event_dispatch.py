@@ -178,7 +178,7 @@ async def test_channels_meta_includes_ts_unix(monkeypatch):
             {"content": "(head pat)", "meta": _expected_meta()},
         )
     ]
-    assert notify_calls[0][1]["meta"]["ts_unix"] == 1717000000.25
+    assert notify_calls[0][1]["meta"]["ts_unix"] == "1717000000.25"
     assert log_calls == []
 
 
@@ -209,7 +209,13 @@ async def test_mixed_legacy_and_channels(monkeypatch):
     ]
     legacy_params = notify_calls[0][1]
     channel_meta = notify_calls[1][1]["meta"]
-    assert {key: channel_meta[key] for key in legacy_params} == legacy_params
+    # Channel meta stringifies numeric fields per CC binary Zod schema; legacy
+    # path keeps typed values. Compare common keys after stringification.
+    expected_channel_subset = {
+        key: str(value) if isinstance(value, (int, float)) else value
+        for key, value in legacy_params.items()
+    }
+    assert {key: channel_meta[key] for key in legacy_params} == expected_channel_subset
     assert "ts_unix" in channel_meta
     assert "ts_unix" not in legacy_params
     assert log_calls == []
@@ -304,10 +310,10 @@ def _expected_meta() -> dict:
     return {
         "event_type": "touch",
         "subtype": "tap",
-        "duration_ms": 350,
+        "duration_ms": "350",
         "action": "head_pat",
-        "ts": 123456,
-        "ts_unix": 1717000000.25,
+        "ts": "123456",
+        "ts_unix": "1717000000.25",
         "session_id": "session-1",
     }
 
