@@ -662,8 +662,11 @@ preserved. Each line carries:
 - `ts_unix` — wall-clock timestamp when the gateway recorded the
   event.
 - `session_id` — gateway session identifier.
-- `action` (optional) — avatar action keyed by the `messages:`
-  config; omitted when no override is configured.
+- `action` — avatar action keyword for the event subtype (e.g.
+  `head_pat`, `head_stroke`). The built-in default templates always
+  populate this, and `messages:` overrides are also required to
+  specify `action`, so this field is present for every supported
+  subtype.
 
 The rendered wording (e.g. `head was tapped`) is what the `channels`
 channel delivers as the human-readable message; it is not stored in
@@ -691,14 +694,12 @@ legacy_event:
 ```
 
 The gateway emits the self-defined `stackchan/event` MCP notification
-method. The notification params carry the `event_type` / `subtype` /
-`duration_ms` / `ts` / `session_id` fields (the same fields as the
-`jsonl` record above, minus `ts_unix`, which is added only by the
-JSONL writer). The optional `action` field is included when the
-`messages:` config provides an override. The host is responsible for
-surfacing the notification — Claude Code's pre-plugin path
-historically displayed the rendered template inline; other hosts may
-handle the notification differently.
+method. The notification params carry the same fields as the JSONL
+record above, except that `ts_unix` is not included (it is added only
+by the JSONL writer). The host is responsible for surfacing the
+notification — Claude Code's pre-plugin path historically displayed
+the rendered template inline; other hosts may handle the notification
+differently.
 
 #### Supported event subtypes
 

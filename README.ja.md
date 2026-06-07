@@ -605,8 +605,10 @@ jsonl:
 - `ts` — firmware uptime（ミリ秒、monotonic）。
 - `ts_unix` — gateway がイベントを記録した壁時計時刻。
 - `session_id` — gateway session 識別子。
-- `action`（任意） — `messages:` 設定で override したときのみ含まれる
-  avatar action。
+- `action` — event subtype に対応する avatar action keyword（例:
+  `head_pat`, `head_stroke`）。組み込みの default template は常に
+  この値を埋めるほか、`messages:` override 側でも `action` の指定が
+  必須であるため、対応する全 subtype で必ず含まれます。
 
 レンダリングされた文言（例: `head was tapped`）は `channels` channel
 が人間可読のメッセージとして配信するもので、JSONL レコード自体には
@@ -634,14 +636,12 @@ legacy_event:
 ```
 
 gateway は独自定義の `stackchan/event` MCP notification method を
-送出します。notification params には `event_type` / `subtype` /
-`duration_ms` / `ts` / `session_id` の各 field が含まれます（上記
-JSONL レコードと同じ field 構成、ただし `ts_unix` は JSONL writer 側
-だけが付与するため legacy notification には含まれません）。`messages:`
-設定で override されている場合は任意の `action` field も含まれます。
-受信側の notification の扱いはホスト依存です: Claude Code の plugin
-以前経路では従来、レンダリング後のメッセージが inline で表示されま
-した。他ホストでは異なる扱いになる場合があります。
+送出します。notification params には上記 JSONL レコードと同じ field
+が含まれます（ただし `ts_unix` は JSONL writer 側だけが付与するため
+legacy notification には含まれません）。受信側の notification の
+扱いはホスト依存です: Claude Code の plugin 以前経路では従来、
+レンダリング後のメッセージが inline で表示されました。他ホストでは
+異なる扱いになる場合があります。
 
 #### Supported event subtypes
 
