@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "stackchan-mcp": {
+    "stackchanmcp": {
       "command": "uv",
       "args": [
         "run",
@@ -8,7 +8,8 @@
         "${CLAUDE_PLUGIN_ROOT}/gateway",
         "python",
         "-m",
-        "stackchan_mcp"
+        "stackchan_mcp",
+        "serve"
       ]
     }
   }

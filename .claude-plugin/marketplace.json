@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "kisaragi-mochi-channels",
+  "description": "Local stackchan-mcp channel plugin marketplace for kisaragi-mochi projects.",
+  "owner": {
+    "name": "kisaragi-mochi"
+  },
+  "plugins": [
+    {
+      "name": "stackchanmcp",
+      "description": "Stack-chan physical event channel for Claude Code — touch tap / stroke notifications from the desktop robot delivered as Channels messages.",
+      "author": {
+        "name": "kisaragi-mochi"
+      },
+      "category": "productivity",
+      "source": "./",
+      "homepage": "https://github.com/kisaragi-mochi/stackchan-mcp"
+    }
+  ]
+}
