@@ -508,49 +508,100 @@ To enable Channels notifications:
      enabled: true
    ```
 
-2. Receiver side — open a receiver on your host:
+2. Plugin installation — install this repository as a Claude Code plugin
+   from the `kisaragi-mochi-channels` marketplace:
 
-   - **Claude Code**: load this repository as a CC plugin AND register
-     this plugin's MCP server as a Channels source so Claude Code
-     subscribes to the `claude/channel` capability advertised by this
-     gateway.
+   ```bash
+   claude plugin install stackchanmcp@kisaragi-mochi-channels
+   ```
 
-     ```bash
-     claude --plugin-dir /path/to/stackchan-mcp --channels server:stackchan-mcp --agent <your-agent>
+   For local development against your working copy, pass
+   `--plugin-dir /path/to/stackchan-mcp` instead of installing from the
+   marketplace; Claude Code starts the gateway under
+   `${CLAUDE_PLUGIN_ROOT}/gateway` via the bundled `.mcp.json`.
+
+3. Host environment setup — the Channels delivery path requires three
+   host-side names to be aligned with the gateway's MCP server name
+   (`stackchanmcp`, no hyphen):
+
+   - The plugin's `.mcp.json` `mcpServers` key for this gateway must be
+     `stackchanmcp`. If you previously wired the gateway under a
+     different key, rename it.
+   - Claude Code's `settings.local.json` `enabledMcpjsonServers`
+     whitelist must include `stackchanmcp`.
+   - The Channels allowlist requires a system-wide approval — Claude
+     Code does not honor user-level (e.g. `~/.claude/settings.json`)
+     settings for the Channels allowlist. On macOS, create or edit
+     `/Library/Application Support/ClaudeCode/managed-settings.json`
+     (requires `sudo`):
+
+     ```json
+     {
+       "channelsEnabled": true,
+       "allowedChannelPlugins": ["stackchanmcp@kisaragi-mochi-channels"]
+     }
      ```
 
-     For one-session local development, point `--plugin-dir` at your
-     working copy of this repository; Claude Code starts the gateway
-     under `${CLAUDE_PLUGIN_ROOT}/gateway` via the bundled `.mcp.json`.
-     The `--channels server:stackchan-mcp` argument is what makes Claude Code
-     attach the channel source to this server and inject
-     `<channel source="stackchan-mcp" ...>` blocks into the session;
-     without it the plugin loads but channels notifications are
-     silently dropped on the receiving side. If allowlist restrictions
-     block a development server from being added, use
-     `--dangerously-load-development-channels server:stackchan-mcp` instead.
-     Marketplace publication (`--channels plugin:stackchan-mcp@<marketplace>`)
-     is tracked as a follow-up and will land once the manifest is
-     submitted to a marketplace.
+4. Receiver side — launch Claude Code with the Channels flags:
 
-     Important — pre-plugin wiring does not receive Channels: if you
-     previously wired this gateway via `~/.claude.json` `mcpServers`
-     (the pre-plugin path), that wiring does not receive `<channel ...>`
-     injections. Claude Code only attaches a channel source to
-     plugin-loaded MCP servers. Before switching to the plugin path,
-     stop any existing stackchan-mcp gateway process to release the
-     ESP32 ownership lock; the plugin-loaded gateway will otherwise
-     fail to acquire it. If you prefer to keep the `~/.claude.json`
-     wiring, use `legacy_event` and `jsonl` instead of `channels` —
-     both work without plugin loading.
+   ```bash
+   claude --channels plugin:stackchanmcp@kisaragi-mochi-channels \
+          --dangerously-load-development-channels plugin:stackchanmcp@kisaragi-mochi-channels
+   ```
 
-   - **Other hosts with a `claude/channel`-compatible receiver**: open
-     that receiver per the host's documentation. Compatibility with
-     hosts other than Claude Code has not been verified in this
-     repository.
+   The `--channels` flag attaches the channel source to the gateway and
+   injects `<channel source="plugin:stackchanmcp:stackchanmcp" ...>`
+   blocks into the session. The
+   `--dangerously-load-development-channels` flag is currently required
+   alongside `--channels` because the plugin's Channels capability is
+   experimental; the approved-allowlist-only path without this flag has
+   been verified not to deliver notifications in current Claude Code
+   versions. The flag is expected to become optional once the plugin's
+   Channels capability stabilizes.
+
+   Important — pre-plugin wiring does not receive Channels: if you
+   previously wired this gateway via `~/.claude.json` `mcpServers`
+   (the pre-plugin path), that wiring does not receive `<channel ...>`
+   injections. Claude Code only attaches a channel source to
+   plugin-loaded MCP servers. Before switching to the plugin path,
+   stop any existing gateway process to release the ESP32 ownership
+   lock; the plugin-loaded gateway will otherwise fail to acquire it.
+   If you prefer to keep the `~/.claude.json` wiring, use
+   `legacy_event` and `jsonl` instead of `channels` — both work
+   without plugin loading.
+
+5. Other hosts:
+
+   - **Hosts with a `claude/channel`-compatible receiver**: open that
+     receiver per the host's documentation. Compatibility with hosts
+     other than Claude Code has not been verified in this repository.
 
    - **Hosts without a Channels receiver**: use the JSONL fallback (see
      below).
+
+#### Migration from the previous `stackchan-mcp` (hyphenated) form
+
+If you enabled Channels using the older `stackchan-mcp` server-name
+form, rename to the current `stackchanmcp` form (no hyphen) in all four
+places to keep the host MCP client and the gateway aligned:
+
+- Plugin / server name: change `stackchan-mcp` to `stackchanmcp` in
+  your host's `.mcp.json` `mcpServers` key, in `settings.local.json`
+  `enabledMcpjsonServers` whitelist, and in the `--channels` /
+  `--dangerously-load-development-channels` flag arguments.
+- Channels flag form: change from `--channels server:stackchan-mcp` to
+  `--channels plugin:stackchanmcp@kisaragi-mochi-channels`. The
+  plugin form is the supported form now that the marketplace manifest
+  is published.
+- system-wide allowlist: ensure
+  `/Library/Application Support/ClaudeCode/managed-settings.json` has
+  `allowedChannelPlugins` listing
+  `stackchanmcp@kisaragi-mochi-channels` (not the old `stackchan-mcp`
+  form).
+
+Without all four renames the host MCP client logs
+`Channel notifications skipped: server <name> not in --channels list
+for this session` and the notifications never reach the session.
 
 #### Customizing event message wording
 

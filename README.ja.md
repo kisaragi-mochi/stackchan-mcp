@@ -458,42 +458,68 @@ Channels 通知を有効にするには:
      enabled: true
    ```
 
-2. 受け口側 — ホストごとに開き方が異なります。
+2. Plugin install — `kisaragi-mochi-channels` marketplace から、本
+   リポジトリを Claude Code plugin として install します。
 
-   - **Claude Code**: 本リポジトリを CC plugin として読み込み、
-     かつ この plugin の MCP server を Channels source として登録する
-     ことで、gateway が宣言する `claude/channel` capability を
-     Claude Code が購読するようにします。
+   ```bash
+   claude plugin install stackchanmcp@kisaragi-mochi-channels
+   ```
 
-     ```bash
-     claude --plugin-dir /path/to/stackchan-mcp --channels server:stackchan-mcp --agent <your-agent>
+   ローカル開発で作業コピーを使う場合は、marketplace install の
+   代わりに `--plugin-dir /path/to/stackchan-mcp` で本リポジトリを
+   指してください。Claude Code は同梱の `.mcp.json` 経由で
+   `${CLAUDE_PLUGIN_ROOT}/gateway` 配下の gateway を起動します。
+
+3. ホスト環境設定 — Channels 経路では、3 箇所のホスト側名前を
+   gateway の MCP server 名（`stackchanmcp`、ハイフン無し）と
+   揃える必要があります。
+
+   - Plugin の `.mcp.json` `mcpServers` key を `stackchanmcp` にする。
+     以前別の key で gateway を wire していた場合は rename して
+     ください。
+   - Claude Code の `settings.local.json` の `enabledMcpjsonServers`
+     whitelist に `stackchanmcp` を含める。
+   - Channels allowlist は system-wide 承認が必要です。Claude Code は
+     user-level（`~/.claude/settings.json` 等）の設定は Channels
+     allowlist として有効になりません。macOS では
+     `/Library/Application Support/ClaudeCode/managed-settings.json` を
+     作成または編集してください（`sudo` 必要）。
+
+     ```json
+     {
+       "channelsEnabled": true,
+       "allowedChannelPlugins": ["stackchanmcp@kisaragi-mochi-channels"]
+     }
      ```
 
-     1 セッション限定のローカル開発では `--plugin-dir` に本リポジトリの
-     作業コピーを指定してください。Claude Code は同梱の `.mcp.json`
-     経由で `${CLAUDE_PLUGIN_ROOT}/gateway` 配下の gateway を起動します。
-     `--channels server:stackchan-mcp` 引数を付けることで Claude Code がこの
-     server を channel source として attach し、session に
-     `<channel source="stackchan-mcp" ...>` blocks を inject します。
-     付けないと plugin は読み込まれますが、channels の notification は
-     受信側で silent に drop されます。allowlist 制限により開発用 server
-     が登録できない場合は、代わりに
-     `--dangerously-load-development-channels server:stackchan-mcp` を使って
-     ください。Marketplace 公開
-     (`--channels plugin:stackchan-mcp@<marketplace>`) は follow-up
-     として追跡し、manifest を marketplace へ提出したタイミングで
-     利用可能になります。
+4. 受け口側 — Channels フラグつきで Claude Code を起動します。
 
-     重要 — plugin 以前の起動経路では Channels が届きません: 以前
-     `~/.claude.json` の `mcpServers` 経由でこの gateway を起動して
-     いた場合、その旧経路では `<channel ...>` の inject は届きません。
-     Claude Code は plugin 経由で起動された MCP server のみに channel
-     source を付ける仕様です。plugin 経路に移行する前に、既存の
-     stackchan-mcp gateway プロセスを停止して ESP32 ownership lock
-     を解放してください。そうしないと plugin 経由で起動した gateway
-     が lock 取得に失敗します。`~/.claude.json` 経由のまま使いたい
-     場合は、`channels` ではなく `legacy_event` / `jsonl` を使って
-     ください。どちらも plugin loading なしで動作します。
+   ```bash
+   claude --channels plugin:stackchanmcp@kisaragi-mochi-channels \
+          --dangerously-load-development-channels plugin:stackchanmcp@kisaragi-mochi-channels
+   ```
+
+   `--channels` フラグは channel source を gateway に attach し、
+   session に `<channel source="plugin:stackchanmcp:stackchanmcp" ...>`
+   blocks を inject します。`--dangerously-load-development-channels`
+   フラグは現状 `--channels` と併用が必要です。plugin の Channels
+   capability が実験的で、approved-allowlist のみ経路（このフラグ
+   なし）では現行 Claude Code 版で notification が届かないことが
+   検証されています。Channels capability が安定化したら、このフラグは
+   optional になる予定です。
+
+   重要 — plugin 以前の起動経路では Channels が届きません: 以前
+   `~/.claude.json` の `mcpServers` 経由でこの gateway を起動して
+   いた場合、その旧経路では `<channel ...>` の inject は届きません。
+   Claude Code は plugin 経由で起動された MCP server のみに channel
+   source を付ける仕様です。plugin 経路に移行する前に、既存の gateway
+   プロセスを停止して ESP32 ownership lock を解放してください。そう
+   しないと plugin 経由で起動した gateway が lock 取得に失敗します。
+   `~/.claude.json` 経由のまま使いたい場合は、`channels` ではなく
+   `legacy_event` / `jsonl` を使ってください。どちらも plugin loading
+   なしで動作します。
+
+5. 他ホスト:
 
    - **`claude/channel` 互換の受け口を持つ他ホスト**: 当該ホストの
      ドキュメントに従って受け口を開いてください。Claude Code 以外の
@@ -501,6 +527,29 @@ Channels 通知を有効にするには:
 
    - **Channels 受け口を持たないホスト**: JSONL フォールバックを
      使ってください（下記参照）。
+
+#### 旧 `stackchan-mcp`（ハイフン入り）form からの migration
+
+以前 `stackchan-mcp` server name form で Channels を有効化していた
+場合、ホスト MCP client と gateway を揃えるため、以下を現行の
+`stackchanmcp` form（ハイフン無し）に rename してください。
+
+- Plugin / server 名: ホストの `.mcp.json` `mcpServers` key、
+  `settings.local.json` `enabledMcpjsonServers` whitelist、および
+  `--channels` / `--dangerously-load-development-channels` フラグの
+  引数。`stackchan-mcp`（ハイフン入り）を `stackchanmcp` に変更。
+- Channels フラグ form: `--channels server:stackchan-mcp` を
+  `--channels plugin:stackchanmcp@kisaragi-mochi-channels` に変更。
+  marketplace manifest が公開済のため、plugin form が現行の正式 form
+  です。
+- system-wide allowlist:
+  `/Library/Application Support/ClaudeCode/managed-settings.json` の
+  `allowedChannelPlugins` に `stackchanmcp@kisaragi-mochi-channels`
+  （旧 `stackchan-mcp` form ではない）を列挙してください。
+
+これらすべての rename がなければ、ホスト MCP client は
+`Channel notifications skipped: server <name> not in --channels list
+for this session` を log し、notification が session に届きません。
 
 #### イベントメッセージ文言のカスタマイズ
 
