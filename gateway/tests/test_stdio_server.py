@@ -30,7 +30,7 @@ def test_create_server():
     """Server creation succeeds with correct name."""
     server = create_server()
     assert server is not None
-    assert server.name == "stackchan-mcp"
+    assert server.name == "stackchanmcp"
 
 
 @pytest.mark.asyncio
