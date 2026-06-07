@@ -651,16 +651,31 @@ jsonl:
 
 Each event is appended as one JSON line to the configured path. The
 file is created if it does not exist, and existing entries are
-preserved. A delivered tap and stroke pair looks like:
+preserved. Each line carries:
+
+- `event_type` — top-level event type (currently `"touch"`).
+- `subtype` — subtype within the event type (currently `"tap"` or
+  `"stroke"`).
+- `duration_ms` — firmware-reported duration of the event in
+  milliseconds.
+- `ts` — firmware uptime in milliseconds (monotonic).
+- `ts_unix` — wall-clock timestamp when the gateway recorded the
+  event.
+- `session_id` — gateway session identifier.
+- `action` (optional) — avatar action keyed by the `messages:`
+  config; omitted when no override is configured.
+
+The rendered wording (e.g. `head was tapped`) is what the `channels`
+channel delivers as the human-readable message; it is not stored in
+the JSONL record itself. A delivered tap-and-stroke pair looks like:
 
 ```json
-{"type": "touch", "subtype": "tap", "action": "head_pat", "message": "head was tapped"}
-{"type": "touch", "subtype": "stroke", "action": "head_stroke", "message": "head was stroked for 720ms", "duration_ms": 720}
+{"event_type": "touch", "subtype": "tap", "duration_ms": 0, "ts": 123456, "ts_unix": 1717862400.0, "session_id": "abc-123", "action": "head_pat"}
+{"event_type": "touch", "subtype": "stroke", "duration_ms": 720, "ts": 124000, "ts_unix": 1717862400.7, "session_id": "abc-123", "action": "head_stroke"}
 ```
 
-The top-level `type` and `subtype` always correspond to the rows in
-"Supported event subtypes" below; `action` and `message` reflect the
-defaults, or the override you configured under `messages:`.
+The top-level `event_type` and `subtype` correspond to the rows in
+"Supported event subtypes" below.
 
 #### Channel: `legacy_event` (pre-plugin backward compatibility)
 
@@ -676,10 +691,13 @@ legacy_event:
 ```
 
 The gateway emits the self-defined `stackchan/event` MCP notification
-method. The notification params carry the same `type` / `subtype` /
-`action` / `message` fields as the `jsonl` payload above. The host is
-responsible for surfacing the notification — Claude Code's pre-plugin
-path historically displayed the message inline; other hosts may
+method. The notification params carry the `event_type` / `subtype` /
+`duration_ms` / `ts` / `session_id` fields (the same fields as the
+`jsonl` record above, minus `ts_unix`, which is added only by the
+JSONL writer). The optional `action` field is included when the
+`messages:` config provides an override. The host is responsible for
+surfacing the notification — Claude Code's pre-plugin path
+historically displayed the rendered template inline; other hosts may
 handle the notification differently.
 
 #### Supported event subtypes

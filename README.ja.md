@@ -596,16 +596,29 @@ jsonl:
 
 各イベントは、設定したパスに 1 行の JSON として追記されます。
 ファイルが存在しない場合は作成され、既存のエントリは保持されます。
-tap と stroke の配信例:
+1 行に含まれる field:
+
+- `event_type` — top-level event type（現状は `"touch"`）。
+- `subtype` — event type 内の subtype（現状は `"tap"` または
+  `"stroke"`）。
+- `duration_ms` — firmware が報告したイベントの継続時間（ミリ秒）。
+- `ts` — firmware uptime（ミリ秒、monotonic）。
+- `ts_unix` — gateway がイベントを記録した壁時計時刻。
+- `session_id` — gateway session 識別子。
+- `action`（任意） — `messages:` 設定で override したときのみ含まれる
+  avatar action。
+
+レンダリングされた文言（例: `head was tapped`）は `channels` channel
+が人間可読のメッセージとして配信するもので、JSONL レコード自体には
+保存されません。tap と stroke の配信例:
 
 ```json
-{"type": "touch", "subtype": "tap", "action": "head_pat", "message": "head was tapped"}
-{"type": "touch", "subtype": "stroke", "action": "head_stroke", "message": "head was stroked for 720ms", "duration_ms": 720}
+{"event_type": "touch", "subtype": "tap", "duration_ms": 0, "ts": 123456, "ts_unix": 1717862400.0, "session_id": "abc-123", "action": "head_pat"}
+{"event_type": "touch", "subtype": "stroke", "duration_ms": 720, "ts": 124000, "ts_unix": 1717862400.7, "session_id": "abc-123", "action": "head_stroke"}
 ```
 
-最上位の `type` / `subtype` は常に下記「Supported event subtypes」
-の行と対応します。`action` / `message` はデフォルト（または
-`messages:` で設定した override 内容）を反映します。
+最上位の `event_type` / `subtype` は下記「Supported event subtypes」
+の行と対応します。
 
 #### Channel: `legacy_event`（plugin 以前の backward compatibility）
 
@@ -621,11 +634,14 @@ legacy_event:
 ```
 
 gateway は独自定義の `stackchan/event` MCP notification method を
-送出します。notification params には `jsonl` の payload と同じ
-`type` / `subtype` / `action` / `message` の各 field が含まれます。
+送出します。notification params には `event_type` / `subtype` /
+`duration_ms` / `ts` / `session_id` の各 field が含まれます（上記
+JSONL レコードと同じ field 構成、ただし `ts_unix` は JSONL writer 側
+だけが付与するため legacy notification には含まれません）。`messages:`
+設定で override されている場合は任意の `action` field も含まれます。
 受信側の notification の扱いはホスト依存です: Claude Code の plugin
-以前経路では従来、メッセージが inline で表示されました。他ホストでは
-異なる扱いになる場合があります。
+以前経路では従来、レンダリング後のメッセージが inline で表示されま
+した。他ホストでは異なる扱いになる場合があります。
 
 #### Supported event subtypes
 
