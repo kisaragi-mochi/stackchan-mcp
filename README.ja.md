@@ -442,23 +442,53 @@ Vosk・whisper.cpp・他のクラウドサービス等を `listen` API を変え
 
 ### 6. オプション: イベント通知の有効化
 
-Stack-chan の物理イベント（touch tap / stroke）は、ホスト側の対応状況に
-合わせて複数の通知経路で届けられます。すべての経路はデフォルトで無効
-です。有効化するには `~/.config/stackchan-mcp/notify.yml` で opt-in
-してください。Channels 機構は実験的な MCP capability を使っており、
-今後変わる可能性があります。
+Stack-chan の物理イベント（現在対応: touch tap / stroke、構造上は
+将来の subtype 追加が可能）は、3 つの通知 channel で配信できます。
+すべての channel はデフォルトで無効です。
+`~/.config/stackchan-mcp/notify.yml` で opt-in してください。複数の
+channel を同時に有効化することもでき、その場合は有効化された各
+channel に同じイベントが配信されます。連携するホストに合わせて
+選んでください。
 
-Channels 通知を有効にするには:
+- `channels` — Claude Code plugin 経路。Claude Code の実験的な
+  Channels capability 経由で、`<channel ...>` ブロックとして
+  セッションに inject されます。Stack-chan を Claude Code plugin
+  として install し、イベントを会話の中に届けたい場合に使います。
+- `jsonl` — プロセス外ファイル連携。各イベントが 1 行の JSON として
+  指定したファイルに追記されます。Claude Code 以外のホストや独自
+  パイプラインが、ファイルを tail して非同期に取り込みたい場合に
+  使います。
+- `legacy_event` — plugin 以前の MCP notification。gateway が独自
+  定義の `stackchan/event` MCP notification method を送出します。
+  Channels capability 以前から存在する経路です。ホストが Claude Code
+  plugin 経路ではなく `~/.claude.json` `mcpServers` で gateway を
+  起動している場合の backward compatibility 用です。
 
-1. Gateway 側 — `~/.config/stackchan-mcp/notify.yml` で Channels を
-   有効化します。
+詳細な注釈付き設定リファレンスは `notify.example.yml` を参照して
+ください。
 
-   ```yaml
-   channels:
-     enabled: true
-   ```
+#### Channel: `channels`（Claude Code plugin 経路）
 
-2. Plugin install — `kisaragi-mochi-channels` marketplace から、本
+Stack-chan を Claude Code plugin として起動し、セッション内に channel
+ブロックとしてイベントを届けたい場合に使います。この channel は
+変化する可能性のある実験的な MCP capability を使います。
+
+`notify.yml` で有効化:
+
+```yaml
+channels:
+  enabled: true
+```
+
+Claude Code session に `<channel ...>` ブロックが inject されます:
+
+```
+<channel source="plugin:stackchanmcp:stackchanmcp" ...>head was tapped</channel>
+```
+
+セットアップ:
+
+1. Plugin install — `kisaragi-mochi-channels` marketplace から、本
    リポジトリを Claude Code plugin として install します。
 
    ```bash
@@ -470,7 +500,7 @@ Channels 通知を有効にするには:
    指してください。Claude Code は同梱の `.mcp.json` 経由で
    `${CLAUDE_PLUGIN_ROOT}/gateway` 配下の gateway を起動します。
 
-3. ホスト環境設定 — Channels 経路では、3 箇所のホスト側名前を
+2. ホスト環境設定 — Channels 経路では、3 箇所のホスト側名前を
    gateway の MCP server 名（`stackchanmcp`、ハイフン無し）と
    揃える必要があります。
 
@@ -492,7 +522,7 @@ Channels 通知を有効にするには:
      }
      ```
 
-4. 受け口側 — Channels フラグつきで Claude Code を起動します。
+3. 受け口側 — Channels フラグつきで Claude Code を起動します。
 
    ```bash
    claude --channels plugin:stackchanmcp@kisaragi-mochi-channels \
@@ -508,27 +538,26 @@ Channels 通知を有効にするには:
    検証されています。Channels capability が安定化したら、このフラグは
    optional になる予定です。
 
-   重要 — plugin 以前の起動経路では Channels が届きません: 以前
-   `~/.claude.json` の `mcpServers` 経由でこの gateway を起動して
-   いた場合、その旧経路では `<channel ...>` の inject は届きません。
-   Claude Code は plugin 経由で起動された MCP server のみに channel
-   source を付ける仕様です。plugin 経路に移行する前に、既存の gateway
-   プロセスを停止して ESP32 ownership lock を解放してください。そう
-   しないと plugin 経由で起動した gateway が lock 取得に失敗します。
-   `~/.claude.json` 経由のまま使いたい場合は、`channels` ではなく
-   `legacy_event` / `jsonl` を使ってください。どちらも plugin loading
-   なしで動作します。
+重要 — plugin 以前の起動経路では Channels が届きません: 以前
+`~/.claude.json` の `mcpServers` 経由でこの gateway を起動して
+いた場合、その旧経路では `<channel ...>` の inject は届きません。
+Claude Code は plugin 経由で起動された MCP server のみに channel
+source を付ける仕様です。plugin 経路に移行する前に、既存の gateway
+プロセスを停止して ESP32 ownership lock を解放してください。そう
+しないと plugin 経由で起動した gateway が lock 取得に失敗します。
+`~/.claude.json` 経路のまま使いたい場合は、下記の `legacy_event` /
+`jsonl` channel を使ってください。どちらも plugin loading なしで
+動作します。
 
-5. 他ホスト:
+他ホスト:
 
-   - **`claude/channel` 互換の受け口を持つ他ホスト**: 当該ホストの
-     ドキュメントに従って受け口を開いてください。Claude Code 以外の
-     ホストとの互換性は当リポジトリでは未検証です。
+- `claude/channel` 互換の受け口を持つ他ホスト: 当該ホストの
+  ドキュメントに従って受け口を開いてください。Claude Code 以外の
+  ホストとの互換性は当リポジトリでは未検証です。
+- Channels 受け口を持たないホスト: 下記の `jsonl` channel を
+  使ってください。
 
-   - **Channels 受け口を持たないホスト**: JSONL フォールバックを
-     使ってください（下記参照）。
-
-#### 旧 `stackchan-mcp`（ハイフン入り）form からの migration
+##### 旧 `stackchan-mcp`（ハイフン入り）form からの migration
 
 以前 `stackchan-mcp` server name form で Channels を有効化していた
 場合、ホスト MCP client と gateway を揃えるため、以下を現行の
@@ -551,25 +580,77 @@ Channels 通知を有効にするには:
 `Channel notifications skipped: server <name> not in --channels list
 for this session` を log し、notification が session に届きません。
 
-#### イベントメッセージ文言のカスタマイズ
+#### Channel: `jsonl`（プロセス外ファイル連携）
 
-届けられる各イベントには、テンプレートから生成される短いメッセージが
-付きます。組み込みのデフォルトは「機械的なイベント名」ではなく
-「デバイスが何を感じたか」を表す体験的な表現にしてあり、受信側の
-エージェントが一人称のナレーションとして読めるようになっています。
+Claude Code 以外のホストや独自パイプラインが、ファイルを tail して
+イベントを非同期に取り込みたい場合に使います。Claude Code 以外の
+任意の連携先に対して最も簡単に組み込める channel です。
 
-| イベント | デフォルト `action` | デフォルト `template` |
-| --- | --- | --- |
-| `touch` / `tap` | `head_pat` | `head was tapped` |
-| `touch` / `stroke` | `head_stroke` | `head was stroked for {duration_ms}ms` |
+`notify.yml` で有効化:
 
-`{duration_ms}` プレースホルダはイベントの payload から置換されます。
-未知のプレースホルダはそのまま保持されます。
+```yaml
+jsonl:
+  enabled: true
+  path: ~/.claude/stackchan-events.jsonl
+```
 
-文言を上書きするには、`~/.config/stackchan-mcp/notify.yml` に
-`messages:` ブロックを追加します。記載したイベント種別だけが上書き
-され、それ以外は上記のデフォルトのままです。たとえば、よりくだけた
-表現にする場合:
+各イベントは、設定したパスに 1 行の JSON として追記されます。
+ファイルが存在しない場合は作成され、既存のエントリは保持されます。
+tap と stroke の配信例:
+
+```json
+{"type": "touch", "subtype": "tap", "action": "head_pat", "message": "head was tapped"}
+{"type": "touch", "subtype": "stroke", "action": "head_stroke", "message": "head was stroked for 720ms", "duration_ms": 720}
+```
+
+最上位の `type` / `subtype` は常に下記「Supported event subtypes」
+の行と対応します。`action` / `message` はデフォルト（または
+`messages:` で設定した override 内容）を反映します。
+
+#### Channel: `legacy_event`（plugin 以前の backward compatibility）
+
+ホストが Claude Code plugin 経路ではなく `~/.claude.json` `mcpServers`
+で gateway を起動していて、ホストを plugin form に切り替えずに
+イベントを受け取りたい場合に使います。
+
+`notify.yml` で有効化:
+
+```yaml
+legacy_event:
+  enabled: true
+```
+
+gateway は独自定義の `stackchan/event` MCP notification method を
+送出します。notification params には `jsonl` の payload と同じ
+`type` / `subtype` / `action` / `message` の各 field が含まれます。
+受信側の notification の扱いはホスト依存です: Claude Code の plugin
+以前経路では従来、メッセージが inline で表示されました。他ホストでは
+異なる扱いになる場合があります。
+
+#### Supported event subtypes
+
+現在対応している物理イベントは下記の通りです。構造は意図的に拡張
+可能で、`touch` の subtype 追加や新しい top-level type（例:
+`motion`, `voice`）が後続の release で追加された場合も、本
+セクションの全面書き直しなしに追記できます。
+
+| Type | Subtype | デフォルト `action` | デフォルト `template` |
+| --- | --- | --- | --- |
+| `touch` | `tap` | `head_pat` | `head was tapped` |
+| `touch` | `stroke` | `head_stroke` | `head was stroked for {duration_ms}ms` |
+
+組み込みのデフォルトは「機械的なイベント名」ではなく「デバイスが
+何を感じたか」を表す体験的な表現にしてあり、受信側のエージェントが
+一人称のナレーションとして読めるようになっています。`{duration_ms}`
+プレースホルダは event payload から置換され、未知のプレースホルダは
+そのまま保持されます。
+
+##### 文言の上書き
+
+`~/.config/stackchan-mcp/notify.yml` に `messages:` block を追加
+すると、subtype ごとの `action` / `template` を上書きできます。
+記載した subtype だけが上書きされ、それ以外は上記のデフォルトの
+ままです。
 
 ```yaml
 # ~/.config/stackchan-mcp/notify.yml
@@ -585,19 +666,8 @@ messages:
 
 上書きする各 subtype には `action` と `template` の両方が必要です。
 `action` の値はイベントの metadata に転送されるため、下流の consumer
-がそれを key にしている場合は安定させておいてください。詳細な注釈付き
-リファレンスは `notify.example.yml` を参照してください。
-
-以前の常時有効だったイベント動作に戻す設定:
-
-```yaml
-# ~/.config/stackchan-mcp/notify.yml
-legacy_event:
-  enabled: true
-jsonl:
-  enabled: true
-  path: ~/.claude/stackchan-events.jsonl
-```
+がそれを key にしている場合は安定させておいてください。詳細な注釈
+付きリファレンスは `notify.example.yml` を参照してください。
 
 ## アバター画像について
 

@@ -32,6 +32,15 @@ documented-only.
 
 ### Gateway
 
+- Changed: restructured the README EN/JP `Optional: enable event
+  notifications` section as a tri-channel guide. Each of `channels`,
+  `jsonl`, and `legacy_event` now has its own subsection with the
+  `notify.yml` enable block, a delivered payload example, and the
+  intended use case. The supported event subtypes are listed in a
+  structure that allows additional `touch` subtypes or new
+  top-level types to be appended without rewriting the section.
+  (#268)
+
 - Fixed: align the `stdio_server.py` `InitializationOptions.server_name`
   and `StackChanServer` constructor argument from the legacy
   `stackchan-mcp` string to the canonical `stackchanmcp` (no hyphen)
