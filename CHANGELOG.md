@@ -32,6 +32,30 @@ documented-only.
 
 ### Gateway
 
+- Fixed: align the `stdio_server.py` `InitializationOptions.server_name`
+  and `StackChanServer` constructor argument from the legacy
+  `stackchan-mcp` string to the canonical `stackchanmcp` (no hyphen)
+  introduced in PR #266 (#265). Without this rename the host MCP
+  client logs `Channel notifications skipped: server stackchan-mcp
+  not in --channels list for this session` and the Channels delivery
+  path is blocked end-to-end. The `STACKCHAN_CHANNEL_INSTRUCTIONS`
+  prompt example tag is also synced to the on-the-wire form
+  `<channel source="plugin:stackchanmcp:stackchanmcp" ...>`, and the
+  README EN/JP `Optional: enable event notifications` section is
+  rewritten to match the post-PR-#266 reality:
+  `plugin:stackchanmcp@kisaragi-mochi-channels` as the canonical
+  `--channels` form, a Plugin installation step using
+  `claude plugin install`, a Host environment setup step covering
+  `.mcp.json` `mcpServers` key alignment, `settings.local.json`
+  `enabledMcpjsonServers` whitelist, and the system-wide
+  `/Library/Application Support/ClaudeCode/managed-settings.json`
+  `allowedChannelPlugins` entry, the
+  `--dangerously-load-development-channels` requirement noted as
+  currently required (approved-allowlist-only without this flag has
+  been verified not to deliver notifications), and a Migration
+  section listing the rename targets for users on the older
+  `stackchan-mcp` (hyphenated) server-name form. (#271)
+
 - Changed: rephrased the default notification message templates from
   mechanical event-name labels (`(head pat)` / `(head stroke,
   {duration_ms}ms)`) to experiential English (`head was tapped` / `head
