@@ -26,6 +26,7 @@ This repository is a monorepo.
 | `firmware/` | Full git subtree of [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32). The custom StackChan board lives at `firmware/main/boards/stackchan/`. |
 | `gateway/` | Python MCP gateway. stdio MCP server (LLM side) + WebSocket MCP client (ESP32 side) + HTTP capture server. |
 | `docs/` | [`architecture.md`](docs/architecture.md): full component diagram, tool name mapping, photo flow, auth, phase roadmap. [`firmware-sync.md`](docs/firmware-sync.md): upstream xiaozhi-esp32 sync playbook. [`remote-access.md`](docs/remote-access.md): Tailscale Funnel setup for non-LAN use. |
+| `examples/` | Optional, unmaintained examples. [`cloudflare-relay/`](examples/cloudflare-relay/): Cloudflare Workers WebSocket relay for reaching the gateway from outside the local LAN. |
 
 ## Target hardware
 

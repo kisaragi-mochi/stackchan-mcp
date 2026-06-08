@@ -30,6 +30,15 @@ documented-only.
 
 ## [Unreleased]
 
+### Examples
+
+- Added `examples/cloudflare-relay/` — optional Cloudflare Workers
+  relay example for reaching the gateway from outside the local LAN.
+  Includes a WebSocket proxy Worker with constant-time Bearer token
+  authentication, deployment instructions, and a shared-secret
+  rotation guide. The Worker uses only generally-available Cloudflare
+  primitives (Workers WS API, Cloudflare Tunnel public hostnames).
+
 ## [0.9.1] - 2026-06-08
 
 ### Gateway

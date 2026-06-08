@@ -26,6 +26,7 @@
 | `firmware/` | [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) フォーク全体（git subtree）。StackChan 用カスタムボードは `firmware/main/boards/stackchan/` に配置 |
 | `gateway/` | Python MCP ゲートウェイ。stdio MCP サーバー (LLM側) + WebSocket MCP クライアント (ESP32側) + HTTP capture サーバー |
 | `docs/` | [`architecture.md`](docs/architecture.md): 全体構成図・ツール名マッピング・写真フロー・認証・Phase ロードマップ。[`firmware-sync.md`](docs/firmware-sync.md): upstream xiaozhi-esp32 同期手順。[`remote-access.md`](docs/remote-access.md): Tailscale Funnel による非LAN接続手順 |
+| `examples/` | オプションの非保守 example 群。[`cloudflare-relay/`](examples/cloudflare-relay/): LAN 外から gateway へ届くための Cloudflare Workers WebSocket リレー |
 
 ## 想定ハードウェア
 

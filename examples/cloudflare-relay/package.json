@@ -1,0 +1,16 @@
+{
+  "name": "stackchan-relay",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Optional Cloudflare Workers relay example for stackchan-mcp",
+  "main": "src/index.ts",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260601.0",
+    "typescript": "^5.5.0",
+    "wrangler": "^3.80.0"
+  }
+}
