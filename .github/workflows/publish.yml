@@ -144,6 +144,18 @@ jobs:
   build-windows-wheel:
     name: Build win_amd64 wheel
     needs: build
+    # Temporarily disabled for v0.9.0: the produced opus.dll is
+    # non-deterministic across runs on the current windows-latest
+    # runner-image (the SHA256 verify guard observes a different hash
+    # each build), so the pinned EXPECTED_OPUS_DLL_SHA256 cannot match.
+    # Restore in v0.9.1 once the SHA drift root cause is fixed (the
+    # likely path is replacing the byte-identical-binary guard with a
+    # functional smoke test, so each build's freshly produced opus.dll
+    # is verified by exercising the loader / encode round-trip instead
+    # of by hash comparison against a previously reviewed binary).
+    # Paired with the `Download Windows wheel (win_amd64)` step in the
+    # publish job below, which is also disabled.
+    if: false
     # The Windows wheel only differs from the Ubuntu build by the
     # bundled `opus.dll`, but it must be built on a Windows runner so
     # vcpkg can produce a binary that matches the runtime ABI users
@@ -324,7 +336,11 @@ jobs:
           name: python-package-distributions-linux
           path: dist/
 
+      # Temporarily disabled for v0.9.0 — paired with the
+      # `build-windows-wheel` job disable above. Restore in v0.9.1
+      # once the opus.dll SHA drift root cause is fixed.
       - name: Download Windows wheel (win_amd64)
+        if: false
         uses: actions/download-artifact@v4
         with:
           name: python-package-distributions-windows
