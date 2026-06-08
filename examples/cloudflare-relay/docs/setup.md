@@ -69,25 +69,21 @@ Verify it is running:
 
     cloudflared tunnel info stackchan-relay-backend
 
-## Step 4: Generate the shared secrets
+## Step 4: Generate the shared secret
 
-This example uses two separate Bearer tokens — one for the
-device-to-Worker boundary, one for the Worker-to-gateway boundary —
-so each segment can be rotated independently.
+This example uses a single shared Bearer token end-to-end. The
+firmware sends it on every connection (on-LAN mDNS-direct and
+off-LAN relayed); the Worker verifies it and forwards the same header
+to the gateway; the gateway (when started with `STACKCHAN_TOKEN`)
+re-verifies it. Using a single token keeps both the LAN and relay
+paths working with the same NVS configuration on the device.
 
 On your deployment workstation:
 
-    openssl rand -hex 32   # SHARED_SECRET (device <-> Worker)
-    openssl rand -hex 32   # UPSTREAM_TOKEN (Worker <-> gateway)
+    openssl rand -hex 32
 
-Save both outputs. You will set them on the Worker, on the
-Stack-chan device, and on the gateway in the next steps.
-
-If you intend to run the gateway without authentication (i.e., not
-passing `--token` to the gateway), you can skip generating
-`UPSTREAM_TOKEN`. Be aware that the tunnel hostname then becomes an
-unauthenticated endpoint — anyone who learns the hostname can reach
-the gateway directly without going through the Worker.
+Save the output. You will set it on the Worker, on the Stack-chan
+device, and on the gateway.
 
 ## Step 5: Deploy the Worker
 
@@ -103,15 +99,10 @@ Worker performs the WebSocket upgrade by issuing `fetch()` with
     [vars]
     UPSTREAM_URL = "https://stackchan-relay-backend.<your-domain>"
 
-Register the device-to-Worker shared secret (do not commit it):
+Register the shared secret (do not commit it):
 
     npx wrangler secret put SHARED_SECRET
-    # paste the SHARED_SECRET value from Step 4 when prompted
-
-If you generated `UPSTREAM_TOKEN` in Step 4, register it too:
-
-    npx wrangler secret put UPSTREAM_TOKEN
-    # paste the UPSTREAM_TOKEN value from Step 4 when prompted
+    # paste the secret from Step 4 when prompted
 
 Deploy:
 
@@ -124,14 +115,17 @@ device in Step 7.
 
 ## Step 6: Configure the gateway
 
-If you want the gateway to require an upstream Bearer token (matching
-the `UPSTREAM_TOKEN` registered with the Worker), start the gateway
-with `--token`. For example:
+Restart the gateway with the shared secret in the `STACKCHAN_TOKEN`
+environment variable. The gateway authenticates incoming WebSocket
+connections (both LAN-direct from the device and relayed from the
+Worker) against this value:
 
-    uv run stackchan-mcp --token <UPSTREAM_TOKEN value>
+    STACKCHAN_TOKEN=<shared-secret value> uv run stackchan-mcp
 
-If you skip this and start the gateway without `--token`, the tunnel
-hostname becomes an unauthenticated endpoint (see Step 4 trade-off).
+If you skip setting `STACKCHAN_TOKEN`, the gateway accepts connections
+without authentication. The tunnel hostname then becomes an
+unauthenticated endpoint — anyone who learns the hostname can reach
+the gateway without going through the Worker.
 
 ## Step 7: Configure the Stack-chan device
 
@@ -142,14 +136,15 @@ UI, set:
 - `websocket.url` → leave empty (the firmware uses mDNS auto-discovery
   for the LAN case).
 - `websocket.fallback_url` → the Worker URL from Step 5, as `wss://`.
-- `websocket.token` → the `SHARED_SECRET` value from Step 4.
+- `websocket.token` → the shared secret from Step 4.
 
 Save and reboot the device. The firmware will:
 
 1. Attempt mDNS discovery first (LAN case, about 5s timeout).
 2. If mDNS yields no candidates, fall back to the Worker URL.
-3. Send the Bearer token in the `Authorization` header for the Worker
-   to verify.
+3. Send the Bearer token in the `Authorization` header on every
+   candidate (so the gateway authenticates both LAN-direct and
+   relayed connections with the same value).
 
 ## Step 8: Verify
 
@@ -168,16 +163,18 @@ the Bearer token verified.
 - `unauthorized` (HTTP 401) from the Worker: the Bearer token on the
   device does not match the Worker's `SHARED_SECRET`. Re-check both,
   and rotate the secret if leaked (see `secret-rotation.md`).
+- `relay misconfigured: SHARED_SECRET unset` (HTTP 500) from the
+  Worker: the `SHARED_SECRET` Wrangler secret is not registered.
+  Run `npx wrangler secret put SHARED_SECRET` (see Step 5).
 - `upstream unreachable` (HTTP 502) from the Worker: usually one of:
   - `cloudflared` is not connected on the gateway host (check
     `cloudflared tunnel info` there).
   - The tunnel ingress is misconfigured.
   - The gateway is not running on `localhost:8765`.
-  - The gateway is started with `--token <upstream-secret>` but the
-    Worker does not have `UPSTREAM_TOKEN` set (the gateway returns
-    401 and the Worker surfaces 502). Register `UPSTREAM_TOKEN` via
-    `wrangler secret put` (see Step 5) so it matches the gateway's
-    `--token` value.
+  - The gateway is started with `STACKCHAN_TOKEN=<value>` but the
+    Worker has a different `SHARED_SECRET`. The gateway then
+    returns 401 and the Worker surfaces 502. Make sure the two
+    values are identical.
 - The device never falls back to the Worker URL on-LAN: this is
   expected. mDNS auto-discovery wins on-LAN; the Worker URL is only
   used when mDNS fails to resolve a candidate.

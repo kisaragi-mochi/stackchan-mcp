@@ -7,14 +7,12 @@
 #      `https://` form (the Worker performs the WebSocket upgrade by
 #      issuing fetch() with `Upgrade: websocket`, which requires an
 #      http/https URL).
-#   3. Register the device-to-Worker shared Bearer token:
+#   3. Register the shared Bearer secret used end-to-end (device <->
+#      Worker <-> gateway). The Worker verifies it against the
+#      incoming Authorization header and forwards the same header to
+#      the upstream gateway:
 #        wrangler secret put SHARED_SECRET
-#   4. If the gateway is started with `--token <upstream-secret>`,
-#      register the Worker-to-gateway Bearer token as well:
-#        wrangler secret put UPSTREAM_TOKEN
-#      (omit this step if the gateway has no token; see README for the
-#      security trade-off.)
-#   5. Deploy:
+#   4. Deploy:
 #        wrangler deploy
 
 name = "stackchan-relay"

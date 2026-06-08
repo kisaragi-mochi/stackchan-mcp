@@ -3,13 +3,6 @@
 interface Env {
   SHARED_SECRET: string;
   UPSTREAM_URL: string;
-  // Optional Bearer token presented to the upstream gateway. Set this
-  // via `wrangler secret put UPSTREAM_TOKEN` only when the gateway is
-  // started with `--token <upstream-secret>`. When unset, the Worker
-  // does not send an Authorization header upstream — meaning the
-  // tunnel hostname is effectively unauthenticated. See README for
-  // the security trade-off.
-  UPSTREAM_TOKEN?: string;
 }
 
 export default {
@@ -21,6 +14,16 @@ export default {
     }
 
     // 2. Verify the Authorization Bearer token using constant-time comparison.
+    //    Fail closed if SHARED_SECRET is unset — without this guard, a
+    //    misconfigured deployment would compare against the literal
+    //    string "Bearer undefined" and authenticate any client that
+    //    presented that value.
+    if (!env.SHARED_SECRET) {
+      return new Response(
+        "relay misconfigured: SHARED_SECRET unset",
+        { status: 500 },
+      );
+    }
     const auth = req.headers.get("Authorization") ?? "";
     const expected = "Bearer " + env.SHARED_SECRET;
     if (!constantTimeEqual(auth, expected)) {
@@ -28,21 +31,20 @@ export default {
     }
 
     // 3. Open the upstream WebSocket through the configured Cloudflare Tunnel.
-    //    Forward the firmware's identity headers. The device-side
-    //    Authorization header is terminated at this Worker; if the
-    //    gateway requires its own Bearer token, attach it from
-    //    UPSTREAM_TOKEN here.
-    const upstreamHeaders: Record<string, string> = {
-      Upgrade: "websocket",
-      "Protocol-Version": req.headers.get("Protocol-Version") ?? "",
-      "Device-Id": req.headers.get("Device-Id") ?? "",
-      "Client-Id": req.headers.get("Client-Id") ?? "",
-    };
-    if (env.UPSTREAM_TOKEN) {
-      upstreamHeaders["Authorization"] = "Bearer " + env.UPSTREAM_TOKEN;
-    }
+    //    Forward the device's Authorization header to the gateway so
+    //    a gateway started with STACKCHAN_TOKEN=<SHARED_SECRET> can
+    //    re-verify the same Bearer. The firmware sends the same NVS
+    //    `websocket.token` on every candidate, so on-LAN mDNS-direct
+    //    and off-LAN relayed connections present the same value to
+    //    the gateway.
     const upstreamReq = new Request(env.UPSTREAM_URL, {
-      headers: upstreamHeaders,
+      headers: {
+        Upgrade: "websocket",
+        Authorization: auth,
+        "Protocol-Version": req.headers.get("Protocol-Version") ?? "",
+        "Device-Id": req.headers.get("Device-Id") ?? "",
+        "Client-Id": req.headers.get("Client-Id") ?? "",
+      },
     });
     const upstreamRes = await fetch(upstreamReq);
     if (upstreamRes.status !== 101 || !upstreamRes.webSocket) {

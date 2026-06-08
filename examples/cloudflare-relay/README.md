@@ -18,17 +18,18 @@ behind NAT.
             │
             ▼
       Cloudflare Workers (this example)
-       ─ verifies device Bearer token (constant-time compare)
+       ─ verifies Bearer token (constant-time compare)
        ─ proxies the WebSocket bidirectionally
-       ─ attaches its own Authorization: Bearer <UPSTREAM_TOKEN>
-         when set (otherwise the upstream is unauthenticated)
+       ─ forwards the same Authorization header upstream
             │
             ▼ fetch (WS upgrade, https://)
       Cloudflare Tunnel hostname (cloudflared on the gateway host)
             │
             ▼
       stackchan-mcp gateway (ws://localhost:8765,
-        started with --token <UPSTREAM_TOKEN> for defence-in-depth)
+        started with STACKCHAN_TOKEN=<SHARED_SECRET> so it
+        authenticates both mDNS-direct and relayed connections
+        with the same Bearer)
 
 The Stack-chan firmware tries mDNS auto-discovery first (LAN case), and
 falls back to the configured `websocket.fallback_url` (this Worker's
@@ -67,14 +68,15 @@ without any external dependency.
   use exponential backoff.
 - Traffic is proxied through Cloudflare edge, adding small latency on
   top of the direct Tunnel-to-gateway hop.
-- This example uses two layered Bearer tokens for authentication:
-  `SHARED_SECRET` between the device and the Worker, and an optional
-  `UPSTREAM_TOKEN` between the Worker and the gateway (active when
-  the gateway is started with `--token <upstream-secret>`). Without
-  `UPSTREAM_TOKEN`, the tunnel hostname is effectively
-  unauthenticated; with it, both boundaries require a valid Bearer.
-  Treat both as you would any production secret; see
-  `docs/secret-rotation.md` for rotation guidance.
+- This example uses a single shared Bearer token (`SHARED_SECRET`)
+  end-to-end. The firmware sends it on every WebSocket connection
+  (both mDNS-direct on-LAN and Worker-relayed off-LAN); the Worker
+  verifies it and forwards the same `Authorization` header upstream;
+  the gateway re-verifies it when started with
+  `STACKCHAN_TOKEN=<SHARED_SECRET>`. A single shared secret matches
+  the firmware's behaviour of sending the same NVS `websocket.token`
+  on every candidate. Treat it as you would any production secret;
+  see `docs/secret-rotation.md` for rotation guidance.
 - This example deliberately avoids beta Cloudflare features (e.g.,
   Workers VPC bindings). It uses only generally-available primitives
   (Workers WS API, Cloudflare Tunnel public hostnames).
