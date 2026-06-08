@@ -3,6 +3,13 @@
 interface Env {
   SHARED_SECRET: string;
   UPSTREAM_URL: string;
+  // Optional Bearer token presented to the upstream gateway. Set this
+  // via `wrangler secret put UPSTREAM_TOKEN` only when the gateway is
+  // started with `--token <upstream-secret>`. When unset, the Worker
+  // does not send an Authorization header upstream — meaning the
+  // tunnel hostname is effectively unauthenticated. See README for
+  // the security trade-off.
+  UPSTREAM_TOKEN?: string;
 }
 
 export default {
@@ -21,14 +28,21 @@ export default {
     }
 
     // 3. Open the upstream WebSocket through the configured Cloudflare Tunnel.
-    //    Forward the firmware's identity headers (but not Authorization).
+    //    Forward the firmware's identity headers. The device-side
+    //    Authorization header is terminated at this Worker; if the
+    //    gateway requires its own Bearer token, attach it from
+    //    UPSTREAM_TOKEN here.
+    const upstreamHeaders: Record<string, string> = {
+      Upgrade: "websocket",
+      "Protocol-Version": req.headers.get("Protocol-Version") ?? "",
+      "Device-Id": req.headers.get("Device-Id") ?? "",
+      "Client-Id": req.headers.get("Client-Id") ?? "",
+    };
+    if (env.UPSTREAM_TOKEN) {
+      upstreamHeaders["Authorization"] = "Bearer " + env.UPSTREAM_TOKEN;
+    }
     const upstreamReq = new Request(env.UPSTREAM_URL, {
-      headers: {
-        Upgrade: "websocket",
-        "Protocol-Version": req.headers.get("Protocol-Version") ?? "",
-        "Device-Id": req.headers.get("Device-Id") ?? "",
-        "Client-Id": req.headers.get("Client-Id") ?? "",
-      },
+      headers: upstreamHeaders,
     });
     const upstreamRes = await fetch(upstreamReq);
     if (upstreamRes.status !== 101 || !upstreamRes.webSocket) {

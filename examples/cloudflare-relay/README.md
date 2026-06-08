@@ -14,18 +14,21 @@ behind NAT.
 ## Overview
 
     Stack-chan (ESP32 firmware)
-      └── WSS (Authorization: Bearer <shared-secret>)
+      └── WSS (Authorization: Bearer <SHARED_SECRET>)
             │
             ▼
       Cloudflare Workers (this example)
-       ─ verifies Bearer token (constant-time compare)
+       ─ verifies device Bearer token (constant-time compare)
        ─ proxies the WebSocket bidirectionally
+       ─ attaches its own Authorization: Bearer <UPSTREAM_TOKEN>
+         when set (otherwise the upstream is unauthenticated)
             │
-            ▼ fetch (WS upgrade)
+            ▼ fetch (WS upgrade, https://)
       Cloudflare Tunnel hostname (cloudflared on the gateway host)
             │
             ▼
-      stackchan-mcp gateway (ws://localhost:8765)
+      stackchan-mcp gateway (ws://localhost:8765,
+        started with --token <UPSTREAM_TOKEN> for defence-in-depth)
 
 The Stack-chan firmware tries mDNS auto-discovery first (LAN case), and
 falls back to the configured `websocket.fallback_url` (this Worker's
@@ -64,8 +67,13 @@ without any external dependency.
   use exponential backoff.
 - Traffic is proxied through Cloudflare edge, adding small latency on
   top of the direct Tunnel-to-gateway hop.
-- This example uses a single shared Bearer token for authentication.
-  Treat it as you would any production secret; see
+- This example uses two layered Bearer tokens for authentication:
+  `SHARED_SECRET` between the device and the Worker, and an optional
+  `UPSTREAM_TOKEN` between the Worker and the gateway (active when
+  the gateway is started with `--token <upstream-secret>`). Without
+  `UPSTREAM_TOKEN`, the tunnel hostname is effectively
+  unauthenticated; with it, both boundaries require a valid Bearer.
+  Treat both as you would any production secret; see
   `docs/secret-rotation.md` for rotation guidance.
 - This example deliberately avoids beta Cloudflare features (e.g.,
   Workers VPC bindings). It uses only generally-available primitives
