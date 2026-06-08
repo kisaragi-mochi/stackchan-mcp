@@ -309,7 +309,17 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [build, build-windows-wheel]
+    # `build-windows-wheel` is temporarily removed from `needs` for
+    # v0.9.0 (paired with the `if: false` on that job above): when a
+    # job is `if: false`-skipped, GitHub Actions skip-propagates to
+    # downstream jobs that list it in `needs` unless we explicitly
+    # override with `always()` plus a per-need result check. Removing
+    # it from `needs` is the simpler revert path for v0.9.1 — just
+    # re-add `build-windows-wheel` to this list and drop the `if`
+    # disables above. The `Download Windows wheel (win_amd64)` step
+    # below is also disabled, so this publish job ships only the
+    # Linux sdist + py3-none-any wheel for v0.9.0.
+    needs: [build]
     # Only publish on tag pushes. workflow_dispatch invocations stop at
     # the build job above, so manual runs cannot release. The
     # `startsWith(github.ref, 'refs/tags/v')` guard makes the intent
