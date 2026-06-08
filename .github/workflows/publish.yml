@@ -274,25 +274,46 @@ jobs:
       - name: Build wheel (win_amd64)
         working-directory: gateway
         shell: pwsh
-        # `uv build --wheel` produces `*-py3-none-any.whl` by default;
-        # override the platform tag with cibuildwheel-style tag args via
-        # hatch's `--target-platform`-equivalent. Since hatchling does
-        # not have a CLI override for the wheel tag, rely on uv build's
-        # `--target` flag if available; otherwise fall back to renaming.
+        # `uv build --wheel` produces a `*-py3-none-any.whl` by
+        # default; rewrite the wheel's platform tag to `win_amd64` via
+        # the `wheel tags` CLI so both the filename and the internal
+        # `.dist-info/WHEEL` `Tag:` line say `win_amd64`. The earlier
+        # filename-only rename (introduced in PR #217) produced a
+        # wheel whose filename and internal metadata disagreed —
+        # wheel-validating tools would flag this as a malformed
+        # distribution. Codex review of v0.9.1 caught the
+        # inconsistency; this commit fixes it as part of the
+        # Windows wheel restore.
         run: |
-          # Use uv build to produce the wheel, then rename the
-          # platform tag from `any` to `win_amd64` so pip resolves it
-          # only on Windows x64 installs. hatchling does not auto-tag
-          # based on bundled binaries.
           uv build --wheel
+          # `wheel` is not a runtime dependency of stackchan-mcp; it
+          # is installed explicitly into the project env here so that
+          # `uv run python -m wheel tags ...` is available regardless
+          # of resolver caching behavior between runs.
+          uv pip install wheel
           $wheels = Get-ChildItem dist\*-py3-none-any.whl
           if ($wheels.Count -ne 1) {
             Write-Error "Expected exactly one py3-none-any wheel, found $($wheels.Count)"
             exit 1
           }
           $src = $wheels[0].FullName
-          $dst = $src -replace '-py3-none-any\.whl$', '-py3-none-win_amd64.whl'
-          Rename-Item -Path $src -NewName (Split-Path -Leaf $dst)
+          # Rewrite the wheel's platform tag in-place; `--remove`
+          # deletes the source `py3-none-any` wheel so only the
+          # `win_amd64` wheel remains in dist/.
+          uv run python -m wheel tags --platform-tag win_amd64 --remove $src
+          # Sanity check the produced wheel: exactly one win_amd64
+          # wheel and no leftover py3-none-any wheel should be in
+          # dist/ at this point.
+          $built = Get-ChildItem dist\*-win_amd64.whl
+          if ($built.Count -ne 1) {
+            Write-Error "Expected exactly one win_amd64 wheel after `wheel tags`, found $($built.Count)"
+            exit 1
+          }
+          $stale = Get-ChildItem dist\*-py3-none-any.whl -ErrorAction SilentlyContinue
+          if ($stale -ne $null -and $stale.Count -gt 0) {
+            Write-Error "Stale py3-none-any wheel still present after `wheel tags --remove`: $($stale -join ', ')"
+            exit 1
+          }
           Get-ChildItem dist\
 
       - name: Upload Windows wheel
