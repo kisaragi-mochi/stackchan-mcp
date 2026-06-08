@@ -109,6 +109,29 @@ jobs:
         working-directory: gateway
         run: uv lock --check
 
+      - name: Verify CHANGELOG.md has dated section for this tag
+        # Mirrors the firmware-release.yml CHANGELOG gate: refuse to
+        # publish a release tag that does not have a matching dated
+        # `## [X.Y.Z] - YYYY-MM-DD` section in CHANGELOG.md, so the
+        # promotion of `[Unreleased]` entries into a dated section is
+        # enforced rather than documented-only. The `changelog-check`
+        # gate in build.yml skips on `release:`-titled PRs (release
+        # promotion intentionally leaves [Unreleased] body unchanged
+        # between base and head); this tag-time gate is the
+        # authoritative floor for gateway releases, paired with the
+        # equivalent gate in firmware-release.yml.
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # Tag form is `vX.Y.Z`; the CHANGELOG heading form is
+          # `## [X.Y.Z] - YYYY-MM-DD`.
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! grep -qE "^## \[${VERSION}\] - " CHANGELOG.md; then
+            echo "::error title=Missing CHANGELOG section for ${GITHUB_REF_NAME}::CHANGELOG.md does not contain a dated section for this tag. Expected heading like: ## [${VERSION}] - YYYY-MM-DD"
+            echo "Add the section to CHANGELOG.md (promote the [Unreleased] entries into a new dated section) before pushing the tag."
+            exit 1
+          fi
+          echo "CHANGELOG.md contains a dated section for ${GITHUB_REF_NAME}."
+
       - name: Install gateway dependencies
         working-directory: gateway
         run: uv sync --frozen
