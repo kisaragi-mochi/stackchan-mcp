@@ -146,7 +146,15 @@ jobs:
   changelog-check:
     name: CHANGELOG check
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # Skip on `release:`-titled PRs: release-promotion PRs move
+    # entries from [Unreleased] into a new dated release section, so
+    # the [Unreleased] body is legitimately unchanged between base
+    # and head when the previous release had already drained it. The
+    # release-time gate in `firmware-release.yml` (and the
+    # `Verify CHANGELOG.md ...` step in `publish.yml`) is the
+    # authoritative check that the promoted section exists for the
+    # tag being pushed.
+    if: github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'release:')
 
     steps:
       - name: Checkout repository
