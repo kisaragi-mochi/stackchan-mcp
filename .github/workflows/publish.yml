@@ -144,18 +144,18 @@ jobs:
   build-windows-wheel:
     name: Build win_amd64 wheel
     needs: build
-    # Temporarily disabled for v0.9.0: the produced opus.dll is
-    # non-deterministic across runs on the current windows-latest
-    # runner-image (the SHA256 verify guard observes a different hash
-    # each build), so the pinned EXPECTED_OPUS_DLL_SHA256 cannot match.
-    # Restore in v0.9.1 once the SHA drift root cause is fixed (the
-    # likely path is replacing the byte-identical-binary guard with a
-    # functional smoke test, so each build's freshly produced opus.dll
-    # is verified by exercising the loader / encode round-trip instead
-    # of by hash comparison against a previously reviewed binary).
-    # Paired with the `Download Windows wheel (win_amd64)` step in the
-    # publish job below, which is also disabled.
-    if: false
+    # Restored in v0.9.1 after the v0.9.0 hotfix (#274) temporarily
+    # disabled this job. The byte-identical SHA256 guard against a
+    # pinned EXPECTED_OPUS_DLL_SHA256 was retired here because the
+    # current windows-latest runner image produces non-deterministic
+    # opus.dll across builds (windows-latest → windows-2025-vs2026
+    # transition; MSVC under the new image embeds non-deterministic
+    # build info). The functional smoke test in the publish job below
+    # (`Smoke test bundled opus loader`, which loads opus.dll via
+    # opuslib and runs an Opus encode round-trip) is now the publish
+    # gate. The VCPKG_PIN below still locks the supply chain to a
+    # reviewed vcpkg release tag.
+    #
     # The Windows wheel only differs from the Ubuntu build by the
     # bundled `opus.dll`, but it must be built on a Windows runner so
     # vcpkg can produce a binary that matches the runtime ABI users
@@ -177,14 +177,15 @@ jobs:
       # https://github.com/microsoft/vcpkg/releases
       # Pinned to 2026.04.27 → Opus 1.5.2 port-version 1.
       VCPKG_PIN: "2026.04.27"
-      # Expected SHA256 of the produced opus.dll. Re-derived only when
-      # VCPKG_PIN or the windows-latest runner-image MSVC version
-      # changes. To rotate: run this workflow via `workflow_dispatch`
-      # (or watch the next tag run), copy the actual hash from the
-      # "Verify opus.dll SHA256" step below, and commit. An empty
-      # value intentionally fails the comparison so a missing pin
-      # cannot silently ship.
-      EXPECTED_OPUS_DLL_SHA256: "99cd252b09891398cefab997be8cdb1cebc9a40cafa1382c88ad32069560a864"
+      # NOTE: The previous EXPECTED_OPUS_DLL_SHA256 byte-identical
+      # guard was retired in v0.9.1 (see the job-level comment above).
+      # The functional smoke test in the publish job is now the
+      # publish gate; the freshly produced opus.dll must load via
+      # opuslib and pass an Opus encode round-trip on a real Windows
+      # runner before the wheel can ship. If deterministic builds
+      # are restored upstream (vcpkg + windows runner image), the
+      # SHA pin can be reintroduced as an additional reproducibility
+      # signal alongside the functional test, not as the sole gate.
 
     steps:
       - name: Checkout repository
@@ -224,30 +225,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dest_dir | Out-Null
           Copy-Item -Force $dll "$dest_dir\opus.dll"
 
-      # Block the wheel build on opus.dll SHA256 drift. Without this
-      # gate, a tag rerun (or a runner-image refresh that changes
-      # MSVC build behaviour) could silently ship a different native
-      # binary than the one reviewed for the release, defeating the
-      # vcpkg pin above.
-      - name: Verify opus.dll SHA256
+      # Confirm vcpkg actually produced opus.dll and capture its
+      # SHA256 for informational logging. Functional verification
+      # (load opus.dll via opuslib and run an Opus encode round-trip)
+      # happens in the publish job below — see `Smoke test bundled
+      # opus loader`. The byte-identical SHA256 guard was retired in
+      # v0.9.1; see the job-level comment above for the rationale.
+      - name: Confirm opus.dll was produced
         shell: pwsh
         run: |
           $dll = "$env:GITHUB_WORKSPACE\gateway\stackchan_mcp\_libs\opus.dll"
+          if (-not (Test-Path $dll)) {
+            Write-Output "::error::opus.dll was not produced by vcpkg install. Expected at $dll."
+            exit 1
+          }
           $actual = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower()
-          $expected = $env:EXPECTED_OPUS_DLL_SHA256.ToLower()
-          Write-Output "opus.dll SHA256 (actual):   $actual"
-          Write-Output "opus.dll SHA256 (expected): $expected"
-          if ([string]::IsNullOrWhiteSpace($expected)) {
-            Write-Output "::error::EXPECTED_OPUS_DLL_SHA256 is unset. Run this workflow via workflow_dispatch, then copy the actual hash above into the EXPECTED_OPUS_DLL_SHA256 env in .github/workflows/publish.yml and commit before tagging a release."
-            exit 1
-          }
-          if ($actual -ne $expected) {
-            Write-Output "::error::opus.dll SHA256 mismatch — vcpkg-side or runner-image drift detected. Refusing to publish a different binary than the one reviewed for this VCPKG_PIN."
-            exit 1
-          }
-          Write-Output "opus.dll SHA256: verified against EXPECTED_OPUS_DLL_SHA256."
+          Write-Output "opus.dll SHA256 (informational, not used as publish gate): $actual"
           # Expose for any downstream step (e.g. release notes) that
-          # may want to surface the verified hash.
+          # may want to surface the captured hash.
           "OPUS_DLL_SHA256=$actual" | Out-File -Append -FilePath $env:GITHUB_ENV
 
       - name: Set up uv
@@ -309,17 +304,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    # `build-windows-wheel` is temporarily removed from `needs` for
-    # v0.9.0 (paired with the `if: false` on that job above): when a
-    # job is `if: false`-skipped, GitHub Actions skip-propagates to
-    # downstream jobs that list it in `needs` unless we explicitly
-    # override with `always()` plus a per-need result check. Removing
-    # it from `needs` is the simpler revert path for v0.9.1 — just
-    # re-add `build-windows-wheel` to this list and drop the `if`
-    # disables above. The `Download Windows wheel (win_amd64)` step
-    # below is also disabled, so this publish job ships only the
-    # Linux sdist + py3-none-any wheel for v0.9.0.
-    needs: [build]
+    needs: [build, build-windows-wheel]
     # Only publish on tag pushes. workflow_dispatch invocations stop at
     # the build job above, so manual runs cannot release. The
     # `startsWith(github.ref, 'refs/tags/v')` guard makes the intent
@@ -346,11 +331,7 @@ jobs:
           name: python-package-distributions-linux
           path: dist/
 
-      # Temporarily disabled for v0.9.0 — paired with the
-      # `build-windows-wheel` job disable above. Restore in v0.9.1
-      # once the opus.dll SHA drift root cause is fixed.
       - name: Download Windows wheel (win_amd64)
-        if: false
         uses: actions/download-artifact@v4
         with:
           name: python-package-distributions-windows

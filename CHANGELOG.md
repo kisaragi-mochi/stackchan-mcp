@@ -30,6 +30,25 @@ documented-only.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-08
+
+### Gateway
+
+- Restored: Windows `win_amd64` wheel build (bundled native
+  `libopus`) by retiring the byte-identical SHA256 guard against the
+  pinned `EXPECTED_OPUS_DLL_SHA256` (which had become non-matchable
+  under the `windows-latest` → `windows-2025-vs2026` runner-image
+  transition — MSVC under the new image embeds non-deterministic
+  build info, so the produced `opus.dll` differs across runs). The
+  publish gate is now the functional smoke test in the publish job
+  (load `opus.dll` via `opuslib` and run an Opus encode round-trip
+  on a real Windows runner). The `VCPKG_PIN` (the reviewed vcpkg
+  release tag) still locks the supply chain to a known port. Pairs
+  with reverting the v0.9.0 hotfix
+  ([PR #274](https://github.com/kisaragi-mochi/stackchan-mcp/pull/274))
+  that temporarily disabled the `build-windows-wheel` job and
+  removed it from the publish job's `needs`.
+
 ## [firmware-v1.9.0] - 2026-06-08
 
 ### Firmware
@@ -1522,7 +1541,8 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.8.0...v0.9.0
 [firmware-v1.9.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.8.0...firmware-v1.9.0
 [firmware-v1.8.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.7.0...firmware-v1.8.0
