@@ -51,7 +51,7 @@ a Cloudflare-managed domain you own):
 
     ingress:
       - hostname: stackchan-relay-backend.<your-domain>
-        service: ws://localhost:8765
+        service: http://localhost:8765
       - service: http_status:404
 
 Then route the chosen hostname to the tunnel:
