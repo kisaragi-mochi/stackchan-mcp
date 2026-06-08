@@ -122,15 +122,28 @@ jobs:
         # equivalent gate in firmware-release.yml.
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: |
-          # Tag form is `vX.Y.Z`; the CHANGELOG heading form is
-          # `## [X.Y.Z] - YYYY-MM-DD`.
-          VERSION="${GITHUB_REF_NAME#v}"
-          if ! grep -qE "^## \[${VERSION}\] - " CHANGELOG.md; then
-            echo "::error title=Missing CHANGELOG section for ${GITHUB_REF_NAME}::CHANGELOG.md does not contain a dated section for this tag. Expected heading like: ## [${VERSION}] - YYYY-MM-DD"
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"   # e.g. v0.9.1
+          VERSION="${TAG#v}"          # e.g. 0.9.1
+          # Escape `.` for regex so a malformed heading like
+          # `## [0x9x1] - 2026-06-08` does not falsely match the
+          # dotted version on a naive grep.
+          VERSION_ESC=$(printf '%s' "$VERSION" | sed -E 's/\./\\./g')
+          # Match `## [<VERSION>] - YYYY-MM-DD` exactly (anchored line,
+          # no leading or trailing garbage). Require exactly one
+          # occurrence; zero is missing-section, more than one means
+          # a duplicate / botched promotion.
+          COUNT=$(grep -cE "^## \[${VERSION_ESC}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md || true)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error title=Missing CHANGELOG section for ${TAG}::CHANGELOG.md does not contain a dated section for this tag. Expected an exact heading like: ## [${VERSION}] - YYYY-MM-DD"
             echo "Add the section to CHANGELOG.md (promote the [Unreleased] entries into a new dated section) before pushing the tag."
             exit 1
           fi
-          echo "CHANGELOG.md contains a dated section for ${GITHUB_REF_NAME}."
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error title=Duplicate CHANGELOG section for ${TAG}::CHANGELOG.md has ${COUNT} dated sections for ${TAG}, expected exactly 1. Consolidate the duplicates before publishing."
+            exit 1
+          fi
+          echo "CHANGELOG entry for ${TAG} verified (exactly 1 dated section)."
 
       - name: Install gateway dependencies
         working-directory: gateway
