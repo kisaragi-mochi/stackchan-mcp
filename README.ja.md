@@ -155,10 +155,16 @@ path の後で引き続き試行されます。`CONFIG_FORCE_DEFAULT_WEBSOCKET_U
 compile out するには `CONFIG_STACKCHAN_MDNS_DISCOVERY=n` を設定します。
 discovery にはローカル LAN 上の UDP multicast が必要で、router や VLAN
 によっては遮断されます。複数のゲートウェイが見える場合、ファームウェア
-は最初の supported gateway service を選び、その service の usable IPv4
-address をそれぞれ試し、選択した instance / host / address list / port を
-log に出します。mDNS が見つけるのは URL だけで、認証は引き続き
+は 1 回の browse で見つかったすべての supported gateway service について
+usable IPv4 address をそれぞれ試し、accepted instance 数と candidate
+address list を log に出します。mDNS が見つけるのは URL だけで、認証は引き続き
 `websocket.token` / `CONFIG_DEFAULT_WEBSOCKET_TOKEN` が制御します。
+
+gateway host IPv4 が変わった後の自動復旧には、paired mDNS fix の両側が必要です:
+Gateway vA.B.C+ は host address 変更時に advertised service を更新し、
+Firmware vX.Y.Z+ は 1 回の browse で見つかったすべての supported mDNS service
+instance を試します。それより古い firmware は、再起動するまで stale cache 上の
+instance を試し続ける場合があります。
 
 ファームウェアはゲートウェイ接続のために以下の NVS キーを参照します:
 

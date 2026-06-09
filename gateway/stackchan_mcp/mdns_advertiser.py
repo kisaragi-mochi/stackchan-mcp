@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import socket
@@ -280,15 +281,57 @@ def build_advertisement(
 class MdnsAdvertiser:
     """Registers the gateway's WebSocket endpoint via mDNS/DNS-SD."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, refresh_interval: float = 30.0) -> None:
+        if refresh_interval < 10.0 or refresh_interval > 300.0:
+            raise ValueError("refresh_interval must be between 10.0 and 300.0 seconds")
+        self._lock: asyncio.Lock = asyncio.Lock()
         self._zeroconf: Any | None = None
         self._service_info: Any | None = None
+        self._refresh_task: asyncio.Task | None = None
+        self._last_advertised_addresses: tuple[str, ...] | None = None
+        self._refresh_interval: float = refresh_interval
+        self._start_args: dict[str, Any] | None = None
 
     async def start(self, *, host: str, port: int, path: str = "/") -> None:
+        task = self._refresh_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=1.0)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+
+        async with self._lock:
+            self._refresh_task = None
+            if self._zeroconf is not None:
+                await self._close_zeroconf_locked()
+            self._start_args = {"host": host, "port": port, "path": path}
+            try:
+                advertisement = await self._start_locked(host=host, port=port, path=path)
+            except Exception:
+                self._start_args = None
+                self._last_advertised_addresses = None
+                raise
+            if advertisement is None:
+                self._start_args = None
+                self._last_advertised_addresses = None
+                return
+            self._last_advertised_addresses = tuple(advertisement.parsed_addresses)
+            self._refresh_task = asyncio.create_task(self._refresh_loop())
+
+    async def _start_locked(
+        self, *, host: str, port: int, path: str = "/"
+    ) -> MdnsAdvertisement | None:
         advertisement = build_advertisement(host=host, port=port, path=path)
         if advertisement is None:
-            return
+            return None
 
+        await self._register_advertisement_locked(advertisement)
+        return advertisement
+
+    async def _register_advertisement_locked(
+        self, advertisement: MdnsAdvertisement
+    ) -> None:
         AsyncZeroconf, ServiceInfo = _load_zeroconf_classes()
         # Constrain zeroconf to the IPv4 interfaces we actually advertise on.
         # The default ``InterfaceChoice.All`` makes zeroconf bind a socket on
@@ -326,13 +369,28 @@ class MdnsAdvertiser:
                 advertisement.service_name,
             )
         logger.info(
-            "mDNS advertising %s on port %d with addresses %s",
+            "mDNS advertising %s on port %d with addresses %s reason=register",
             registered_name,
             advertisement.port,
             ", ".join(advertisement.parsed_addresses),
         )
 
     async def stop(self) -> None:
+        task = self._refresh_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=1.0)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+
+        async with self._lock:
+            await self._close_zeroconf_locked()
+            self._refresh_task = None
+            self._last_advertised_addresses = None
+            self._start_args = None
+
+    async def _close_zeroconf_locked(self) -> None:
         zeroconf = self._zeroconf
         info = self._service_info
         self._zeroconf = None
@@ -345,3 +403,69 @@ class MdnsAdvertiser:
                 await zeroconf.async_unregister_service(info)
         finally:
             await zeroconf.async_close()
+
+    async def _reconfigure(self) -> None:
+        async with self._lock:
+            if self._start_args is None:
+                return
+            old_addresses = self._last_advertised_addresses
+            advertisement = build_advertisement(**self._start_args)
+            if advertisement is None:
+                logger.info(
+                    "mDNS reconfigure skipped: build_advertisement returned None "
+                    "(transient empty address state); refresh loop continues "
+                    "reason=transient_empty_address_state old=%s",
+                    old_addresses,
+                )
+                return
+
+            await self._close_zeroconf_locked()
+            await self._register_advertisement_locked(advertisement)
+            new_addresses = tuple(advertisement.parsed_addresses)
+            self._last_advertised_addresses = new_addresses
+            registered_name = getattr(
+                self._service_info,
+                "name",
+                advertisement.service_name,
+            )
+            logger.info(
+                "mDNS reconfigured: reason=address_changed old=%s new=%s "
+                "registered_name=%s",
+                old_addresses,
+                new_addresses,
+                registered_name,
+            )
+
+    async def _refresh_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self._refresh_interval)
+                current_addresses = tuple(_enumerate_usable_ipv4_addresses())
+                old_addresses = self._last_advertised_addresses
+                if current_addresses == old_addresses:
+                    continue
+
+                logger.info(
+                    "mDNS refresh observed address change: reason=address_changed "
+                    "old=%s new=%s debounce=started",
+                    old_addresses,
+                    current_addresses,
+                )
+                await asyncio.sleep(self._refresh_interval)
+                confirmed_addresses = tuple(_enumerate_usable_ipv4_addresses())
+                if confirmed_addresses != current_addresses:
+                    logger.info(
+                        "mDNS refresh dropped transient address change: "
+                        "reason=debounce_mismatch old=%s first=%s second=%s",
+                        old_addresses,
+                        current_addresses,
+                        confirmed_addresses,
+                    )
+                    continue
+
+                await self._reconfigure()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("mDNS refresh loop error; continuing")
+                continue

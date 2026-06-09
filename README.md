@@ -156,11 +156,17 @@ The gateway advertises mDNS by default; run `stackchan-mcp --no-mdns` to
 disable advertisement. To compile out firmware discovery, set
 `CONFIG_STACKCHAN_MDNS_DISCOVERY=n`. Discovery requires UDP multicast on the
 local LAN, and some routers or VLANs block it. When multiple gateways are
-visible, the firmware picks the first supported gateway service, tries each
-usable IPv4 address from that service, and logs the selected instance, host,
-address list, and port. mDNS only discovers the URL;
+visible, the firmware tries each usable IPv4 address from every supported
+gateway service discovered in one browse, and logs the accepted instance count
+and candidate address list. mDNS only discovers the URL;
 `websocket.token` / `CONFIG_DEFAULT_WEBSOCKET_TOKEN` still control
 authentication.
+
+Automatic recovery after a gateway host IPv4 change requires both sides of the
+paired mDNS fix: Gateway vA.B.C+ refreshes the advertised service when the host
+address changes, and Firmware vX.Y.Z+ tries all supported mDNS service
+instances from a browse. Earlier firmware may keep trying a stale cached
+instance until reboot.
 
 The firmware reads these NVS keys for the gateway connection:
 
