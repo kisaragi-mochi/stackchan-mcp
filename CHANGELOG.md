@@ -30,6 +30,8 @@ documented-only.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-09
+
 ### Gateway
 
 - Add periodic IP-change detection to the mDNS advertiser; the gateway now
@@ -38,18 +40,9 @@ documented-only.
   Recovery latency is bounded by approximately `2 × refresh_interval` (one
   polling interval to observe the address change, plus one debounce-confirm
   interval before re-registering; default 30 s → worst case ~60 s).
-  Pair with Firmware vX.Y.Z+ for automatic device-side recovery — earlier
+  Pair with Firmware v1.10.0+ for automatic device-side recovery — earlier
   firmware versions may still get stuck on the stale mDNS instance until
   manual reboot. (#277)
-
-### Firmware
-
-- mDNS gateway discovery now considers all supported `_stackchan-mcp._tcp.local.`
-  service instances in one browse, not only the first. Combined with Gateway
-  vA.B.C+ mDNS IP refresh, the device recovers automatically from a gateway
-  host-IP change even while a stale mDNS instance is still in the cache. The
-  existing `websocket_protocol.cc` per-candidate fallback (5→30 s reconnect
-  backoff) handles the additional candidates. (#277)
 
 ### Examples
 
@@ -59,6 +52,17 @@ documented-only.
   authentication, deployment instructions, and a shared-secret
   rotation guide. The Worker uses only generally-available Cloudflare
   primitives (Workers WS API, Cloudflare Tunnel public hostnames).
+
+## [firmware-v1.10.0] - 2026-06-09
+
+### Firmware
+
+- mDNS gateway discovery now considers all supported `_stackchan-mcp._tcp.local.`
+  service instances in one browse, not only the first. Combined with Gateway
+  v0.10.0+ mDNS IP refresh, the device recovers automatically from a gateway
+  host-IP change even while a stale mDNS instance is still in the cache. The
+  existing `websocket_protocol.cc` per-candidate fallback (5→30 s reconnect
+  backoff) handles the additional candidates. (#277)
 
 ## [0.9.1] - 2026-06-08
 
@@ -1571,7 +1575,9 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.1...v0.10.0
+[firmware-v1.10.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.9.0...firmware-v1.10.0
 [0.9.1]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.8.0...v0.9.0
 [firmware-v1.9.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.8.0...firmware-v1.9.0
