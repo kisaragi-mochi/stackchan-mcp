@@ -260,11 +260,15 @@ std::optional<std::vector<MdnsGatewayCandidate>> DiscoverStackchanGateway(uint32
 
     if (all_candidates.has_value()) {
         std::string addresses = JoinCandidateAddresses(*all_candidates);
+        // Cast size_t to unsigned int and use %u to stay nano-printf-safe
+        // (newlib-nano in ESP-IDF does not handle %zu; the misaligned arg
+        // would then read the size_t as a string pointer and crash). Same
+        // pattern as firmware/main/boards/stackchan/avatar_set_fetcher.cc.
         ESP_LOGI(TAG,
-                 "mDNS gateway browse complete: raw_results=%d accepted_instances=%d candidates=%zu addresses=%s",
+                 "mDNS gateway browse complete: raw_results=%d accepted_instances=%d candidates=%u addresses=%s",
                  result_count,
                  extracted.accepted_instances,
-                 all_candidates->size(),
+                 static_cast<unsigned int>(all_candidates->size()),
                  addresses.c_str());
     } else if (result_count == 0) {
         ESP_LOGI(TAG, "No mDNS stackchan gateway services discovered");
