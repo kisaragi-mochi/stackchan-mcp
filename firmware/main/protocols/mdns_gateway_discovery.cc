@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #if CONFIG_STACKCHAN_MDNS_DISCOVERY
@@ -114,8 +115,75 @@ std::string JoinCandidateAddresses(const std::vector<MdnsGatewayCandidate>& cand
     return joined;
 }
 
+std::string JoinAddresses(const std::vector<std::string>& addresses) {
+    if (addresses.empty()) {
+        return std::string();
+    }
+    std::string joined = addresses.front();
+    for (size_t i = 1; i < addresses.size(); ++i) {
+        joined += ",";
+        joined += addresses[i];
+    }
+    return joined;
+}
+
 std::string BuildWebSocketUrl(const std::string& address, uint16_t port, const std::string& path) {
     return "ws://" + address + ":" + std::to_string(port) + path;
+}
+
+struct ExtractedGatewayCandidates {
+    int accepted_instances = 0;
+    std::vector<MdnsGatewayCandidate> candidates;
+};
+
+ExtractedGatewayCandidates ExtractGatewayCandidatesFromMdnsResults(const mdns_result_t* results,
+                                                                   int result_count) {
+    ExtractedGatewayCandidates extracted;
+    for (const mdns_result_t* result = results; result != nullptr; result = result->next) {
+        std::string instance_name = SafeString(result->instance_name);
+        std::string hostname = SafeString(result->hostname);
+
+        auto version = TxtValue(result, "version");
+        if (version.has_value() && *version != "1") {
+            ESP_LOGI(TAG,
+                     "Skipping mDNS gateway instance=\"%s\" host=\"%s\": unsupported TXT version=\"%s\"",
+                     instance_name.c_str(), hostname.c_str(), version->c_str());
+            continue;
+        }
+
+        if (result->port == 0) {
+            ESP_LOGW(TAG, "Skipping mDNS gateway instance=\"%s\" host=\"%s\": zero port",
+                     instance_name.c_str(), hostname.c_str());
+            continue;
+        }
+
+        auto addresses = UsableIpv4Addresses(result);
+        if (addresses.empty()) {
+            ESP_LOGI(TAG, "Skipping mDNS gateway instance=\"%s\" host=\"%s\": no usable IPv4 address",
+                     instance_name.c_str(), hostname.c_str());
+            continue;
+        }
+
+        std::string path = NormalizePath(TxtValue(result, "path"));
+        ESP_LOGI(TAG,
+                 "Accepting mDNS gateway instance=\"%s\" host=\"%s\" port=%u path=\"%s\" addresses=%s",
+                 instance_name.c_str(), hostname.c_str(),
+                 static_cast<unsigned>(result->port), path.c_str(),
+                 JoinAddresses(addresses).c_str());
+        ++extracted.accepted_instances;
+        for (const auto& address : addresses) {
+            MdnsGatewayCandidate candidate;
+            candidate.url = BuildWebSocketUrl(address, result->port, path);
+            candidate.instance_name = instance_name;
+            candidate.hostname = hostname;
+            candidate.address = address;
+            candidate.port = result->port;
+            candidate.path = path;
+            candidate.result_count = result_count;
+            extracted.candidates.push_back(candidate);
+        }
+    }
+    return extracted;
 }
 
 #endif  // CONFIG_STACKCHAN_MDNS_DISCOVERY
@@ -182,66 +250,31 @@ std::optional<std::vector<MdnsGatewayCandidate>> DiscoverStackchanGateway(uint32
     }
 
     int result_count = CountResults(results);
-    std::optional<std::vector<MdnsGatewayCandidate>> selected;
-
-    for (mdns_result_t* result = results; result != nullptr; result = result->next) {
-        std::string instance_name = SafeString(result->instance_name);
-        std::string hostname = SafeString(result->hostname);
-
-        auto version = TxtValue(result, "version");
-        if (version.has_value() && *version != "1") {
-            ESP_LOGI(TAG,
-                     "Skipping mDNS gateway instance=\"%s\" host=\"%s\": unsupported TXT version=\"%s\"",
-                     instance_name.c_str(), hostname.c_str(), version->c_str());
-            continue;
-        }
-
-        if (result->port == 0) {
-            ESP_LOGW(TAG, "Skipping mDNS gateway instance=\"%s\" host=\"%s\": zero port",
-                     instance_name.c_str(), hostname.c_str());
-            continue;
-        }
-
-        auto addresses = UsableIpv4Addresses(result);
-        if (addresses.empty()) {
-            ESP_LOGI(TAG, "Skipping mDNS gateway instance=\"%s\" host=\"%s\": no usable IPv4 address",
-                     instance_name.c_str(), hostname.c_str());
-            continue;
-        }
-
-        std::string path = NormalizePath(TxtValue(result, "path"));
-        std::vector<MdnsGatewayCandidate> candidates;
-        candidates.reserve(addresses.size());
-        for (const auto& address : addresses) {
-            MdnsGatewayCandidate candidate;
-            candidate.url = BuildWebSocketUrl(address, result->port, path);
-            candidate.instance_name = instance_name;
-            candidate.hostname = hostname;
-            candidate.address = address;
-            candidate.port = result->port;
-            candidate.path = path;
-            candidate.result_count = result_count;
-            candidates.push_back(candidate);
-        }
-        selected = candidates;
-        break;
+    // Keep the count next to the extracted candidates so summary logs stay
+    // accurate without a mutable out-parameter.
+    auto extracted = ExtractGatewayCandidatesFromMdnsResults(results, result_count);
+    std::optional<std::vector<MdnsGatewayCandidate>> all_candidates;
+    if (!extracted.candidates.empty()) {
+        all_candidates = std::move(extracted.candidates);
     }
 
-    if (selected.has_value()) {
-        const auto& first = selected->front();
-        std::string addresses = JoinCandidateAddresses(*selected);
+    if (all_candidates.has_value()) {
+        std::string addresses = JoinCandidateAddresses(*all_candidates);
+        // Cast size_t to unsigned int and use %u to stay nano-printf-safe
+        // (newlib-nano in ESP-IDF does not handle %zu; the misaligned arg
+        // would then read the size_t as a string pointer and crash). Same
+        // pattern as firmware/main/boards/stackchan/avatar_set_fetcher.cc.
         ESP_LOGI(TAG,
-                 "mDNS discovered %d stackchan gateway service(s); selected instance=\"%s\" host=\"%s\" addresses=%s port=%u path=\"%s\"",
-                 first.result_count,
-                 first.instance_name.c_str(),
-                 first.hostname.c_str(),
-                 addresses.c_str(),
-                 first.port,
-                 first.path.c_str());
+                 "mDNS gateway browse complete: raw_results=%d accepted_instances=%d candidates=%u addresses=%s",
+                 result_count,
+                 extracted.accepted_instances,
+                 static_cast<unsigned int>(all_candidates->size()),
+                 addresses.c_str());
     } else if (result_count == 0) {
         ESP_LOGI(TAG, "No mDNS stackchan gateway services discovered");
     } else {
-        ESP_LOGI(TAG, "No supported mDNS stackchan gateway service found among %d result(s)", result_count);
+        ESP_LOGW(TAG, "mDNS gateway browse found %d result(s), but no supported gateway candidates",
+                 result_count);
     }
 
     if (results != nullptr) {
@@ -249,7 +282,7 @@ std::optional<std::vector<MdnsGatewayCandidate>> DiscoverStackchanGateway(uint32
     }
     restore_wifi_power_save();
     mdns_free();
-    return selected;
+    return all_candidates;
 #else
     (void)timeout_ms;
     return std::nullopt;

@@ -30,6 +30,27 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Add periodic IP-change detection to the mDNS advertiser; the gateway now
+  re-registers its mDNS service automatically when the host's primary IPv4
+  changes (DHCP lease renewal, Wi-Fi switch, sleep/wake, dock/undock).
+  Recovery latency is bounded by approximately `2 × refresh_interval` (one
+  polling interval to observe the address change, plus one debounce-confirm
+  interval before re-registering; default 30 s → worst case ~60 s).
+  Pair with Firmware vX.Y.Z+ for automatic device-side recovery — earlier
+  firmware versions may still get stuck on the stale mDNS instance until
+  manual reboot. (#277)
+
+### Firmware
+
+- mDNS gateway discovery now considers all supported `_stackchan-mcp._tcp.local.`
+  service instances in one browse, not only the first. Combined with Gateway
+  vA.B.C+ mDNS IP refresh, the device recovers automatically from a gateway
+  host-IP change even while a stale mDNS instance is still in the cache. The
+  existing `websocket_protocol.cc` per-candidate fallback (5→30 s reconnect
+  backoff) handles the additional candidates. (#277)
+
 ### Examples
 
 - Added `examples/cloudflare-relay/` — optional Cloudflare Workers
