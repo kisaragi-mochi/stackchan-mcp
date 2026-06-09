@@ -368,7 +368,15 @@ class MdnsAdvertiser:
         )
         try:
             await zeroconf.async_register_service(info, allow_name_change=True)
-        except Exception:
+        except BaseException:
+            # Catch BaseException (not just Exception) so that an
+            # ``asyncio.CancelledError`` arriving mid-registration —
+            # e.g. an external ``stop()`` or a double-``start()`` racing
+            # this registration — still closes the partially-constructed
+            # ``AsyncZeroconf``. Otherwise the bound multicast sockets
+            # and any partial registration would leak past the cancelled
+            # task. ``raise`` preserves the cancellation semantics for
+            # the surrounding ``async with self._lock`` caller.
             await zeroconf.async_close()
             raise
         self._zeroconf = zeroconf
@@ -435,17 +443,21 @@ class MdnsAdvertiser:
                 )
                 return
 
-            await self._close_zeroconf_locked()
-            # Clear the cached advertised set immediately after closing the old
-            # zeroconf instance. If the subsequent re-registration raises (or
-            # the host IP later reverts to ``old_addresses``), the refresh
-            # loop's ``current != _last_advertised_addresses`` check would
-            # otherwise compare against the stale value and stay quiet — the
-            # advertisement would remain dead until a manual restart. Setting
-            # this to ``None`` here guarantees the next refresh tick observes
-            # a divergence and retries registration regardless of which
-            # address state the host happens to be in.
+            # Clear the cached advertised set BEFORE closing so that even a
+            # failure inside ``_close_zeroconf_locked()`` itself (e.g. the
+            # old interface has vanished mid-cycle and ``async_unregister``
+            # / ``async_close`` raise) still leaves the refresh loop in a
+            # "must retry" state. If the subsequent close raises, or the
+            # re-registration raises, or the host IP later reverts to
+            # ``old_addresses``, the refresh loop's
+            # ``current != _last_advertised_addresses`` check would
+            # otherwise compare against the stale value and stay quiet —
+            # the advertisement would remain dead until a manual restart.
+            # Setting this to ``None`` here guarantees the next refresh
+            # tick observes a divergence and retries registration
+            # regardless of which address state the host happens to be in.
             self._last_advertised_addresses = None
+            await self._close_zeroconf_locked()
             await self._register_advertisement_locked(advertisement)
             new_addresses = tuple(advertisement.parsed_addresses)
             self._last_advertised_addresses = new_addresses

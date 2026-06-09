@@ -799,3 +799,115 @@ async def test_reconfigure_register_failure_then_ip_revert_still_recovers(
     assert not advertiser._refresh_task.done()
 
     await advertiser.stop()
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_close_failure_then_revert_to_old_ip_still_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review round 2 Finding 3: if the OLD-instance close itself
+    raises during reconfigure (e.g. the old interface vanished and
+    ``async_unregister`` / ``async_close`` fail), the cached
+    ``_last_advertised_addresses`` must already have been cleared so that
+    a subsequent IP revert is still picked up by the refresh loop. If we
+    cleared only after a successful close, this code path would leave the
+    cache pointing at the old (now-dead) registration and silently stop
+    advertising forever.
+    """
+    old = ["198.51.100.10"]
+    new = ["203.0.113.20"]
+
+    # Two healthy registrations bracket the failing reconfigure attempt.
+    # instance 0 is the initial register; instance 1 is the recovery
+    # register after the IP reverts.
+    instances = install_recording_zeroconf(monkeypatch)
+    monkeypatch.setattr(
+        mdns,
+        "_enumerate_usable_ipv4_addresses",
+        sequence_addresses([old, new, new, old, old, old, old]),
+    )
+
+    # Make the close path fail exactly once — on the FIRST close that
+    # follows the initial register. Subsequent closes (on the recovery
+    # path and stop()) succeed normally.
+    close_calls = {"n": 0}
+    original_close = RecordingAsyncZeroconf.async_close
+
+    async def flaky_async_close(self: RecordingAsyncZeroconf) -> None:
+        close_calls["n"] += 1
+        if close_calls["n"] == 1:
+            self.closed = True
+            self.close_count += 1
+            raise RuntimeError("mock async_close failure on old-interface teardown")
+        await original_close(self)
+
+    monkeypatch.setattr(
+        RecordingAsyncZeroconf, "async_close", flaky_async_close
+    )
+
+    advertiser = fast_advertiser()
+    await advertiser.start(host="0.0.0.0", port=8765, path="/")
+
+    # Wait for the recovery: a second zeroconf instance is only created
+    # if the refresh loop saw _last_advertised_addresses == None after
+    # the failed close (rather than the stale old value) and re-tried.
+    await wait_until(
+        lambda: len(instances) == 2 and advertiser._zeroconf is instances[1]
+    )
+
+    # instance 0: marked closed (the mock still set the flag) and the
+    # failure was raised so reconfigure aborted partway through.
+    assert instances[0].closed is True
+    # instance 1: recovery succeeded against the reverted (old) IP.
+    assert len(instances[1].registered) == 1
+    assert advertiser._last_advertised_addresses == tuple(old)
+    assert advertiser._refresh_task is not None
+    assert not advertiser._refresh_task.done()
+
+    await advertiser.stop()
+
+
+@pytest.mark.asyncio
+async def test_register_advertisement_cancellation_closes_zeroconf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review round 2 Finding 4: an ``asyncio.CancelledError`` arriving
+    mid-``async_register_service`` (e.g. external ``stop()`` races the
+    initial register, or a ``double-start()`` cancels the previous in-flight
+    register) must still close the partially-constructed ``AsyncZeroconf``.
+    Otherwise the multicast sockets and any partial registration leak past
+    the cancelled task. ``except Exception`` is not sufficient because
+    ``CancelledError`` derives from ``BaseException`` in Python 3.8+.
+    """
+    install_recording_zeroconf(monkeypatch)
+    monkeypatch.setattr(
+        mdns,
+        "_enumerate_usable_ipv4_addresses",
+        lambda: ["192.0.2.10"],
+    )
+
+    # Make register raise CancelledError; capture the zeroconf instance
+    # whose async_close should still be called.
+    captured: dict[str, RecordingAsyncZeroconf | None] = {"zc": None}
+
+    async def cancelling_register(
+        self: RecordingAsyncZeroconf,
+        info: RecordingServiceInfo,
+        *,
+        allow_name_change: bool = False,
+    ) -> None:
+        captured["zc"] = self
+        raise asyncio.CancelledError("mock cancellation during register")
+
+    monkeypatch.setattr(
+        RecordingAsyncZeroconf, "async_register_service", cancelling_register
+    )
+
+    advertiser = fast_advertiser()
+    with pytest.raises(asyncio.CancelledError):
+        await advertiser.start(host="0.0.0.0", port=8765, path="/")
+
+    # The partially-constructed AsyncZeroconf must have been closed
+    # even though the failure was a BaseException-derived CancelledError.
+    assert captured["zc"] is not None
+    assert captured["zc"].closed is True
