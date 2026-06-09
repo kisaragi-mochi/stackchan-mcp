@@ -35,7 +35,9 @@ documented-only.
 - Add periodic IP-change detection to the mDNS advertiser; the gateway now
   re-registers its mDNS service automatically when the host's primary IPv4
   changes (DHCP lease renewal, Wi-Fi switch, sleep/wake, dock/undock).
-  Recovery latency is bounded by `refresh_interval` (default 30 s).
+  Recovery latency is bounded by approximately `2 × refresh_interval` (one
+  polling interval to observe the address change, plus one debounce-confirm
+  interval before re-registering; default 30 s → worst case ~60 s).
   Pair with Firmware vX.Y.Z+ for automatic device-side recovery — earlier
   firmware versions may still get stuck on the stale mDNS instance until
   manual reboot. (#277)
