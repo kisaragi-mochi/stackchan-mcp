@@ -706,3 +706,96 @@ async def test_stop_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert instances[0].close_count == close_count
     assert len(instances[0].unregistered) == unregister_count
+
+
+@pytest.mark.asyncio
+async def test_refresh_with_concrete_host_ignores_unrelated_interface_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review round 2 Finding 1: when started with a concrete HOST
+    (not a wildcard), the refresh loop must compare against that HOST's
+    resolution only — not against the full host-interface enumeration.
+    Otherwise a multi-NIC / Tailscale host churns the registration on every
+    refresh tick even though the actually-advertised set never changes.
+    """
+    instances = install_recording_zeroconf(monkeypatch)
+
+    # The concrete-host resolver stays constant across all refresh ticks.
+    monkeypatch.setattr(
+        mdns,
+        "_resolve_concrete_host_ipv4_addresses",
+        lambda host: ["192.0.2.10"] if host == "192.0.2.10" else [],
+    )
+    # The wildcard enumerator returns a DIFFERENT (extra) set that must NOT
+    # influence the refresh decision when host is concrete.
+    monkeypatch.setattr(
+        mdns,
+        "_enumerate_usable_ipv4_addresses",
+        lambda: ["192.0.2.10", "10.0.0.5"],
+    )
+
+    advertiser = fast_advertiser()
+    await advertiser.start(host="192.0.2.10", port=8765, path="/")
+
+    # Let several refresh cycles run; the concrete-host comparison must stay
+    # stable so no second zeroconf instance is ever created.
+    await asyncio.sleep(advertiser._refresh_interval * 3)
+
+    assert len(instances) == 1
+    assert instances[0].unregistered == []
+    assert advertiser._last_advertised_addresses == ("192.0.2.10",)
+
+    await advertiser.stop()
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_register_failure_then_ip_revert_still_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review round 2 Finding 2: if a reconfigure closes the old
+    registration but the new registration then fails, the cached
+    ``_last_advertised_addresses`` must not point at the now-defunct old
+    value. Otherwise, if the host IP reverts to the old value (Wi-Fi
+    re-association, DHCP renewal returning the previous lease, etc.), the
+    refresh loop sees ``current == _last_advertised`` and stays quiet —
+    leaving the advertisement permanently dead until manual restart.
+    """
+    old = ["198.51.100.10"]
+    new = ["203.0.113.20"]
+
+    # Sequence: initial register (old) → refresh observes new → debounce
+    # confirm new → reconfigure: close old, register new fails → IP reverts
+    # to old → refresh observes old (≠ None after the failed reconfigure)
+    # → debounce confirm old → reconfigure: register succeeds.
+    instances = install_recording_zeroconf(
+        monkeypatch,
+        register_errors=[None, RuntimeError("mock reconfigure register fail"), None],
+    )
+    monkeypatch.setattr(
+        mdns,
+        "_enumerate_usable_ipv4_addresses",
+        sequence_addresses([old, new, new, old, old, old, old]),
+    )
+
+    advertiser = fast_advertiser()
+    await advertiser.start(host="0.0.0.0", port=8765, path="/")
+
+    # Wait until the third zeroconf instance is created — this is the recovery
+    # that only happens if the previous failure cleared _last_advertised.
+    await wait_until(
+        lambda: len(instances) == 3 and advertiser._zeroconf is instances[2]
+    )
+
+    # instance 0: original (old IP) was closed during the failed reconfigure.
+    assert instances[0].closed is True
+    # instance 1: register call raised, no successful registration recorded,
+    # internal cleanup closes the partially-constructed zeroconf.
+    assert instances[1].registered == []
+    assert instances[1].closed is True
+    # instance 2: recovery succeeded against the reverted (old) IP.
+    assert len(instances[2].registered) == 1
+    assert advertiser._last_advertised_addresses == tuple(old)
+    assert advertiser._refresh_task is not None
+    assert not advertiser._refresh_task.done()
+
+    await advertiser.stop()

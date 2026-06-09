@@ -239,6 +239,26 @@ def _resolve_concrete_host_ipv4_addresses(host: str) -> list[str]:
     return _select_advertised_addresses([(address, None) for address in addresses])
 
 
+def _resolve_addresses_for_host(host: str) -> list[str]:
+    """Resolve advertised addresses for ``host`` using the same logic as
+    :func:`build_advertisement`.
+
+    Wildcard hosts (``0.0.0.0`` / ``*`` / ``""``) enumerate every usable
+    non-loopback IPv4 address on the machine; concrete hosts only resolve
+    addresses for that specific host. The refresh loop calls this helper so
+    its comparison set matches what a fresh ``build_advertisement(...)``
+    would actually register — without this, a host started with a concrete
+    HOST in a multi-NIC / Tailscale environment would see every poll as an
+    "address change" against an unrelated extra interface and churn the
+    registration on every refresh interval.
+    """
+    return (
+        _enumerate_usable_ipv4_addresses()
+        if _is_wildcard_host(host)
+        else _resolve_concrete_host_ipv4_addresses(host)
+    )
+
+
 def build_advertisement(
     *,
     host: str,
@@ -254,11 +274,7 @@ def build_advertisement(
         return None
 
     normalized_path = path if path.startswith("/") else f"/{path}"
-    addresses = (
-        _enumerate_usable_ipv4_addresses()
-        if _is_wildcard_host(host)
-        else _resolve_concrete_host_ipv4_addresses(host)
-    )
+    addresses = _resolve_addresses_for_host(host)
     if not addresses:
         logger.warning(
             "mDNS advertisement skipped: no usable non-loopback IPv4 address "
@@ -420,6 +436,16 @@ class MdnsAdvertiser:
                 return
 
             await self._close_zeroconf_locked()
+            # Clear the cached advertised set immediately after closing the old
+            # zeroconf instance. If the subsequent re-registration raises (or
+            # the host IP later reverts to ``old_addresses``), the refresh
+            # loop's ``current != _last_advertised_addresses`` check would
+            # otherwise compare against the stale value and stay quiet — the
+            # advertisement would remain dead until a manual restart. Setting
+            # this to ``None`` here guarantees the next refresh tick observes
+            # a divergence and retries registration regardless of which
+            # address state the host happens to be in.
+            self._last_advertised_addresses = None
             await self._register_advertisement_locked(advertisement)
             new_addresses = tuple(advertisement.parsed_addresses)
             self._last_advertised_addresses = new_addresses
@@ -440,7 +466,11 @@ class MdnsAdvertiser:
         while True:
             try:
                 await asyncio.sleep(self._refresh_interval)
-                current_addresses = tuple(_enumerate_usable_ipv4_addresses())
+                start_args = self._start_args
+                if start_args is None:
+                    continue
+                host = start_args["host"]
+                current_addresses = tuple(_resolve_addresses_for_host(host))
                 old_addresses = self._last_advertised_addresses
                 if current_addresses == old_addresses:
                     continue
@@ -452,7 +482,11 @@ class MdnsAdvertiser:
                     current_addresses,
                 )
                 await asyncio.sleep(self._refresh_interval)
-                confirmed_addresses = tuple(_enumerate_usable_ipv4_addresses())
+                start_args = self._start_args
+                if start_args is None:
+                    continue
+                host = start_args["host"]
+                confirmed_addresses = tuple(_resolve_addresses_for_host(host))
                 if confirmed_addresses != current_addresses:
                     logger.info(
                         "mDNS refresh dropped transient address change: "
