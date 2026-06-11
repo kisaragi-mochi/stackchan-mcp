@@ -30,6 +30,12 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Harden ownership lock stale detection by recording and verifying the
+  owning process start time, preventing recycled PIDs from being treated
+  as the original live gateway. (#253)
+
 ### Firmware
 
 - Added standalone CMake host-test infrastructure for firmware pure C++ helpers,

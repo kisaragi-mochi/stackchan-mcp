@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -13,6 +15,8 @@ from typing import Literal, TypedDict
 
 LOCK_DIR = Path.home() / ".stackchan-mcp"
 LOCK_PATH = LOCK_DIR / "owner.lock"
+PROC_START_TOLERANCE_SECONDS = 2.0
+_PROC_ROOT = Path("/proc")
 
 
 LockMode = Literal["stdio", "streamable-http"]
@@ -29,6 +33,7 @@ class LockInfo(_BaseLockInfo, total=False):
     mode: LockMode
     http_endpoint: str | None
     started_by: str | None
+    proc_start_epoch: float
 
 
 class OwnershipError(RuntimeError):
@@ -63,6 +68,101 @@ def is_pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def get_process_start_time(pid: int) -> float | None:
+    """Return the kernel-reported process start time as epoch seconds.
+
+    Supported on Linux (``/proc``) and macOS (``ps lstart``). On other
+    platforms — notably Windows — this returns ``None``, so the identity
+    check is skipped and stale-lock detection falls back to the PID-only
+    liveness check (the pre-#253 behavior). Windows process-identity
+    verification is deferred per Issue #253's acceptance criteria.
+    """
+    if pid <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        return _get_process_start_time_linux(pid)
+    if sys.platform == "darwin":
+        return _get_process_start_time_macos(pid)
+    return None
+
+
+def _get_process_start_time_linux(pid: int) -> float | None:
+    try:
+        stat_text = (_PROC_ROOT / str(pid) / "stat").read_text(encoding="utf-8")
+        proc_stat_text = (_PROC_ROOT / "stat").read_text(encoding="utf-8")
+        ticks_per_second = os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError):
+        return None
+
+    if not isinstance(ticks_per_second, int) or ticks_per_second <= 0:
+        return None
+
+    try:
+        after_comm = stat_text.rsplit(")", 1)[1].strip()
+        fields = after_comm.split()
+        start_ticks = int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
+    boot_time: int | None = None
+    for line in proc_stat_text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == "btime":
+            try:
+                boot_time = int(parts[1])
+            except ValueError:
+                return None
+            break
+    if boot_time is None:
+        return None
+
+    return float(boot_time) + (float(start_ticks) / float(ticks_per_second))
+
+
+def _get_process_start_time_macos(pid: int) -> float | None:
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            check=False,
+            env=env,
+            text=True,
+        )
+    except OSError:
+        return None
+
+    output = result.stdout.strip()
+    if not output:
+        return None
+
+    line = output.splitlines()[0].strip()
+    try:
+        started = datetime.strptime(line, "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return None
+    return started.timestamp()
+
+
+def _coerce_proc_start_epoch(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    proc_start_epoch = float(value)
+    if not math.isfinite(proc_start_epoch):
+        return None
+    return proc_start_epoch
+
+
+def _process_identity_matches(pid: int, expected_start: float | None) -> bool:
+    if expected_start is None:
+        return True
+    actual_start = get_process_start_time(pid)
+    if actual_start is None:
+        return True
+    return abs(actual_start - expected_start) <= PROC_START_TOLERANCE_SECONDS
 
 
 def _is_pid_alive_windows(pid: int) -> bool:
@@ -152,6 +252,11 @@ def read_lock(path: Path = LOCK_PATH) -> LockInfo | None:
         if started_by is None or isinstance(started_by, str):
             info["started_by"] = started_by
 
+    if "proc_start_epoch" in raw:
+        proc_start_epoch = _coerce_proc_start_epoch(raw["proc_start_epoch"])
+        if proc_start_epoch is not None:
+            info["proc_start_epoch"] = proc_start_epoch
+
     return info
 
 
@@ -178,10 +283,11 @@ def acquire_lock(
 ) -> LockInfo:
     """Acquire the ownership lock. Raise OwnershipError on refuse.
 
-    The default stdio-mode call writes the original #177 lock shape so
-    older lock readers and ``stackchan-mcp --check`` output remain
-    compatible. Daemon transports can attach optional metadata for
-    diagnostics without changing the atomic hardlink claim.
+    The default stdio-mode call writes the original #177 lock base fields
+    plus additive process identity metadata. Older lock readers remain
+    compatible because the new field is optional JSON. Daemon transports
+    can attach optional metadata for diagnostics without changing the
+    atomic hardlink claim.
     """
     if mode not in ("stdio", "streamable-http"):
         raise ValueError(f"unsupported lock mode: {mode!r}")
@@ -195,25 +301,39 @@ def acquire_lock(
         existing = read_lock(path)
         if existing is not None:
             if is_pid_alive(existing["pid"]):
-                raise OwnershipError(
-                    "stackchan-mcp: device already owned by "
-                    f"{existing['owner_id']} "
-                    f"(pid {existing['pid']}, since {existing['start_ts']})"
+                if _process_identity_matches(
+                    existing["pid"], existing.get("proc_start_epoch")
+                ):
+                    raise OwnershipError(
+                        "stackchan-mcp: device already owned by "
+                        f"{existing['owner_id']} "
+                        f"(pid {existing['pid']}, since {existing['start_ts']})"
+                    )
+                print(
+                    "stackchan-mcp: removed stale lock from recycled pid "
+                    f"{existing['pid']}",
+                    file=sys.stderr,
                 )
-            print(
-                f"stackchan-mcp: removed stale lock from dead pid {existing['pid']}",
-                file=sys.stderr,
-            )
+            else:
+                print(
+                    "stackchan-mcp: removed stale lock from dead pid "
+                    f"{existing['pid']}",
+                    file=sys.stderr,
+                )
             path.unlink(missing_ok=True)
         elif path.exists():
             path.unlink()
 
+        pid = os.getpid()
+        proc_start_epoch = get_process_start_time(pid)
         info: LockInfo = {
             "owner_id": owner_id,
-            "pid": os.getpid(),
+            "pid": pid,
             "start_ts": _now_iso(),
             "host": socket.gethostname(),
         }
+        if proc_start_epoch is not None:
+            info["proc_start_epoch"] = proc_start_epoch
         if mode != "stdio":
             info["mode"] = mode
         if http_endpoint is not None:
@@ -246,8 +366,9 @@ def release_lock_if_owner(info: LockInfo, path: Path = LOCK_PATH) -> bool:
     """Remove the lock file only if it still belongs to ``info``.
 
     Returns ``True`` if the lock was removed, ``False`` if the on-disk
-    lock has a different ``owner_id`` / ``pid`` / ``start_ts`` or no
-    longer exists. This is the owner-scoped counterpart to
+    lock has a different ``owner_id`` / ``pid`` / ``start_ts`` /
+    ``proc_start_epoch`` or no longer exists. This is the owner-scoped
+    counterpart to
     :func:`release_lock` and is intended for cleanup paths (``finally``
     blocks, ``atexit.register``) where the caller may have lost ownership
     between claim and cleanup — for example after the gateway exited and
@@ -261,6 +382,12 @@ def release_lock_if_owner(info: LockInfo, path: Path = LOCK_PATH) -> bool:
         existing.get("owner_id") != info.get("owner_id")
         or existing.get("pid") != info.get("pid")
         or existing.get("start_ts") != info.get("start_ts")
+    ):
+        return False
+    if (
+        "proc_start_epoch" in existing
+        and "proc_start_epoch" in info
+        and existing["proc_start_epoch"] != info["proc_start_epoch"]
     ):
         return False
     try:
