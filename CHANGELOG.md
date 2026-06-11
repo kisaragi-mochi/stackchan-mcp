@@ -30,6 +30,11 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- Added standalone CMake host-test infrastructure for firmware pure C++ helpers,
+  covering mDNS gateway candidate extraction edge cases. (#279)
+
 ## [0.10.0] - 2026-06-09
 
 ### Gateway

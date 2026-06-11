@@ -48,6 +48,23 @@ jobs:
             firmware/build/merged-binary.bin
             firmware/releases/v2.2.6_stackchan.zip
 
+  firmware-host-test:
+    name: Firmware host test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure firmware host tests
+        run: cmake -S firmware/host_test -B /tmp/firmware-host-test-build
+
+      - name: Build firmware host tests
+        run: cmake --build /tmp/firmware-host-test-build
+
+      - name: Run firmware host tests
+        run: ctest --test-dir /tmp/firmware-host-test-build --output-on-failure
+
   gateway-test:
     name: Gateway test
     runs-on: ubuntu-latest

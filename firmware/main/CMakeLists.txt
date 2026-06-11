@@ -1025,6 +1025,7 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
     )
 endif()
 if(CONFIG_STACKCHAN_MDNS_DISCOVERY)
+    list(APPEND SOURCES "protocols/mdns_candidate_extract.cc")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA espressif__mdns)
 endif()
 
