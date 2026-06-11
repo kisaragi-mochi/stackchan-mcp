@@ -34,6 +34,9 @@ documented-only.
 
 - Added standalone CMake host-test infrastructure for firmware pure C++ helpers,
   covering mDNS gateway candidate extraction edge cases. (#279)
+- Clamp positive `speed_dps` values below 15 dps to the step-safe floor in
+  `WriteHeadAngles`, avoiding sub-step servo interpolation while preserving the
+  existing slow-motion preset behavior. (#252)
 
 ## [0.10.0] - 2026-06-09
 

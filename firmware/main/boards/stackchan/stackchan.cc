@@ -796,6 +796,14 @@ private:
     static constexpr uint32_t MOTION_TICK_MS = 20;
     static constexpr uint32_t MOTION_DEFAULT_DURATION_MS = 600;
     // Speed-based motion API (Issue #129).
+    // MIN_STEP_SAFE_SPEED_DPS prevents the raw-integer speed_dps escape hatch
+    // from advancing less than one SCS0009 step per ServoTask tick. The
+    // physical step is 300 deg / 1024 = 0.293 deg; at MOTION_TICK_MS=20 ms
+    // this is 14.65 deg/s, rounded up to 15 deg/s for headroom. This shares
+    // the same physical origin as BOOT_INIT_TARGET_DEG_PER_SEC (#121/#141),
+    // but stays separate because the boot path carries its own duration-floor
+    // semantics. See the Issue #129 -> #134 stepped-motion observation lineage.
+    static constexpr int MIN_STEP_SAFE_SPEED_DPS = 15;
     // MIN_SMOOTH_SPEED_DPS is the on-device measured smoothness floor
     // (5 step/tick "transition out", measured 2026-05-15). Speeds below
     // this look textured on SCS0009 at MOTION_TICK_MS=20 ms; the firmware
@@ -3668,6 +3676,10 @@ private:
         int safe_speed = speed_dps;
         if (safe_speed <= 0) {
             safe_speed = DEFAULT_SPEED_DPS;
+        } else if (safe_speed < MIN_STEP_SAFE_SPEED_DPS) {
+            ESP_LOGW(TAG, "WriteHeadAngles: speed_dps=%d below MIN_STEP_SAFE_SPEED_DPS=%d, clamping",
+                     speed_dps, MIN_STEP_SAFE_SPEED_DPS);
+            safe_speed = MIN_STEP_SAFE_SPEED_DPS;
         } else if (safe_speed < MIN_SMOOTH_SPEED_DPS) {
             // Below the on-device measured smoothness floor -- motion will look
             // textured on SCS0009 at MOTION_TICK_MS=20 ms. This is intentionally
@@ -5020,7 +5032,7 @@ private:
         // spot) above, plus Issue #80 / #98.
         mcp_server.AddTool(
             "self.robot.set_head_angles",
-            "Set the head angles of the robot. yaw: horizontal (-90 to 90). pitch: vertical. M5Stack-recommended operating range is 5 to 85 degrees per https://docs.m5stack.com/en/StackChan (\"Motion Angle Notice\"). The firmware also accepts values up to 88 degrees (the hard clamp guards against the audible sub-stall observed at pitch=89 on real hardware), but values outside 5-85 degrees are not officially endorsed and may stress the servo over time. Requests below 0 degrees or above 88 degrees are silently clamped with an ESP_LOGW. Optional speed_dps: angular speed in degrees per second. If omitted or zero, the existing duration-based default applies. See README \"Hardware safety notes\".",
+            "Set the head angles of the robot. yaw: horizontal (-90 to 90). pitch: vertical. M5Stack-recommended operating range is 5 to 85 degrees per https://docs.m5stack.com/en/StackChan (\"Motion Angle Notice\"). The firmware also accepts values up to 88 degrees (the hard clamp guards against the audible sub-stall observed at pitch=89 on real hardware), but values outside 5-85 degrees are not officially endorsed and may stress the servo over time. Requests below 0 degrees or above 88 degrees are silently clamped with an ESP_LOGW. Optional speed_dps: angular speed in degrees per second. If omitted or zero, the existing duration-based default applies; positive values below 15 dps are clamped to the step-safe floor. See README \"Hardware safety notes\".",
             // Pitch schema range is intentionally permissive across the
             // entire `int` value range (std::numeric_limits<int>::min/max):
             // the authoritative Tier 1 enforcement lives in the handler
