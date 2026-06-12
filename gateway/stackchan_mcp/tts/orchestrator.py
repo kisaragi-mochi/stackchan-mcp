@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -91,6 +91,17 @@ async def _try_set_avatar_face(
         return False, str(message)
 
     return True, None
+
+
+async def _try_set_avatar_face_with_tts_lock(
+    gateway: "Gateway",
+    face: str,
+) -> tuple[bool, str | None]:
+    tts_lock = getattr(gateway.esp32, "tts_lock", None)
+    lock_ctx = tts_lock if tts_lock is not None else nullcontext()
+
+    async with lock_ctx:
+        return await _try_set_avatar_face(gateway, face)
 
 
 async def synthesize_and_send(
@@ -205,11 +216,6 @@ async def synthesize_and_send(
     speaker_id = arguments.get("speaker_id")
     reference_audio = arguments.get("reference_audio")
 
-    face_dispatched = False
-    face_error: str | None = None
-    if face is not None:
-        face_dispatched, face_error = await _try_set_avatar_face(gateway, face)
-
     tts_text = text
     text_stripped = False
     if not getattr(engine, "supports_emoji_style", False):
@@ -217,7 +223,15 @@ async def synthesize_and_send(
         text_stripped = stripped_text != text
         tts_text = stripped_text
 
+    face_dispatched = False
+    face_error: str | None = None
+
     if not tts_text.strip():
+        if face is not None:
+            face_dispatched, face_error = await _try_set_avatar_face_with_tts_lock(
+                gateway,
+                face,
+            )
         logger.info(
             "say(): engine=%s speaker=%s speech skipped: text empty after "
             "emoji strip",
@@ -269,6 +283,14 @@ async def synthesize_and_send(
             f"Engine '{voice}' produced no PCM data for the given text."
         )
 
+    async def dispatch_face_before_first_frame() -> None:
+        nonlocal face_dispatched, face_error
+        if face is not None:
+            face_dispatched, face_error = await _try_set_avatar_face(
+                gateway,
+                face,
+            )
+
     # Hand the PCM off to the shared encode-and-push path. Engines that
     # have already resampled to DEVICE_SAMPLE_RATE (the documented
     # TTSEngine contract) need no further conversion here.
@@ -276,6 +298,9 @@ async def synthesize_and_send(
         gateway,
         pcm,
         source_label=f"engine:{voice}",
+        before_first_frame=(
+            dispatch_face_before_first_frame if face is not None else None
+        ),
     )
 
     logger.info(
@@ -311,6 +336,7 @@ async def send_pcm_audio(
     *,
     source_rate: int = DEVICE_SAMPLE_RATE,
     source_label: str = "external",
+    before_first_frame: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Encode mono PCM and push as Opus frames to the connected device.
 
@@ -334,6 +360,8 @@ async def send_pcm_audio(
         source_label: Label that appears in the orchestrator log line so
             external callers can be traced separately from engine-driven
             synthesis (e.g. ``"voice-tts"``, ``"sfx:notification"``).
+        before_first_frame: Internal hook for ``say()`` side effects that
+            must be serialized with speech delivery.
 
     Returns:
         Dict describing the push: ``source``, ``frame_count``,
@@ -446,6 +474,9 @@ async def send_pcm_audio(
         loop = asyncio.get_event_loop()
 
         try:
+            if before_first_frame is not None:
+                await before_first_frame()
+
             next_send_time = loop.time()
             for frame in opus_frames:
                 now = loop.time()

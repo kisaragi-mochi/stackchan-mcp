@@ -31,9 +31,28 @@ class _EmojiStylePCMEngine(_PCMEngine):
     supports_emoji_style = True
 
 
+class _RecordingLock:
+    def __init__(self, events: list[tuple[str, object]]) -> None:
+        self._lock = asyncio.Lock()
+        self._events = events
+
+    async def __aenter__(self) -> "_RecordingLock":
+        await self._lock.acquire()
+        self._events.append(("lock", "acquired"))
+        return self
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        self._events.append(("lock", "released"))
+        self._lock.release()
+
+
 class _FakeESP32:
     def __init__(
-        self, *, connected: bool = True, avatar_error: str | None = None
+        self,
+        *,
+        connected: bool = True,
+        avatar_error: str | None = None,
+        record_lock: bool = False,
     ) -> None:
         self.device_connected = connected
         self.frames: list[bytes] = []
@@ -48,7 +67,9 @@ class _FakeESP32:
         # orchestrator's ``async with gateway.esp32.tts_lock`` works the
         # same way under tests as in production. The lock is created
         # per-fake so each test runs against a fresh instance.
-        self.tts_lock = asyncio.Lock()
+        self.tts_lock = (
+            _RecordingLock(self.events) if record_lock else asyncio.Lock()
+        )
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any]
@@ -197,7 +218,7 @@ async def test_pipeline_dispatches_face_and_strips_plain_engine_text(fake_encode
     """VOICEVOX-style engines get emoji-free text after the face change."""
     pcm = b"\x01\x00" * 960
     engine = _PCMEngine(pcm)
-    esp32 = _FakeESP32(connected=True)
+    esp32 = _FakeESP32(connected=True, record_lock=True)
     gateway = _FakeGateway(esp32)
 
     reg = EngineRegistry()
@@ -209,11 +230,16 @@ async def test_pipeline_dispatches_face_and_strips_plain_engine_text(fake_encode
         registry=reg,
     )
 
-    assert esp32.tool_calls == [("self.display.set_avatar", {"face": "happy"})]
-    assert esp32.events[0] == (
-        "tool",
-        ("self.display.set_avatar", {"face": "happy"}),
-    )
+    avatar_call = ("self.display.set_avatar", {"face": "happy"})
+    assert esp32.tool_calls == [avatar_call]
+    assert esp32.events == [
+        ("lock", "acquired"),
+        ("tts_state", "start"),
+        ("tool", avatar_call),
+        ("frame", b"opus_frame_0"),
+        ("tts_state", "stop"),
+        ("lock", "released"),
+    ]
     assert engine.calls[0][0] == "やったね rocket"
     assert result["face"] == "happy"
     assert result["face_dispatched"] is True
@@ -251,7 +277,7 @@ async def test_pipeline_keeps_emoji_for_emoji_style_engine(fake_encode):
 async def test_pipeline_emoji_only_plain_engine_skips_speech(fake_encode):
     """Emoji-only text can still set a face without calling synthesize."""
     engine = _PCMEngine(b"\x01\x00" * 960)
-    esp32 = _FakeESP32(connected=True)
+    esp32 = _FakeESP32(connected=True, record_lock=True)
     gateway = _FakeGateway(esp32)
 
     reg = EngineRegistry()
@@ -263,7 +289,13 @@ async def test_pipeline_emoji_only_plain_engine_skips_speech(fake_encode):
         registry=reg,
     )
 
-    assert esp32.tool_calls == [("self.display.set_avatar", {"face": "happy"})]
+    avatar_call = ("self.display.set_avatar", {"face": "happy"})
+    assert esp32.tool_calls == [avatar_call]
+    assert esp32.events == [
+        ("lock", "acquired"),
+        ("tool", avatar_call),
+        ("lock", "released"),
+    ]
     assert engine.calls == []
     assert esp32.tts_states == []
     assert esp32.frames == []
@@ -361,20 +393,13 @@ async def test_pipeline_blocks_protocol_v2(fake_encode):
 
 @pytest.mark.asyncio
 async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
-    """Concurrent ``say()`` invocations don't interleave on the same device.
+    """Concurrent ``say()`` invocations keep face dispatch with their speech.
 
-    Without the per-device TTS lock, two ``synthesize_and_send`` calls
-    running concurrently would each ``send_tts_state("start")``, race
-    through the ``TTS_START_TRANSITION_DELAY_S`` ``asyncio.sleep`` (the
-    cooperative yield point in this fake), then dump their frames and
-    stop notifications in arbitrary order on the same WebSocket. With
-    the lock, the recorded event stream must show one full
-    ``start → frames → stop`` sequence followed by another, never
-    interleaved — a strictly sequential pattern is what the device
-    relies on to stay in ``kDeviceStateSpeaking`` for one utterance at
-    a time.
+    The TTS lock covers the start notification, emoji-driven avatar update,
+    audio frames, and stop notification. A later emoji face change must not
+    land between an earlier utterance's start and first frame.
     """
-    pcm = b"\x01\x00" * 1440  # ~3 frames of audio
+    pcm = b"\x01\x00" * 1440  # 1.5 -> 2 frames of audio
     engine_a = _PCMEngine(pcm, name="engine_a")
     engine_b = _PCMEngine(pcm, name="engine_b")
     esp32 = _FakeESP32(connected=True)
@@ -386,12 +411,12 @@ async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
 
     await asyncio.gather(
         synthesize_and_send(
-            {"text": "first", "voice": "engine_a"},
+            {"text": "first 😊", "voice": "engine_a"},
             gateway=gateway,
             registry=reg,
         ),
         synthesize_and_send(
-            {"text": "second", "voice": "engine_b"},
+            {"text": "second 😢", "voice": "engine_b"},
             gateway=gateway,
             registry=reg,
         ),
@@ -404,17 +429,24 @@ async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
     stop_indices = [
         i for i, e in enumerate(events) if e == ("tts_state", "stop")
     ]
+    tool_indices = [i for i, e in enumerate(events) if e[0] == "tool"]
+    frame_indices = [i for i, e in enumerate(events) if e[0] == "frame"]
+
     assert len(start_indices) == 2
     assert len(stop_indices) == 2
+    assert len(tool_indices) == 2
+    assert len(frame_indices) == 4
 
-    # The lock guarantees a strictly sequential pattern:
-    #   start_0 < stop_0 < start_1 < stop_1
-    # The second utterance cannot begin until the first one finishes
-    # its stop notification.
     assert (
         start_indices[0]
+        < tool_indices[0]
+        < frame_indices[0]
+        < frame_indices[1]
         < stop_indices[0]
         < start_indices[1]
+        < tool_indices[1]
+        < frame_indices[2]
+        < frame_indices[3]
         < stop_indices[1]
     )
 
