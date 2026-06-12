@@ -48,7 +48,14 @@ def _register_voicevox() -> None:
     get_registry().register(VoicevoxEngine())
 
 
+def _register_irodori() -> None:
+    from .irodori import IrodoriEngine
+
+    get_registry().register(IrodoriEngine())
+
+
 _try_register(_register_voicevox, "voicevox")
+_try_register(_register_irodori, "irodori")
 
 
 __all__ = [

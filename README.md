@@ -432,9 +432,57 @@ The gateway POSTs to VOICEVOX, decodes the returned WAV, resamples to
 WebSocket binary frames to the device — which decodes and plays them
 through its speaker. **No firmware changes are required**: the
 existing audio decoder pipeline already accepts these frames. The
-TTS framework is engine-agnostic, so additional engines (Irodori-TTS
-voice cloning is on the roadmap) can be added without changing the
-`say` API.
+TTS framework is engine-agnostic, so additional engines plug in behind
+the same `say` API — see the Irodori engine below.
+
+#### Alternative engine: Irodori
+
+Irodori is a second TTS engine that calls an external synthesis service
+returning MP3. It plugs into the same `say` pipeline as VOICEVOX (MP3 is
+decoded to 16 kHz mono PCM, then encoded to Opus), and it interprets
+emoji embedded in the input text as a voice-style cue.
+
+There is **no default endpoint** — the synthesis backend is a hosted
+service, and shipping a hard-coded URL would point every install at
+someone else's deployment. You must self-host a compatible synthesis API
+(for example, duplicate the reference Hugging Face Space, or run your own
+service that honours the same request/response contract) and point the
+gateway at it.
+
+Install the extra:
+
+```bash
+pip install 'stackchan-mcp[tts-irodori]'
+```
+
+This pulls in `httpx`, `opuslib`, and `miniaudio` (a small self-contained
+MP3/audio decoder with prebuilt wheels, so no extra system library is
+needed beyond the `libopus` that `opuslib` already requires).
+
+Configure via environment variables (URL and key are read from the
+environment only — never commit them):
+
+| Environment variable | Default | Notes |
+|---|---|---|
+| `STACKCHAN_IRODORI_URL` | _(required)_ | Synthesis endpoint URL of your self-hosted service. Unset → the engine still lists but `say(voice="irodori")` returns a clear error. |
+| `STACKCHAN_IRODORI_KEY` | _(none)_ | Optional API key, forwarded as a query parameter. |
+| `STACKCHAN_IRODORI_SPEAKER` | `3` | Default speaker identifier. |
+| `STACKCHAN_IRODORI_STEPS` | `24` | Default diffusion step count (higher = slower, higher quality). |
+
+Select Irodori per call:
+
+```
+say(text="やったね😊", voice="irodori")
+```
+
+Or make it the default engine for every `say` call that omits `voice`:
+
+```bash
+export STACKCHAN_TTS_ENGINE=irodori
+```
+
+VOICEVOX remains the default when `STACKCHAN_TTS_ENGINE` is unset, and an
+explicit `voice` argument always overrides the default.
 
 ### 5. Optional: STT setup (faster-whisper)
 

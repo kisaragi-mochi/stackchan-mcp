@@ -32,6 +32,13 @@ documented-only.
 
 ### Gateway
 
+- Add the Irodori TTS engine as a second selectable synthesis engine
+  alongside VOICEVOX. It calls an external MP3 synthesis service (decoded
+  to PCM via the new `tts-irodori` extra) and reuses the existing
+  `say` → Opus → WebSocket pipeline. The endpoint and optional API key
+  are read from the environment only (`STACKCHAN_IRODORI_URL` is required,
+  no default), and a new `STACKCHAN_TTS_ENGINE` variable can change the
+  default engine; VOICEVOX stays the default when it is unset. (#286)
 - Harden ownership lock stale detection by recording and verifying the
   owning process start time, preventing recycled PIDs from being treated
   as the original live gateway. (#253)

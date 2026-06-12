@@ -16,6 +16,10 @@ from stackchan_mcp.tts import (
     get_registry,
     synthesize_and_send,
 )
+from stackchan_mcp.tts.orchestrator import (
+    TTS_ENGINE_ENV_VAR,
+    _resolve_default_engine,
+)
 
 
 class _FakeEngine(TTSEngine):
@@ -171,3 +175,71 @@ async def test_synthesize_and_send_lists_available_engines_in_error():
     msg = str(exc_info.value)
     assert "alpha" in msg
     assert "beta" in msg
+
+
+# ---------------------------------------------------------------------------
+# STACKCHAN_TTS_ENGINE default-engine override (Issue #286)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_default_engine_unset_is_voicevox(monkeypatch):
+    """No STACKCHAN_TTS_ENGINE -> the built-in DEFAULT_VOICE."""
+    monkeypatch.delenv(TTS_ENGINE_ENV_VAR, raising=False)
+    assert _resolve_default_engine() == DEFAULT_VOICE
+
+
+def test_resolve_default_engine_env_override(monkeypatch):
+    """STACKCHAN_TTS_ENGINE selects the default engine."""
+    monkeypatch.setenv(TTS_ENGINE_ENV_VAR, "irodori")
+    assert _resolve_default_engine() == "irodori"
+
+
+def test_resolve_default_engine_blank_env_ignored(monkeypatch):
+    """A blank/whitespace value is ignored, falling back to DEFAULT_VOICE."""
+    monkeypatch.setenv(TTS_ENGINE_ENV_VAR, "   ")
+    assert _resolve_default_engine() == DEFAULT_VOICE
+
+
+@pytest.mark.asyncio
+async def test_synthesize_and_send_uses_env_default_engine(monkeypatch):
+    """With no 'voice' arg, the engine looked up comes from the env override.
+
+    The unregistered-engine error names the resolved engine, which lets
+    us confirm the orchestrator consulted STACKCHAN_TTS_ENGINE without
+    standing up a full gateway.
+    """
+    monkeypatch.setenv(TTS_ENGINE_ENV_VAR, "irodori")
+    reg = EngineRegistry()
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        await synthesize_and_send({"text": "hello"}, registry=reg)
+
+    assert "irodori" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_explicit_voice_overrides_env_default(monkeypatch):
+    """An explicit 'voice' argument still wins over STACKCHAN_TTS_ENGINE."""
+    monkeypatch.setenv(TTS_ENGINE_ENV_VAR, "irodori")
+    reg = EngineRegistry()
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        await synthesize_and_send(
+            {"text": "hello", "voice": "voicevox"}, registry=reg
+        )
+
+    msg = str(exc_info.value)
+    assert "voicevox" in msg
+    assert "irodori" not in msg
+
+
+@pytest.mark.asyncio
+async def test_omitted_voice_with_env_unset_uses_default_voice(monkeypatch):
+    """Omitted 'voice' + unset env -> DEFAULT_VOICE is the looked-up engine."""
+    monkeypatch.delenv(TTS_ENGINE_ENV_VAR, raising=False)
+    reg = EngineRegistry()
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        await synthesize_and_send({"text": "hello"}, registry=reg)
+
+    assert DEFAULT_VOICE in str(exc_info.value)

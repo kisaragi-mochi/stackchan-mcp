@@ -51,7 +51,7 @@ dependencies = [
 [project.optional-dependencies]
 # Phase 4 TTS — see Issue #70.
 # Concrete engines (VOICEVOX, Irodori) consume these libraries:
-#   * httpx     — VOICEVOX HTTP engine client
+#   * httpx     — VOICEVOX / Irodori HTTP engine client
 #   * opuslib   — Opus encoding for the device's audio decoder
 # `tts-voicevox` is a no-op alias provided so users can declare intent
 # explicitly; the VOICEVOX engine itself is an external HTTP process and
@@ -62,6 +62,17 @@ tts = [
 ]
 tts-voicevox = [
     "stackchan-mcp[tts]",
+]
+# Irodori is an external HTTP synthesis service that returns MP3 (see
+# Issue #286). On top of the base `[tts]` extra (httpx + opuslib) it adds
+# `miniaudio` to decode the MP3 response to PCM. miniaudio is a small,
+# self-contained C extension (MIT) with prebuilt wheels for Windows,
+# macOS (x86_64 + arm64), and Linux, so it installs without a system
+# audio library — unlike a ffmpeg/libav binding — which keeps the
+# Windows wheel path (and the CI windows-smoke job) simple.
+tts-irodori = [
+    "stackchan-mcp[tts]",
+    "miniaudio>=1.59",
 ]
 
 # Phase 4 STT — see Issue #91.
