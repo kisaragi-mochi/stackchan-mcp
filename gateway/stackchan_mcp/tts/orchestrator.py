@@ -31,6 +31,7 @@ from .audio_utils import (
     resample_pcm16_linear,
 )
 from .base import EngineRegistry, get_registry
+from .emoji_expression import detect_emoji_face, strip_emoji_for_plain_tts
 
 if TYPE_CHECKING:
     from ..gateway import Gateway
@@ -72,6 +73,26 @@ def _resolve_default_engine() -> str:
     return DEFAULT_VOICE
 
 
+async def _try_set_avatar_face(
+    gateway: "Gateway",
+    face: str,
+) -> tuple[bool, str | None]:
+    try:
+        _result, error = await gateway.esp32.call_tool(
+            "self.display.set_avatar", {"face": face}
+        )
+    except Exception as exc:
+        logger.warning("say(): set_avatar(%s) failed: %s", face, exc)
+        return False, str(exc)
+
+    if error:
+        message = error.get("message", error) if isinstance(error, dict) else error
+        logger.warning("say(): set_avatar(%s) failed: %s", face, message)
+        return False, str(message)
+
+    return True, None
+
+
 async def synthesize_and_send(
     arguments: dict[str, Any],
     *,
@@ -105,7 +126,8 @@ async def synthesize_and_send(
     Returns:
         Dict describing the synthesis: ``engine``, ``text``,
         ``speaker_id``, ``frame_count``, ``sample_rate``,
-        ``frame_duration_ms``, ``duration_ms``.
+        ``frame_duration_ms``, ``duration_ms``, plus emoji-expression
+        metadata such as ``face`` and ``text_stripped``.
 
     Raises:
         ValueError: if ``text`` is missing / empty / non-string.
@@ -122,6 +144,8 @@ async def synthesize_and_send(
     text = arguments.get("text", "")
     if not isinstance(text, str) or not text.strip():
         raise ValueError("'text' is required and must be a non-empty string")
+
+    face = detect_emoji_face(text)
 
     # An explicit, non-empty ``voice`` argument always wins. Otherwise the
     # default engine is resolved from STACKCHAN_TTS_ENGINE (falling back to
@@ -181,6 +205,44 @@ async def synthesize_and_send(
     speaker_id = arguments.get("speaker_id")
     reference_audio = arguments.get("reference_audio")
 
+    face_dispatched = False
+    face_error: str | None = None
+    if face is not None:
+        face_dispatched, face_error = await _try_set_avatar_face(gateway, face)
+
+    tts_text = text
+    text_stripped = False
+    if not getattr(engine, "supports_emoji_style", False):
+        stripped_text = strip_emoji_for_plain_tts(text)
+        text_stripped = stripped_text != text
+        tts_text = stripped_text
+
+    if not tts_text.strip():
+        logger.info(
+            "say(): engine=%s speaker=%s speech skipped: text empty after "
+            "emoji strip",
+            voice,
+            speaker_id if speaker_id is not None else "default",
+        )
+        result = {
+            "engine": voice,
+            "text": text,
+            "speaker_id": speaker_id,
+            "frame_count": 0,
+            "sample_rate": DEVICE_SAMPLE_RATE,
+            "frame_duration_ms": DEVICE_FRAME_DURATION_MS,
+            "duration_ms": 0,
+            "face": face,
+            "face_dispatched": face_dispatched,
+            "face_error": face_error,
+            "text_stripped": text_stripped,
+            "spoke": False,
+            "reason": "text empty after emoji strip",
+        }
+        if text_stripped:
+            result["tts_text"] = tts_text
+        return result
+
     # Engine failures (HTTP errors from VOICEVOX, malformed WAV from
     # the synthesiser, etc.) are translated to RuntimeError so the
     # MCP layer's narrow exception filter still produces clean error
@@ -188,7 +250,7 @@ async def synthesize_and_send(
     # arguments stay separable from operational degradation.
     try:
         pcm = await engine.synthesize(
-            text,
+            tts_text,
             speaker_id=speaker_id,
             reference_audio=reference_audio,
         )
@@ -224,7 +286,7 @@ async def synthesize_and_send(
         result["duration_ms"],
     )
 
-    return {
+    response = {
         "engine": voice,
         "text": text,
         "speaker_id": speaker_id,
@@ -232,7 +294,15 @@ async def synthesize_and_send(
         "sample_rate": result["sample_rate"],
         "frame_duration_ms": result["frame_duration_ms"],
         "duration_ms": result["duration_ms"],
+        "face": face,
+        "face_dispatched": face_dispatched,
+        "face_error": face_error,
+        "text_stripped": text_stripped,
+        "spoke": True,
     }
+    if text_stripped:
+        response["tts_text"] = tts_text
+    return response
 
 
 async def send_pcm_audio(

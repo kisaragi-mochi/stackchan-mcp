@@ -1033,15 +1033,20 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 name="say",
                 description=(
                     "Speak the given text on the device speaker via gateway-side "
-                    "TTS (Phase 4, Issue #70). The gateway synthesises audio, "
-                    "encodes it to Opus, and pushes frames over the existing "
-                    "WebSocket — the device firmware does not change. Engine is "
-                    "selectable via 'voice' (default 'voicevox'). "
-                    "NOTE: this build ships the framework only; concrete engines "
-                    "(VOICEVOX, Irodori) land in follow-up PRs and require the "
-                    "matching optional extra (e.g. "
-                    "'pip install stackchan-mcp[tts-voicevox]'). Calling this tool "
-                    "before an engine is registered returns a clear error."
+                    "TTS. The gateway synthesises audio, encodes it to Opus, "
+                    "and pushes frames over the existing WebSocket; the device "
+                    "firmware does not change. Engine is selectable via 'voice' "
+                    "(default 'voicevox'). If the text contains a supported "
+                    "expression emoji, say first switches the avatar face in the "
+                    "same call: happy (😊 😄 😀 😁 🙂 😆 🥰 😍 😋 🤗), "
+                    "sad (😢 😭 😞 😔 ☹️ 🙁 😿), surprised (😲 😮 😯 😱 🤯), "
+                    "embarrassed (😳 😅 🫣), thinking (🤔 🧐 💭). The first "
+                    "mapped emoji wins; unmapped emoji do not change the face, "
+                    "and emoji never select 'off'. Irodori keeps emoji in the "
+                    "TTS input so they can act as voice-style cues. Engines "
+                    "without emoji-style support, including VOICEVOX, strip all "
+                    "emoji before synthesis; if stripping leaves empty text, the "
+                    "face change is still attempted and speech is skipped."
                 ),
                 inputSchema={
                     "type": "object",

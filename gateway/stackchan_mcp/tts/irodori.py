@@ -121,6 +121,7 @@ class IrodoriEngine(TTSEngine):
     """
 
     name = "irodori"
+    supports_emoji_style = True
 
     def __init__(
         self,

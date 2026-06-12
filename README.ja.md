@@ -62,7 +62,7 @@
 | `set_all_leds(r, g, b)` | ベース部の RGB LED 12 個すべてを同じ色に設定 | ✅ |
 | `set_leds(colors)` | `[[r,g,b], ...]` 配列で先頭 N 個を一括設定（I2C 1 回のバースト送信、アニメーション等向け）。指定外の LED は前の色を保持 | ✅ |
 | `clear_leds` | ベース部の RGB LED 12 個すべて消灯 | ✅ |
-| `say(text, voice?, speaker_id?, reference_audio?)` | gateway 側 TTS でデバイススピーカーから喋らせる。デフォルトエンジンは **VOICEVOX**（別 HTTP サービスとして起動 — [TTS セットアップ](#4-オプション-tts-セットアップ-voicevox) 参照）。`[tts]` extras が必要 | ✅ |
+| `say(text, voice?, speaker_id?, reference_audio?)` | gateway 側 TTS でデバイススピーカーから喋らせる。本文内の対応 emoji で、同じ呼び出し内にアバター表情も切り替え可能。デフォルトエンジンは **VOICEVOX**（別 HTTP サービスとして起動 — [TTS セットアップ](#4-オプション-tts-セットアップ-voicevox) 参照）。`[tts]` extras が必要 | ✅ |
 | `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | デバイスマイクから短い発話をキャプチャし、gateway 側 STT で文字起こし。デフォルトエンジンは **faster-whisper**（ローカル動作・MIT — [STT セットアップ](#5-オプション-stt-セットアップ-faster-whisper) 参照）。任意の `motion` feedback で、キャプチャ中に `thinking` face を出したり、頭を上向きに傾けたりできます。`[stt-faster-whisper]`（または `[stt-openai]`）extras と、`listen` ワイヤタイプを受け付けるファームウェアが必要 | ✅ |
 
 詳細スキーマは `gateway/README.md` 参照。
@@ -383,12 +383,22 @@ gateway は VOICEVOX に POST → 返ってきた WAV をデコード →
 TTS フレームワークはエンジン非依存なので、他のエンジンも同じ
 `say` API の裏に差し込めます — 下記の Irodori エンジンを参照。
 
+`say` の本文には対応する表情 emoji も入れられます: happy
+(😊 😄 😀 😁 🙂 😆 🥰 😍 😋 🤗), sad (😢 😭 😞 😔 ☹️ 🙁 😿),
+surprised (😲 😮 😯 😱 🤯), embarrassed (😳 😅 🫣), thinking
+(🤔 🧐 💭)。最初に見つかった対応 emoji が、同じ MCP 呼び出し内で
+発話前にアバター表情を切り替えます。未対応 emoji は表情を変えません。
+VOICEVOX など emoji-style 非対応エンジンでは、合成前にすべての emoji を
+取り除きます。取り除いた結果が空文字列になる場合は、表情変更だけを試み、
+発話は skipped として返します。
+
 #### 別エンジン: Irodori
 
 Irodori は MP3 を返す外部合成サービスを呼ぶ 2 つ目の TTS
 エンジンです。VOICEVOX と同じ `say` パイプラインに乗り（MP3 を
 16 kHz mono PCM にデコードしてから Opus にエンコード）、入力
-テキストに含まれる絵文字を声質スタイルの指示として解釈します。
+テキストに含まれる emoji をそのまま受け取って voice-style cue として
+扱えます。
 
 **デフォルトのエンドポイントはありません** — 合成バックエンドは
 ホスト型サービスであり、URL をハードコードすると全インストールが

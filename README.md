@@ -62,7 +62,7 @@ This repository is a monorepo.
 | `set_all_leds(r, g, b)` | Set all 12 base RGB LEDs to the same color | ✅ |
 | `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array in a single I2C burst (use this for animations / multi-color patterns); trailing LEDs keep their previous color | ✅ |
 | `clear_leds` | Turn all 12 base RGB LEDs off | ✅ |
-| `say(text, voice?, speaker_id?, reference_audio?)` | Speak text on the device speaker via gateway-side TTS. Default engine: **VOICEVOX** (runs as a separate HTTP service — see [TTS setup](#optional-tts-setup-voicevox)). Requires the `[tts]` extra. | ✅ |
+| `say(text, voice?, speaker_id?, reference_audio?)` | Speak text on the device speaker via gateway-side TTS. A supported expression emoji in the text can switch the avatar face in the same call. Default engine: **VOICEVOX** (runs as a separate HTTP service — see [TTS setup](#optional-tts-setup-voicevox)). Requires the `[tts]` extra. | ✅ |
 | `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | Capture a short utterance from the device microphone and transcribe it via gateway-side STT. Default engine: **faster-whisper** (local, MIT) — see [STT setup](#optional-stt-setup-faster-whisper). Optional `motion` feedback can show the `thinking` face or tilt the head up during capture. Requires the `[stt-faster-whisper]` (or `[stt-openai]`) extra and a firmware update with the inbound `listen` wire type. | ✅ |
 
 See `gateway/README.md` for full schemas.
@@ -435,12 +435,22 @@ existing audio decoder pipeline already accepts these frames. The
 TTS framework is engine-agnostic, so additional engines plug in behind
 the same `say` API — see the Irodori engine below.
 
+`say` also accepts supported expression emoji in the text: happy
+(😊 😄 😀 😁 🙂 😆 🥰 😍 😋 🤗), sad (😢 😭 😞 😔 ☹️ 🙁 😿),
+surprised (😲 😮 😯 😱 🤯), embarrassed (😳 😅 🫣), and thinking
+(🤔 🧐 💭). The first mapped emoji changes the avatar face in the same
+MCP call before speech; unmapped emoji do not change the face. VOICEVOX
+and other engines without emoji-style support strip all emoji before
+synthesis. If stripping leaves empty text, the face change is attempted
+and speech is skipped.
+
 #### Alternative engine: Irodori
 
 Irodori is a second TTS engine that calls an external synthesis service
 returning MP3. It plugs into the same `say` pipeline as VOICEVOX (MP3 is
-decoded to 16 kHz mono PCM, then encoded to Opus), and it interprets
-emoji embedded in the input text as a voice-style cue.
+decoded to 16 kHz mono PCM, then encoded to Opus), and it receives
+emoji embedded in the input text verbatim so they can act as voice-style
+cues.
 
 There is **no default endpoint** — the synthesis backend is a hosted
 service, and shipping a hard-coded URL would point every install at

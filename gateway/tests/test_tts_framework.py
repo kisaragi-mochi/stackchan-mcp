@@ -93,6 +93,11 @@ def test_default_voice_constant():
     assert DEFAULT_VOICE == "voicevox"
 
 
+def test_tts_engine_defaults_to_no_emoji_style_support():
+    engine = _FakeEngine(name="voicevox")
+    assert engine.supports_emoji_style is False
+
+
 @pytest.mark.asyncio
 async def test_synthesize_and_send_rejects_missing_text():
     """No text -> ValueError before any engine lookup."""

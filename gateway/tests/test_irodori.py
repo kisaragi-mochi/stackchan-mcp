@@ -38,6 +38,11 @@ def _fake_pcm_16k(n_samples: int = 480) -> bytes:
     return samples.tobytes()
 
 
+def test_irodori_engine_declares_emoji_style_support():
+    engine = IrodoriEngine(url=_SYNTH_URL)
+    assert engine.supports_emoji_style is True
+
+
 def _patch_decode(monkeypatch, *, sample_rate: int = 16000, pcm: bytes | None = None):
     """Replace the MP3 decode boundary with a deterministic fake.
 

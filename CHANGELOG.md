@@ -32,6 +32,11 @@ documented-only.
 
 ### Gateway
 
+- Add emoji-driven expression handling to `say`: a supported emoji
+  switches the avatar face in the same MCP call, Irodori receives emoji
+  verbatim for voice style, and non-emoji-aware engines strip emoji before
+  synthesis. Emoji-only text changes the face and reports speech skipped
+  after stripping. (#289)
 - Add the Irodori TTS engine as a second selectable synthesis engine
   alongside VOICEVOX. It calls an external MP3 synthesis service (decoded
   to PCM via the new `tts-irodori` extra) and reuses the existing

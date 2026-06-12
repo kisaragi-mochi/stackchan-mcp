@@ -29,6 +29,11 @@ class TTSEngine(ABC):
     #: Concrete subclasses must override with a non-empty string.
     name: str = ""
 
+    #: Whether the engine natively interprets emoji as voice-style cues.
+    #: Engines that leave this false receive emoji-stripped text from
+    #: the orchestrator.
+    supports_emoji_style: bool = False
+
     @abstractmethod
     async def synthesize(self, text: str, **opts: Any) -> bytes:
         """Synthesise ``text`` into 16 kHz mono PCM (signed 16-bit LE).
