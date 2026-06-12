@@ -30,6 +30,8 @@ documented-only.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-13
+
 ### Gateway
 
 - Added `gateway_config_get` and `gateway_config_set` MCP wrappers for the
@@ -53,6 +55,8 @@ documented-only.
 - Harden ownership lock stale detection by recording and verifying the
   owning process start time, preventing recycled PIDs from being treated
   as the original live gateway. (#253)
+
+## [firmware-v1.11.0] - 2026-06-13
 
 ### Firmware
 
@@ -1610,7 +1614,9 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.10.0...v0.11.0
+[firmware-v1.11.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.10.0...firmware-v1.11.0
 [0.10.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.1...v0.10.0
 [firmware-v1.10.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.9.0...firmware-v1.10.0
 [0.9.1]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.0...v0.9.1
