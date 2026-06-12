@@ -5022,12 +5022,32 @@ private:
         }
     }
 
-    static bool IsGatewayForceMode() {
+    static bool IsGatewayUrlForced() {
 #if defined(CONFIG_FORCE_DEFAULT_WEBSOCKET_URL) && defined(CONFIG_DEFAULT_WEBSOCKET_URL)
         return CONFIG_DEFAULT_WEBSOCKET_URL[0] != '\0';
 #else
         return false;
 #endif
+    }
+
+    static bool IsGatewayFallbackUrlForced() {
+#if defined(CONFIG_FORCE_DEFAULT_WEBSOCKET_URL) && defined(CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL)
+        return CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL[0] != '\0';
+#else
+        return false;
+#endif
+    }
+
+    static bool IsGatewayTokenForced() {
+#if defined(CONFIG_FORCE_DEFAULT_WEBSOCKET_URL) && defined(CONFIG_DEFAULT_WEBSOCKET_TOKEN)
+        return CONFIG_DEFAULT_WEBSOCKET_TOKEN[0] != '\0';
+#else
+        return false;
+#endif
+    }
+
+    static bool IsGatewayForceMode() {
+        return IsGatewayUrlForced() || IsGatewayFallbackUrlForced() || IsGatewayTokenForced();
     }
 
     static bool IsGatewayDiscoveryCompiledIn() {
@@ -5039,12 +5059,40 @@ private:
     }
 
     static bool IsGatewayDiscoveryEnabled(const std::string& url) {
-        return IsGatewayDiscoveryCompiledIn() && !IsGatewayForceMode() && url.empty();
+        // Only a forced primary URL suppresses the NVS/mDNS candidate path.
+        return IsGatewayDiscoveryCompiledIn() && !IsGatewayUrlForced() && url.empty();
+    }
+
+    static void AddGatewayForcedKeys(cJSON* root) {
+        cJSON* forced_keys = cJSON_CreateArray();
+        if (IsGatewayUrlForced()) {
+            cJSON_AddItemToArray(forced_keys, cJSON_CreateString("url"));
+        }
+        if (IsGatewayFallbackUrlForced()) {
+            cJSON_AddItemToArray(forced_keys, cJSON_CreateString("fallback_url"));
+        }
+        if (IsGatewayTokenForced()) {
+            cJSON_AddItemToArray(forced_keys, cJSON_CreateString("token"));
+        }
+        cJSON_AddItemToObject(root, "forced_keys", forced_keys);
+    }
+
+    static void AddGatewayForcedKeyNote(cJSON* notes,
+                                        const char* key,
+                                        bool provided,
+                                        bool forced) {
+        if (!provided || !forced) {
+            return;
+        }
+        std::string note = std::string(key) +
+            " is overridden by the Kconfig default at connect time until a non-force build is flashed.";
+        cJSON_AddItemToArray(notes, cJSON_CreateString(note.c_str()));
     }
 
     static void AddGatewayRuntimeContext(cJSON* root, const std::string& url) {
         bool force_mode = IsGatewayForceMode();
         cJSON_AddBoolToObject(root, "force_mode", force_mode);
+        AddGatewayForcedKeys(root);
         cJSON_AddBoolToObject(root, "discovery_compiled_in", IsGatewayDiscoveryCompiledIn());
         cJSON_AddBoolToObject(root, "discovery_enabled", IsGatewayDiscoveryEnabled(url));
     }
@@ -5057,12 +5105,15 @@ private:
             "self.gateway_config.get",
             "Read the NVS-backed WebSocket gateway connection settings. "
             "Returns websocket.url, websocket.fallback_url, token_set (never "
-            "the token value), force_mode, discovery_enabled, and the current "
-            "connected_url when a WebSocket candidate is connected. Empty "
-            "websocket.url enables mDNS discovery when discovery support is "
-            "compiled in; websocket.fallback_url is tried after discovery and "
-            "is suitable for an out-of-LAN relay. force_mode=true means the "
-            "non-empty Kconfig default URL overrides NVS at connect time.",
+            "the token value), forced_keys, force_mode, discovery_enabled, "
+            "and the current connected_url when a WebSocket candidate is "
+            "connected. Empty websocket.url enables mDNS discovery when "
+            "discovery support is compiled in and the primary URL is not "
+            "forced; websocket.fallback_url is tried after discovery and is "
+            "suitable for an out-of-LAN relay. forced_keys lists any of url, "
+            "fallback_url, and token that a non-empty Kconfig default "
+            "overrides at connect time; force_mode=true means at least one "
+            "key is forced.",
             PropertyList(),
             [](const PropertyList&) -> ReturnValue {
                 Settings settings("websocket", false);
@@ -5090,12 +5141,15 @@ private:
             "Optional string fields: url, fallback_url, token. At least one "
             "field must be provided. Passing an empty string clears that NVS "
             "key. Leave url empty to enable mDNS discovery on the next "
-            "reconnect; fallback_url is tried after discovery and is suitable "
-            "for an out-of-LAN relay. The change is persisted but does not "
-            "disconnect, reconnect, or reboot the device; it takes effect on "
-            "the next reconnect. force_mode=true means the non-empty Kconfig "
-            "default URL overrides NVS at connect time until a non-force build "
-            "is flashed.",
+            "reconnect when discovery support is compiled in and the primary "
+            "URL is not forced; fallback_url is tried after discovery and is "
+            "suitable for an out-of-LAN relay. The change is persisted but "
+            "does not disconnect, reconnect, or reboot the device; it takes "
+            "effect on the next reconnect. forced_keys lists any of url, "
+            "fallback_url, and token that a non-empty Kconfig default "
+            "overrides at connect time; force_mode=true means at least one "
+            "key is forced, so updates to those keys are ignored until a "
+            "non-force build is flashed.",
             PropertyList({Property("url", kPropertyTypeString, std::string()),
                           Property("fallback_url", kPropertyTypeString, std::string()),
                           Property("token", kPropertyTypeString, std::string())}),
@@ -5152,18 +5206,16 @@ private:
                 cJSON_AddStringToObject(root, "takes_effect", "next_reconnect");
 
                 cJSON* notes = cJSON_CreateArray();
-                if (!url.empty()) {
+                if (!url.empty() && !IsGatewayUrlForced()) {
                     cJSON_AddItemToArray(
                         notes,
                         cJSON_CreateString(
                             "mDNS discovery is disabled until websocket.url is cleared."));
                 }
-                if (IsGatewayForceMode()) {
-                    cJSON_AddItemToArray(
-                        notes,
-                        cJSON_CreateString(
-                            "force_mode is active: the non-empty Kconfig default URL overrides NVS at connect time."));
-                }
+                AddGatewayForcedKeyNote(notes, "url", url_provided, IsGatewayUrlForced());
+                AddGatewayForcedKeyNote(notes, "fallback_url", fallback_url_provided,
+                                        IsGatewayFallbackUrlForced());
+                AddGatewayForcedKeyNote(notes, "token", token_provided, IsGatewayTokenForced());
                 cJSON_AddItemToObject(root, "notes", notes);
                 return root;
             });

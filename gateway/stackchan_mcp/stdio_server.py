@@ -778,14 +778,16 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 description=(
                     "Read the device's NVS-backed WebSocket gateway "
                     "connection settings. Returns url, fallback_url, "
-                    "token_set (never the token value), force_mode, "
-                    "discovery_enabled, and connected_url when the current "
-                    "WebSocket candidate is connected. Empty url enables "
-                    "mDNS discovery when firmware discovery support is "
-                    "compiled in; fallback_url is tried after discovery and "
-                    "is suitable for an out-of-LAN relay. force_mode=true "
-                    "means the non-empty Kconfig default URL overrides NVS "
-                    "at connect time."
+                    "token_set (never the token value), forced_keys, "
+                    "force_mode, discovery_enabled, and connected_url when "
+                    "the current WebSocket candidate is connected. Empty url "
+                    "enables mDNS discovery when firmware discovery support "
+                    "is compiled in and the primary URL is not forced; "
+                    "fallback_url is tried after discovery and is suitable "
+                    "for an out-of-LAN relay. forced_keys lists any of url, "
+                    "fallback_url, and token that a non-empty Kconfig default "
+                    "overrides at connect time; force_mode=true means at "
+                    "least one key is forced."
                 ),
                 inputSchema={"type": "object", "properties": {}},
             ),
@@ -796,13 +798,17 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "connection settings. Optional string fields: url, "
                     "fallback_url, token; at least one must be provided. "
                     "Passing an empty string clears that key. Leave url "
-                    "empty to enable mDNS discovery on the next reconnect; "
-                    "fallback_url is tried after discovery and is suitable "
-                    "for an out-of-LAN relay. The change is persisted but "
-                    "does not disconnect, reconnect, or reboot the device; "
-                    "it takes effect on the next reconnect. force_mode=true "
-                    "means the non-empty Kconfig default URL overrides NVS "
-                    "at connect time until a non-force build is flashed."
+                    "empty to enable mDNS discovery on the next reconnect "
+                    "when firmware discovery support is compiled in and the "
+                    "primary URL is not forced; fallback_url is tried after "
+                    "discovery and is suitable for an out-of-LAN relay. The "
+                    "change is persisted but does not disconnect, reconnect, "
+                    "or reboot the device; it takes effect on the next "
+                    "reconnect. forced_keys lists any of url, fallback_url, "
+                    "and token that a non-empty Kconfig default overrides at "
+                    "connect time; force_mode=true means at least one key is "
+                    "forced, so updates to those keys are ignored until a "
+                    "non-force build is flashed."
                 ),
                 inputSchema={
                     "type": "object",
@@ -813,8 +819,8 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                                 "Primary NVS WebSocket URL. Empty string "
                                 "clears websocket.url, which enables mDNS "
                                 "discovery on the next reconnect when "
-                                "discovery is compiled in and force_mode is "
-                                "false."
+                                "discovery is compiled in and the primary URL "
+                                "is not forced."
                             ),
                         },
                         "fallback_url": {
