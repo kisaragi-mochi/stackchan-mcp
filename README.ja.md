@@ -380,9 +380,57 @@ gateway は VOICEVOX に POST → 返ってきた WAV をデコード →
 既存の WebSocket バイナリチャネルでデバイスへ送信、という流れで
 喋らせます。デバイスは受け取ったフレームを既存の音声デコーダで
 再生するだけなので、**ファームウェア側の変更は不要**です。
-TTS フレームワークはエンジン非依存なので、Irodori-TTS による
-ボイスクローン等、他のエンジンも `say` API を変えずに後から
-追加できます。
+TTS フレームワークはエンジン非依存なので、他のエンジンも同じ
+`say` API の裏に差し込めます — 下記の Irodori エンジンを参照。
+
+#### 別エンジン: Irodori
+
+Irodori は MP3 を返す外部合成サービスを呼ぶ 2 つ目の TTS
+エンジンです。VOICEVOX と同じ `say` パイプラインに乗り（MP3 を
+16 kHz mono PCM にデコードしてから Opus にエンコード）、入力
+テキストに含まれる絵文字を声質スタイルの指示として解釈します。
+
+**デフォルトのエンドポイントはありません** — 合成バックエンドは
+ホスト型サービスであり、URL をハードコードすると全インストールが
+他人のデプロイを指してしまうためです。互換性のある合成 API を
+自分でホストし（例: 参照元の Hugging Face Space を複製する、または
+同じリクエスト/レスポンス契約に従う独自サービスを動かす）、
+gateway をそこに向けてください。
+
+extras のインストール:
+
+```bash
+pip install 'stackchan-mcp[tts-irodori]'
+```
+
+これで `httpx`・`opuslib`・`miniaudio`（プレビルト wheel 付きの
+小さな自己完結型 MP3/音声デコーダ。`opuslib` が要求する `libopus`
+以外に追加のシステムライブラリは不要）が入ります。
+
+環境変数で設定します（URL とキーは環境変数からのみ読み込み —
+コミットしないでください）:
+
+| 環境変数 | デフォルト | 補足 |
+|---|---|---|
+| `STACKCHAN_IRODORI_URL` | _(必須)_ | 自前ホストした合成サービスのエンドポイント URL。未設定 → エンジンは一覧に出るが `say(voice="irodori")` は明確なエラーを返す |
+| `STACKCHAN_IRODORI_KEY` | _(なし)_ | 任意の API キー。クエリパラメータとして送信 |
+| `STACKCHAN_IRODORI_SPEAKER` | `3` | デフォルト話者 ID |
+| `STACKCHAN_IRODORI_STEPS` | `24` | デフォルト拡散ステップ数（大きいほど遅く高品質） |
+
+呼び出しごとに Irodori を選択:
+
+```
+say(text="やったね😊", voice="irodori")
+```
+
+または `voice` を省略した全 `say` 呼び出しのデフォルトエンジンに:
+
+```bash
+export STACKCHAN_TTS_ENGINE=irodori
+```
+
+`STACKCHAN_TTS_ENGINE` 未設定なら VOICEVOX がデフォルトのままで、
+明示的な `voice` 引数は常にデフォルトを上書きします。
 
 ### 5. オプション: STT セットアップ (faster-whisper)
 

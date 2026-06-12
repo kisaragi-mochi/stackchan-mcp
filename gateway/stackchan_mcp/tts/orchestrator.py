@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
@@ -45,10 +46,30 @@ TTS_START_TRANSITION_DELAY_S = 0.05
 logger = logging.getLogger(__name__)
 
 
-#: Default engine name when ``voice`` is omitted from the tool call.
-#: VOICEVOX is the canonical default (Issue #70); the concrete engine
-#: ships in PR2 of that Issue.
+#: Built-in default engine name when ``voice`` is omitted from the tool
+#: call and ``STACKCHAN_TTS_ENGINE`` is unset. VOICEVOX is the canonical
+#: default (Issue #70).
 DEFAULT_VOICE = "voicevox"
+
+#: Environment variable that overrides the default engine selected when a
+#: ``say`` call omits ``voice``. The per-call ``voice`` argument still
+#: takes precedence over this; this only changes the fallback when no
+#: ``voice`` is given. Unset → :data:`DEFAULT_VOICE`.
+TTS_ENGINE_ENV_VAR = "STACKCHAN_TTS_ENGINE"
+
+
+def _resolve_default_engine() -> str:
+    """Return the default engine name, honouring ``STACKCHAN_TTS_ENGINE``.
+
+    The environment variable lets an operator make a non-VOICEVOX engine
+    (e.g. ``irodori``) the default for ``say`` calls that don't pass an
+    explicit ``voice``. A blank or whitespace-only value is ignored so an
+    empty export does not silently break engine lookup.
+    """
+    env_engine = os.getenv(TTS_ENGINE_ENV_VAR)
+    if env_engine and env_engine.strip():
+        return env_engine.strip()
+    return DEFAULT_VOICE
 
 
 async def synthesize_and_send(
@@ -63,7 +84,9 @@ async def synthesize_and_send(
         arguments: MCP tool arguments. Recognised keys:
 
             * ``text`` (required): non-empty string to speak.
-            * ``voice``: engine name; defaults to :data:`DEFAULT_VOICE`.
+            * ``voice``: engine name; when omitted, the default is
+              resolved from ``STACKCHAN_TTS_ENGINE`` and otherwise
+              :data:`DEFAULT_VOICE`.
             * ``speaker_id``: engine-specific speaker identifier
               (e.g. VOICEVOX speaker).
             * ``reference_audio``: path to a reference audio sample
@@ -100,8 +123,16 @@ async def synthesize_and_send(
     if not isinstance(text, str) or not text.strip():
         raise ValueError("'text' is required and must be a non-empty string")
 
-    voice_raw = arguments.get("voice", DEFAULT_VOICE)
-    voice = voice_raw if isinstance(voice_raw, str) and voice_raw else DEFAULT_VOICE
+    # An explicit, non-empty ``voice`` argument always wins. Otherwise the
+    # default engine is resolved from STACKCHAN_TTS_ENGINE (falling back to
+    # DEFAULT_VOICE), so an operator can switch the default without every
+    # caller passing ``voice``.
+    voice_raw = arguments.get("voice")
+    voice = (
+        voice_raw
+        if isinstance(voice_raw, str) and voice_raw
+        else _resolve_default_engine()
+    )
 
     reg = registry if registry is not None else get_registry()
     engine = reg.get(voice)
