@@ -164,6 +164,47 @@ async def test_synthesize_reads_url_from_env(monkeypatch):
     assert captured[0]["url"] == _SYNTH_URL
 
 
+@pytest.mark.asyncio
+async def test_synthesize_preserves_trailing_slash_url(monkeypatch):
+    """A trailing slash on the endpoint URL is requested verbatim.
+
+    The configured value is the synthesis *endpoint* URL, not a base
+    URL: a deployment defined as ``.../api/synthesize/`` must not be
+    rewritten to ``.../api/synthesize``, which strict-routing servers
+    treat as a different path.
+    """
+    slash_url = _SYNTH_URL + "/"
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url_no_query = str(request.url).split("?", 1)[0]
+        requests.append(url_no_query)
+        if url_no_query == slash_url:
+            return httpx.Response(
+                200,
+                json={"success": True, "mp3StreamingUrl": _MP3_STREAM_URL},
+            )
+        return httpx.Response(200, content=_FAKE_MP3)
+
+    _patch_decode(monkeypatch)
+    engine = IrodoriEngine(url=slash_url, transport=httpx.MockTransport(handler))
+
+    pcm = await engine.synthesize("hello")
+
+    assert requests[0] == slash_url
+    assert isinstance(pcm, bytes)
+    assert len(pcm) > 0
+
+
+def test_resolve_url_env_trailing_slash_and_whitespace(monkeypatch):
+    """Env URL keeps its trailing slash; only surrounding whitespace goes."""
+    slash_url = _SYNTH_URL + "/"
+    monkeypatch.setenv("STACKCHAN_IRODORI_URL", f"  {slash_url}  ")
+    engine = IrodoriEngine()
+
+    assert engine._resolve_url() == slash_url
+
+
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------

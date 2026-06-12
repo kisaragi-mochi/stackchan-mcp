@@ -160,7 +160,12 @@ class IrodoriEngine(TTSEngine):
         # unset — the engine stays visible in the registry, and the
         # missing-URL condition becomes an actionable synthesis-time
         # error instead.
-        self._url_override = url.rstrip("/") if url else None
+        #
+        # Only surrounding whitespace is stripped. The value is the
+        # synthesis *endpoint* URL (not a base URL), so a trailing slash
+        # is significant: stripping it would request a different path on
+        # strict-routing deployments.
+        self._url_override = url.strip() if url and url.strip() else None
         self._api_key_override = api_key
 
         if default_speaker is not None:
@@ -198,12 +203,15 @@ class IrodoriEngine(TTSEngine):
         default — pointing at an unconfigured third-party service would
         be wrong — so an unset URL raises ``RuntimeError`` with setup
         guidance.
+
+        Only surrounding whitespace is stripped; a trailing slash is
+        preserved because the value is the endpoint URL itself.
         """
         if self._url_override:
             return self._url_override
         env_url = os.getenv("STACKCHAN_IRODORI_URL")
         if env_url and env_url.strip():
-            return env_url.strip().rstrip("/")
+            return env_url.strip()
         raise RuntimeError(
             "Irodori synthesis URL is not configured. Set the "
             "STACKCHAN_IRODORI_URL environment variable to the URL of a "
