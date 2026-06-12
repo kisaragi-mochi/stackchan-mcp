@@ -237,24 +237,6 @@ async def synthesize_and_send(
             "No ESP32 device connected; cannot deliver synthesised audio."
         )
 
-    # WebSocket protocol version gate. The firmware decodes raw Opus
-    # binary frames only on protocol v1; v2/v3 wrap each binary message
-    # in a BinaryProtocol header that this gateway does not yet emit.
-    # Streaming raw frames to a v2/v3 device makes the firmware parse
-    # Opus bytes as header fields, so the audio never plays — yet
-    # without this check ``say()`` would still report success. Fail
-    # fast with a clear, actionable error instead. BinaryProtocol
-    # header wrapping is tracked as a follow-up to Issue #70.
-    connection = getattr(gateway.esp32, "connection", None)
-    proto_version = getattr(connection, "protocol_version", 1)
-    if proto_version != 1:
-        raise RuntimeError(
-            f"TTS requires WebSocket protocol v1, but the connected "
-            f"device negotiated v{proto_version}. Rebuild the firmware "
-            "with v1 (the default for this repository) — v2/v3 "
-            "BinaryProtocol header wrapping is not yet supported."
-        )
-
     speaker_id = arguments.get("speaker_id")
     reference_audio = arguments.get("reference_audio")
 
@@ -298,6 +280,24 @@ async def synthesize_and_send(
         if text_stripped:
             result["tts_text"] = tts_text
         return result
+
+    # WebSocket protocol version gate. The firmware decodes raw Opus
+    # binary frames only on protocol v1; v2/v3 wrap each binary message
+    # in a BinaryProtocol header that this gateway does not yet emit.
+    # Streaming raw frames to a v2/v3 device makes the firmware parse
+    # Opus bytes as header fields, so the audio never plays — yet
+    # without this check ``say()`` would still report success. Fail
+    # fast with a clear, actionable error instead. BinaryProtocol
+    # header wrapping is tracked as a follow-up to Issue #70.
+    connection = getattr(gateway.esp32, "connection", None)
+    proto_version = getattr(connection, "protocol_version", 1)
+    if proto_version != 1:
+        raise RuntimeError(
+            f"TTS requires WebSocket protocol v1, but the connected "
+            f"device negotiated v{proto_version}. Rebuild the firmware "
+            "with v1 (the default for this repository) — v2/v3 "
+            "BinaryProtocol header wrapping is not yet supported."
+        )
 
     # Engine failures (HTTP errors from VOICEVOX, malformed WAV from
     # the synthesiser, etc.) are translated to RuntimeError so the

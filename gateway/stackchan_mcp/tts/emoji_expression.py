@@ -75,6 +75,6 @@ def strip_emoji_for_plain_tts(text: str) -> str:
     if not contains_emoji(text):
         return text
 
-    stripped = _EMOJI_SEQUENCE_RE.sub("", text)
-    stripped = _EMOJI_RESIDUE_RE.sub("", stripped)
+    stripped = _EMOJI_SEQUENCE_RE.sub(" ", text)
+    stripped = _EMOJI_RESIDUE_RE.sub(" ", stripped)
     return _WHITESPACE_RE.sub(" ", stripped).strip()

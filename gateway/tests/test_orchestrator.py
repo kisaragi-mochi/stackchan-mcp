@@ -287,10 +287,16 @@ async def test_pipeline_keeps_emoji_for_emoji_style_engine(fake_encode):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_emoji_only_plain_engine_skips_speech(fake_encode):
+@pytest.mark.parametrize("protocol_version", [1, 2, 3])
+async def test_pipeline_emoji_only_plain_engine_skips_speech_before_protocol_gate(
+    fake_encode, protocol_version
+):
     """Emoji-only text can still set a face without calling synthesize."""
+    from types import SimpleNamespace
+
     engine = _PCMEngine(b"\x01\x00" * 960)
     esp32 = _FakeESP32(connected=True, record_lock=True)
+    esp32.connection = SimpleNamespace(protocol_version=protocol_version)
     gateway = _FakeGateway(esp32)
 
     reg = EngineRegistry()

@@ -31,6 +31,10 @@ def test_strip_emoji_for_plain_tts_removes_all_emoji_and_collapses_spaces():
     assert strip_emoji_for_plain_tts(text) == "やったね rocket thinking"
 
 
+def test_strip_emoji_for_plain_tts_preserves_word_boundaries():
+    assert strip_emoji_for_plain_tts("hello😊world") == "hello world"
+
+
 def test_strip_emoji_for_plain_tts_keeps_no_emoji_text_exactly():
     text = "hello   world"
     assert strip_emoji_for_plain_tts(text) == text
