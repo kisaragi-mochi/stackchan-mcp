@@ -17,6 +17,7 @@ synthesising audio with no destination.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -59,6 +60,39 @@ DEFAULT_VOICE = "voicevox"
 TTS_ENGINE_ENV_VAR = "STACKCHAN_TTS_ENGINE"
 
 
+def _extract_set_avatar_payload(result: Any) -> dict[str, Any] | None:
+    payload = result
+    if isinstance(result, dict) and "content" in result:
+        content = result.get("content") or []
+        if isinstance(content, list) and content:
+            text = (
+                content[0].get("text")
+                if isinstance(content[0], dict)
+                else None
+            )
+            if isinstance(text, str):
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+def _set_avatar_payload_error(payload: dict[str, Any]) -> str:
+    raw_error = payload.get("error")
+    if isinstance(raw_error, dict):
+        message = raw_error.get("message")
+        if isinstance(message, str) and message.strip():
+            return message
+    elif isinstance(raw_error, str) and raw_error.strip():
+        return raw_error
+    elif raw_error:
+        return str(raw_error)
+
+    return "set_avatar reported ok=false"
+
+
 def _resolve_default_engine() -> str:
     """Return the default engine name, honouring ``STACKCHAN_TTS_ENGINE``.
 
@@ -78,7 +112,7 @@ async def _try_set_avatar_face(
     face: str,
 ) -> tuple[bool, str | None]:
     try:
-        _result, error = await gateway.esp32.call_tool(
+        result, error = await gateway.esp32.call_tool(
             "self.display.set_avatar", {"face": face}
         )
     except Exception as exc:
@@ -89,6 +123,14 @@ async def _try_set_avatar_face(
         message = error.get("message", error) if isinstance(error, dict) else error
         logger.warning("say(): set_avatar(%s) failed: %s", face, message)
         return False, str(message)
+
+    payload = _extract_set_avatar_payload(result)
+    if payload is not None and payload.get("ok") is False:
+        message = _set_avatar_payload_error(payload)
+        logger.warning(
+            "say(): set_avatar(%s) reported ok=false: %s", face, message
+        )
+        return False, message
 
     return True, None
 

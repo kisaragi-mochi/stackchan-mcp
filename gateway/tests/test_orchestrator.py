@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -46,12 +47,16 @@ class _RecordingLock:
         self._lock.release()
 
 
+_DEFAULT_AVATAR_RESULT = object()
+
+
 class _FakeESP32:
     def __init__(
         self,
         *,
         connected: bool = True,
         avatar_error: str | None = None,
+        avatar_result: Any = _DEFAULT_AVATAR_RESULT,
         record_lock: bool = False,
     ) -> None:
         self.device_connected = connected
@@ -59,6 +64,7 @@ class _FakeESP32:
         self.tts_states: list[str] = []
         self.tool_calls: list[tuple[str, dict[str, Any]]] = []
         self.avatar_error = avatar_error
+        self.avatar_result = avatar_result
         # Records the relative order in which audio frames and TTS state
         # notifications were dispatched, so tests can assert that
         # ``start`` precedes any frame and ``stop`` trails them.
@@ -79,6 +85,8 @@ class _FakeESP32:
         if name == "self.display.set_avatar":
             if self.avatar_error is not None:
                 return {}, {"message": self.avatar_error}
+            if self.avatar_result is not _DEFAULT_AVATAR_RESULT:
+                return self.avatar_result, None
             return {"ok": True}, None
         raise AssertionError(f"unexpected tool call: {name}")
 
@@ -94,6 +102,11 @@ class _FakeESP32:
 class _FakeGateway:
     def __init__(self, esp32: _FakeESP32) -> None:
         self.esp32 = esp32
+
+
+def _tool_result_payload(payload: dict[str, Any] | str) -> dict[str, Any]:
+    text = payload if isinstance(payload, str) else json.dumps(payload)
+    return {"content": [{"type": "text", "text": text}]}
 
 
 @pytest.fixture
@@ -332,6 +345,79 @@ async def test_pipeline_face_dispatch_failure_does_not_abort_speech(fake_encode)
     assert result["face"] == "happy"
     assert result["face_dispatched"] is False
     assert result["face_error"] == "display offline"
+    assert result["spoke"] is True
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_error"),
+    [
+        ({"ok": False, "error": "unsupported face"}, "unsupported face"),
+        ({"ok": False}, "set_avatar reported ok=false"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_pipeline_face_payload_ok_false_reports_failure(
+    fake_encode, payload, expected_error
+):
+    """A device result payload with ok:false is reported as face failure."""
+    engine = _PCMEngine(b"\x01\x00" * 960)
+    esp32 = _FakeESP32(
+        connected=True,
+        avatar_result=_tool_result_payload(payload),
+    )
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await synthesize_and_send(
+        {"text": "hello 😊", "voice": "voicevox"},
+        gateway=gateway,
+        registry=reg,
+    )
+
+    assert esp32.tool_calls == [("self.display.set_avatar", {"face": "happy"})]
+    assert engine.calls[0][0] == "hello"
+    assert esp32.tts_states == ["start", "stop"]
+    assert esp32.frames == [b"opus_frame_0"]
+    assert result["face"] == "happy"
+    assert result["face_dispatched"] is False
+    assert result["face_error"] == expected_error
+    assert result["spoke"] is True
+
+
+@pytest.mark.parametrize(
+    "avatar_result",
+    [
+        {"content": []},
+        _tool_result_payload("not json"),
+        _tool_result_payload({"status": "ignored"}),
+        {"content": [{"type": "text"}]},
+        {"content": {"text": json.dumps({"ok": False})}},
+    ],
+)
+@pytest.mark.asyncio
+async def test_pipeline_face_odd_result_payloads_still_count_as_success(
+    fake_encode, avatar_result
+):
+    """Only an explicit ok:false payload turns face dispatch into failure."""
+    engine = _PCMEngine(b"\x01\x00" * 960)
+    esp32 = _FakeESP32(connected=True, avatar_result=avatar_result)
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await synthesize_and_send(
+        {"text": "hello 😊", "voice": "voicevox"},
+        gateway=gateway,
+        registry=reg,
+    )
+
+    assert esp32.tool_calls == [("self.display.set_avatar", {"face": "happy"})]
+    assert result["face"] == "happy"
+    assert result["face_dispatched"] is True
+    assert result["face_error"] is None
     assert result["spoke"] is True
 
 
