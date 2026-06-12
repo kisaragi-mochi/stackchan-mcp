@@ -75,6 +75,7 @@ public:
     // when no audio session is currently armed. Default false so subclasses
     // that lack a persistent-transport notion are unaffected.
     virtual bool IsTransportConnected() const { return false; }
+    virtual std::string GetConnectedUrl() const { return ""; }
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);

@@ -135,7 +135,8 @@ After flashing, WiFi configuration happens on first boot — connect from a smar
 
 On a local network, the gateway advertises `_stackchan-mcp._tcp.local.`
 by default. Fresh firmware can use that mDNS/DNS-SD record to find the
-WebSocket endpoint automatically when no primary URL has been saved yet.
+WebSocket endpoint automatically when no primary URL has been saved yet. mDNS
+discovery requires NVS `websocket.url` to be empty.
 
 ### Configuring the WebSocket gateway URL and auth token
 
@@ -163,6 +164,11 @@ and candidate address list. mDNS only discovers the URL;
 `websocket.token` / `CONFIG_DEFAULT_WEBSOCKET_TOKEN` still control
 authentication.
 
+For LAN auto-discovery with an automatic out-of-LAN relay fallback, keep NVS
+`websocket.url` empty and store the relay URL in `websocket.fallback_url`. With
+that profile, mDNS candidates are tried first, and the relay is tried later if
+the local discovery path does not complete the WebSocket server hello flow.
+
 Automatic recovery after a gateway host IPv4 change requires both sides of the
 paired mDNS fix: Gateway vA.B.C+ refreshes the advertised service when the host
 address changes, and Firmware vX.Y.Z+ tries all supported mDNS service
@@ -171,19 +177,19 @@ instance until reboot.
 
 The firmware reads these NVS keys for the gateway connection:
 
-- `websocket.url` — the gateway WebSocket URL (e.g. `ws://192.168.1.100:8765/`)
+- `websocket.url` — the gateway WebSocket URL (e.g. `ws://<gateway-host>:8765/`)
 - `websocket.fallback_url` — optional second gateway URL to try when
   `websocket.url` cannot be reached or does not complete the server hello flow
 - `websocket.token` — the bearer token sent as `Authorization: Bearer <token>`,
   matched against `STACKCHAN_TOKEN` / `BEARER_TOKEN` on the gateway side
   (leave both empty to skip authentication entirely)
 
-There are three practical ways to provide them:
+There are four practical ways to provide them, plus one temporary source-level escape hatch:
 
 1. **Build-time defaults via Kconfig (recommended for developers)**: run
    `idf.py menuconfig` → `Component config` → `Xiaozhi Assistant`, and set:
    - `Default WebSocket gateway URL (fallback when NVS is empty)` →
-     `CONFIG_DEFAULT_WEBSOCKET_URL` (e.g. `ws://192.168.1.100:8765/`)
+     `CONFIG_DEFAULT_WEBSOCKET_URL` (e.g. `ws://<gateway-host>:8765/`)
    - `Fallback WebSocket gateway URL` →
      `CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL`
    - `Default WebSocket auth token (fallback when NVS is empty)` →
@@ -201,7 +207,7 @@ There are three practical ways to provide them:
    `http://192.168.4.1`, switch to the **Advanced** tab, and fill in:
    - **WebSocket Gateway URL** (e.g. `ws://<gateway-host>:8765/`) — the
      primary gateway candidate.
-   - **Fallback Gateway URL** (e.g. `wss://<node>.<tailnet>.ts.net/`) —
+   - **Fallback Gateway URL** (e.g. `wss://<relay-host>/`) —
      optional second candidate, tried only after the primary candidate
      fails the server-hello flow.
    - **Gateway Token** — optional bearer token, sent as
@@ -226,12 +232,21 @@ There are three practical ways to provide them:
    `CONFIG_DEFAULT_WEBSOCKET_*` Kconfig value (or to "no fallback" when
    no Kconfig default is set).
 
-3. **Write `websocket.url` / `websocket.fallback_url` / `websocket.token`
-   directly to NVS** (advanced): for example with a custom NVS-write tool
-   over serial. Same persistence semantics as the WiFi config UI;
-   primarily useful for batch provisioning.
+3. **Use the runtime MCP tools over an established connection**:
+   `gateway_config_get` reports `websocket.url`, `websocket.fallback_url`,
+   whether a token is set, `force_mode`, `discovery_enabled`, and the connected
+   candidate URL without exposing the token value. `gateway_config_set` accepts
+   optional `url`, `fallback_url`, and `token` strings. Passing an empty string
+   clears that NVS key; for example `url=""` restores the mDNS discovery path
+   on the next reconnect. Changes are persisted immediately but do not trigger
+   a disconnect, reconnect, or reboot.
 
-4. **Temporary source hardcode (not recommended)**: editing
+4. **Write `websocket.url` / `websocket.fallback_url` / `websocket.token`
+   directly to NVS** (advanced): for example with a custom NVS-write tool
+   over serial. Same persistence semantics as the WiFi config UI and runtime
+   MCP tools; primarily useful for batch provisioning.
+
+5. **Temporary source hardcode (not recommended)**: editing
    `websocket_protocol.cc` can unblock local experiments, but keep it out of
    commits.
 
@@ -239,9 +254,10 @@ Common gateway URL setups:
 
 | Mode | Primary URL | Fallback URL |
 | --- | --- | --- |
-| Local only | `ws://<gateway-host>:8765/` | empty |
-| Tailscale only | `wss://<node>.<tailnet>.ts.net/` | empty |
-| Local with remote fallback | `ws://<gateway-host>:8765/` | `wss://<node>.<tailnet>.ts.net/` |
+| LAN auto-discovery with relay fallback | empty (mDNS) | `wss://<relay-host>/` |
+| Fixed local only | `ws://<gateway-host>:8765/` | empty |
+| Relay only | `wss://<relay-host>/` | empty |
+| Fixed local with relay fallback | `ws://<gateway-host>:8765/` | `wss://<relay-host>/` |
 
 #### Existing devices with stale NVS — `CONFIG_FORCE_DEFAULT_WEBSOCKET_URL`
 
@@ -249,11 +265,14 @@ If you are flashing onto a device that previously ran upstream xiaozhi-esp32
 firmware, NVS will already contain `websocket.url=wss://api.tenclass.net/...`
 written by the upstream OTA-config path. In this case the empty-NVS fallback
 in option 1 above will **not** trigger, and the device will keep trying to
-talk to tenclass instead of your local gateway. There is currently no
-runtime tool to clear the `websocket` NVS namespace selectively.
+talk to tenclass instead of your local gateway.
 
-To work around this without erasing all of NVS (which would also drop WiFi
-credentials), enable the force-override switch:
+If the device can still establish a stackchan-mcp connection through any
+candidate, call `gateway_config_set` with `url=""` to clear the stale primary
+NVS URL and restore the mDNS discovery path on the next reconnect. If the stale
+URL prevents any stackchan-mcp connection from being established, use the
+force-override switch without erasing all of NVS (which would also drop WiFi
+credentials):
 
 - `Force CONFIG_DEFAULT_WEBSOCKET_URL/TOKEN to override NVS` →
   `CONFIG_FORCE_DEFAULT_WEBSOCKET_URL=y`
@@ -278,7 +297,7 @@ tracked `firmware/sdkconfig.defaults`. Instead, create a gitignored local file:
 cd firmware
 cat > sdkconfig.defaults.local <<'EOF'
 CONFIG_DEFAULT_WEBSOCKET_URL="ws://<your-lan-ip>:8765/"
-CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL="wss://<node>.<tailnet>.ts.net/"
+CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL="wss://<relay-host>/"
 CONFIG_DEFAULT_WEBSOCKET_TOKEN="<your-dev-token>"
 CONFIG_FORCE_DEFAULT_WEBSOCKET_URL=y
 EOF

@@ -7,6 +7,7 @@
 #include "i2c_device.h"
 #include "axp2101.h"
 #include "mcp_server.h"
+#include "settings.h"
 #include "led_strip.h"
 // Issue #79: servo driver is selectable at build time via Kconfig.
 //   - CONFIG_STACKCHAN_SERVO_SCSCL  (default): GPL-3.0 SCServo_lib
@@ -53,6 +54,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -5020,9 +5022,151 @@ private:
         }
     }
 
+    static bool IsGatewayForceMode() {
+#if defined(CONFIG_FORCE_DEFAULT_WEBSOCKET_URL) && defined(CONFIG_DEFAULT_WEBSOCKET_URL)
+        return CONFIG_DEFAULT_WEBSOCKET_URL[0] != '\0';
+#else
+        return false;
+#endif
+    }
+
+    static bool IsGatewayDiscoveryCompiledIn() {
+#if defined(CONFIG_STACKCHAN_MDNS_DISCOVERY) && CONFIG_STACKCHAN_MDNS_DISCOVERY
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    static bool IsGatewayDiscoveryEnabled(const std::string& url) {
+        return IsGatewayDiscoveryCompiledIn() && !IsGatewayForceMode() && url.empty();
+    }
+
+    static void AddGatewayRuntimeContext(cJSON* root, const std::string& url) {
+        bool force_mode = IsGatewayForceMode();
+        cJSON_AddBoolToObject(root, "force_mode", force_mode);
+        cJSON_AddBoolToObject(root, "discovery_compiled_in", IsGatewayDiscoveryCompiledIn());
+        cJSON_AddBoolToObject(root, "discovery_enabled", IsGatewayDiscoveryEnabled(url));
+    }
+
     void RegisterMcpTools() {
         auto& mcp_server = McpServer::GetInstance();
         ESP_LOGI(TAG, "Registering StackChan MCP tools...");
+
+        mcp_server.AddTool(
+            "self.gateway_config.get",
+            "Read the NVS-backed WebSocket gateway connection settings. "
+            "Returns websocket.url, websocket.fallback_url, token_set (never "
+            "the token value), force_mode, discovery_enabled, and the current "
+            "connected_url when a WebSocket candidate is connected. Empty "
+            "websocket.url enables mDNS discovery when discovery support is "
+            "compiled in; websocket.fallback_url is tried after discovery and "
+            "is suitable for an out-of-LAN relay. force_mode=true means the "
+            "non-empty Kconfig default URL overrides NVS at connect time.",
+            PropertyList(),
+            [](const PropertyList&) -> ReturnValue {
+                Settings settings("websocket", false);
+                std::string url = settings.GetString("url");
+                std::string fallback_url = settings.GetString("fallback_url");
+                bool token_set = !settings.GetString("token").empty();
+                std::string connected_url = Application::GetInstance().GetConnectedGatewayUrl();
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "url", url.c_str());
+                cJSON_AddStringToObject(root, "fallback_url", fallback_url.c_str());
+                cJSON_AddBoolToObject(root, "token_set", token_set);
+                AddGatewayRuntimeContext(root, url);
+                if (connected_url.empty()) {
+                    cJSON_AddNullToObject(root, "connected_url");
+                } else {
+                    cJSON_AddStringToObject(root, "connected_url", connected_url.c_str());
+                }
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.gateway_config.set",
+            "Update the NVS-backed WebSocket gateway connection settings. "
+            "Optional string fields: url, fallback_url, token. At least one "
+            "field must be provided. Passing an empty string clears that NVS "
+            "key. Leave url empty to enable mDNS discovery on the next "
+            "reconnect; fallback_url is tried after discovery and is suitable "
+            "for an out-of-LAN relay. The change is persisted but does not "
+            "disconnect, reconnect, or reboot the device; it takes effect on "
+            "the next reconnect. force_mode=true means the non-empty Kconfig "
+            "default URL overrides NVS at connect time until a non-force build "
+            "is flashed.",
+            PropertyList({Property("url", kPropertyTypeString, std::string()),
+                          Property("fallback_url", kPropertyTypeString, std::string()),
+                          Property("token", kPropertyTypeString, std::string())}),
+            [](const PropertyList& properties) -> ReturnValue {
+                const auto& url_property = properties["url"];
+                const auto& fallback_url_property = properties["fallback_url"];
+                const auto& token_property = properties["token"];
+                bool url_provided = url_property.was_provided();
+                bool fallback_url_provided = fallback_url_property.was_provided();
+                bool token_provided = token_property.was_provided();
+                if (!url_provided && !fallback_url_provided && !token_provided) {
+                    throw std::invalid_argument(
+                        "At least one of url, fallback_url, or token must be provided");
+                }
+
+                Settings settings("websocket", true);
+                std::string url = settings.GetString("url");
+                std::string fallback_url = settings.GetString("fallback_url");
+                std::string token = settings.GetString("token");
+
+                cJSON* updated_keys = cJSON_CreateArray();
+                auto apply_string = [&](const char* response_key,
+                                        const char* nvs_key,
+                                        bool provided,
+                                        const std::string& requested_value,
+                                        std::string& current_value) {
+                    if (!provided) {
+                        return;
+                    }
+                    if (requested_value.empty()) {
+                        settings.EraseKey(nvs_key);
+                        current_value.clear();
+                    } else {
+                        settings.SetString(nvs_key, requested_value);
+                        current_value = requested_value;
+                    }
+                    cJSON_AddItemToArray(updated_keys, cJSON_CreateString(response_key));
+                };
+
+                apply_string("url", "url", url_provided,
+                             url_property.value<std::string>(), url);
+                apply_string("fallback_url", "fallback_url", fallback_url_provided,
+                             fallback_url_property.value<std::string>(), fallback_url);
+                apply_string("token", "token", token_provided,
+                             token_property.value<std::string>(), token);
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddItemToObject(root, "updated_keys", updated_keys);
+                cJSON_AddStringToObject(root, "url", url.c_str());
+                cJSON_AddStringToObject(root, "fallback_url", fallback_url.c_str());
+                cJSON_AddBoolToObject(root, "token_set", !token.empty());
+                AddGatewayRuntimeContext(root, url);
+                cJSON_AddStringToObject(root, "takes_effect", "next_reconnect");
+
+                cJSON* notes = cJSON_CreateArray();
+                if (!url.empty()) {
+                    cJSON_AddItemToArray(
+                        notes,
+                        cJSON_CreateString(
+                            "mDNS discovery is disabled until websocket.url is cleared."));
+                }
+                if (IsGatewayForceMode()) {
+                    cJSON_AddItemToArray(
+                        notes,
+                        cJSON_CreateString(
+                            "force_mode is active: the non-empty Kconfig default URL overrides NVS at connect time."));
+                }
+                cJSON_AddItemToObject(root, "notes", notes);
+                return root;
+            });
 
         // Set head angles (yaw, pitch in degrees)
         // SCS0009: 1 step = 0.3125 degrees, so 1 degree = 3.2 steps (= 16/5)

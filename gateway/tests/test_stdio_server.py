@@ -85,6 +85,127 @@ async def test_get_head_angles_relays_to_esp32(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_tools_includes_gateway_config_tools():
+    """gateway_config_get/set are exposed with the expected schemas."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools = {tool.name: tool for tool in result.root.tools}
+    assert "gateway_config_get" in tools
+    assert "gateway_config_set" in tools
+
+    get_schema = tools["gateway_config_get"].inputSchema
+    assert get_schema == {"type": "object", "properties": {}}
+    assert "mDNS" in tools["gateway_config_get"].description
+    assert "force_mode" in tools["gateway_config_get"].description
+
+    set_tool = tools["gateway_config_set"]
+    set_schema = set_tool.inputSchema
+    assert set(set_schema["properties"]) == {"url", "fallback_url", "token"}
+    assert "required" not in set_schema
+    assert set_schema["properties"]["url"]["type"] == "string"
+    assert set_schema["properties"]["fallback_url"]["type"] == "string"
+    assert set_schema["properties"]["token"]["type"] == "string"
+    assert "empty string clears" in set_tool.description
+    assert "next reconnect" in set_tool.description
+
+
+@pytest.mark.asyncio
+async def test_gateway_config_get_relays_to_esp32(monkeypatch):
+    """gateway_config_get maps to self.gateway_config.get."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "url": "",
+                                "fallback_url": "wss://relay.example/",
+                                "token_set": True,
+                                "force_mode": False,
+                                "discovery_enabled": True,
+                            }
+                        ),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "gateway_config_get", "arguments": {}},
+        )
+    )
+
+    assert calls == [("self.gateway_config.get", {})]
+    assert json.loads(result.root.content[0].text)["discovery_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_config_set_relays_optional_strings(monkeypatch):
+    """gateway_config_set forwards provided fields, including empty strings."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "ok": True,
+                                "updated_keys": ["url", "fallback_url"],
+                                "url": "",
+                                "fallback_url": "wss://relay.example/",
+                                "token_set": False,
+                                "discovery_enabled": True,
+                            }
+                        ),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    arguments = {"url": "", "fallback_url": "wss://relay.example/"}
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "gateway_config_set", "arguments": arguments},
+        )
+    )
+
+    assert calls == [("self.gateway_config.set", arguments)]
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is True
+    assert payload["url"] == ""
+
+
+@pytest.mark.asyncio
 async def test_list_tools_includes_set_mouth_sequence():
     """set_mouth_sequence is exposed to MCP clients with an array schema."""
     server = create_server()

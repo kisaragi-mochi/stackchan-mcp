@@ -32,6 +32,8 @@ documented-only.
 
 ### Gateway
 
+- Added `gateway_config_get` and `gateway_config_set` MCP wrappers for the
+  firmware runtime WebSocket gateway configuration tools. (#292)
 - Added gateway-side MCP wrappers for
   `self.port_b.ws2812.{init,set_pixel,set_strip,refresh,clear}`, forwarding
   Port B (GPIO 9) WS2812 calls to firmware and JSON-encoding
@@ -54,6 +56,9 @@ documented-only.
 
 ### Firmware
 
+- Added `self.gateway_config.get` and `self.gateway_config.set` MCP tools for
+  reading and updating the NVS-backed WebSocket gateway URL, fallback URL, and
+  token presence at runtime without exposing the token value. (#292)
 - Added standalone CMake host-test infrastructure for firmware pure C++ helpers,
   covering mDNS gateway candidate extraction edge cases. (#279)
 - Clamp positive `speed_dps` values below 15 dps to the step-safe floor in

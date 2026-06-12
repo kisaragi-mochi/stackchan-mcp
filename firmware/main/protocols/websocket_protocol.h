@@ -28,6 +28,7 @@ public:
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
     bool IsTransportConnected() const override;
+    std::string GetConnectedUrl() const override;
 
 private:
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
@@ -78,6 +79,10 @@ private:
     // so the timer-task read does not race with main-task websocket_.reset()
     // in OpenAudioChannelInternal / destructor / reconnect paths.
     std::atomic<bool> transport_connected_ = false;
+    // Main-task snapshot of the candidate URL that completed the WebSocket
+    // server-hello flow. GetConnectedUrl returns it only while the transport
+    // flag is still true, so post-disconnect stale values are not reported.
+    std::string connected_url_;
     int reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
     int version_ = 1;
 

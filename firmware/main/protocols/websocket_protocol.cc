@@ -179,6 +179,13 @@ bool WebsocketProtocol::IsTransportConnected() const {
     return transport_connected_.load();
 }
 
+std::string WebsocketProtocol::GetConnectedUrl() const {
+    if (!transport_connected_.load()) {
+        return "";
+    }
+    return connected_url_;
+}
+
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;
     // Keep WebSocket alive — only notify the application that the audio
@@ -585,6 +592,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
         // synchronously when intentionally tearing this socket down.
         current_notify_disconnect_ = notify_disconnect;
         intentional_close_.store(false);
+        connected_url_ = candidate_url;
         transport_connected_.store(true);
         reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
         StopReconnectTimer();

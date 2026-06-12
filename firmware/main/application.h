@@ -65,6 +65,9 @@ public:
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
+    std::string GetConnectedGatewayUrl() const {
+        return protocol_ ? protocol_->GetConnectedUrl() : "";
+    }
     
     /**
      * Request state transition
