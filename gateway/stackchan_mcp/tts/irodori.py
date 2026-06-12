@@ -168,32 +168,44 @@ class IrodoriEngine(TTSEngine):
         self._url_override = url.strip() if url and url.strip() else None
         self._api_key_override = api_key
 
-        if default_speaker is not None:
-            self._default_speaker = default_speaker
-        else:
-            self._default_speaker = (
-                os.getenv("STACKCHAN_IRODORI_SPEAKER") or DEFAULT_IRODORI_SPEAKER
-            )
-
-        if default_steps is not None:
-            self._default_steps = default_steps
-        else:
-            self._default_steps = (
-                os.getenv("STACKCHAN_IRODORI_STEPS") or DEFAULT_IRODORI_STEPS
-            )
+        # Speaker / steps defaults are resolved lazily (see the
+        # properties below) for the same reason as the URL: with
+        # ``serve --transport streamable-http`` this engine is
+        # constructed at import time, before ``.env`` is loaded, so
+        # capturing the environment here would silently ignore
+        # dotenv-provided values. Only explicit constructor overrides
+        # are pinned at construction time.
+        self._default_speaker_override = default_speaker
+        self._default_steps_override = default_steps
 
         self._timeout_seconds = timeout_seconds
         self._transport = transport
 
     @property
     def default_speaker(self) -> str:
-        """Speaker identifier used when ``speaker_id`` is omitted."""
-        return self._default_speaker
+        """Speaker identifier used when ``speaker_id`` is omitted.
+
+        Resolved lazily — constructor override, then
+        ``STACKCHAN_IRODORI_SPEAKER``, then
+        :data:`DEFAULT_IRODORI_SPEAKER` — so values loaded from ``.env``
+        after import still take effect.
+        """
+        if self._default_speaker_override is not None:
+            return self._default_speaker_override
+        return os.getenv("STACKCHAN_IRODORI_SPEAKER") or DEFAULT_IRODORI_SPEAKER
 
     @property
     def default_steps(self) -> str:
-        """Diffusion step count used when ``steps`` is omitted."""
-        return self._default_steps
+        """Diffusion step count used when ``steps`` is omitted.
+
+        Resolved lazily — constructor override, then
+        ``STACKCHAN_IRODORI_STEPS``, then
+        :data:`DEFAULT_IRODORI_STEPS` — so values loaded from ``.env``
+        after import still take effect.
+        """
+        if self._default_steps_override is not None:
+            return self._default_steps_override
+        return os.getenv("STACKCHAN_IRODORI_STEPS") or DEFAULT_IRODORI_STEPS
 
     def _resolve_url(self) -> str:
         """Return the configured endpoint URL or raise a clear error.
@@ -264,10 +276,10 @@ class IrodoriEngine(TTSEngine):
         # contract; a caller passing an int is coerced rather than
         # rejected so the say() tool's uniform argument set still works.
         speaker_raw = opts.get("speaker_id")
-        speaker = str(speaker_raw) if speaker_raw is not None else self._default_speaker
+        speaker = str(speaker_raw) if speaker_raw is not None else self.default_speaker
 
         steps_raw = opts.get("steps")
-        steps = str(steps_raw) if steps_raw is not None else self._default_steps
+        steps = str(steps_raw) if steps_raw is not None else self.default_steps
 
         params: dict[str, str] = {
             "text": text,

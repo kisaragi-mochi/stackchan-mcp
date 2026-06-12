@@ -127,6 +127,23 @@ def test_constructor_args_override_env(monkeypatch):
     assert engine.default_steps == "16"
 
 
+def test_defaults_resolve_lazily_after_construction(monkeypatch):
+    """Env defaults set after construction still take effect.
+
+    With ``serve --transport streamable-http`` the tts package is
+    imported (and the engine registered) before ``.env`` is loaded, so
+    speaker / steps must be read at use time, not captured at
+    construction time.
+    """
+    monkeypatch.delenv("STACKCHAN_IRODORI_SPEAKER", raising=False)
+    monkeypatch.delenv("STACKCHAN_IRODORI_STEPS", raising=False)
+    engine = IrodoriEngine(url=_SYNTH_URL)  # constructed before env is set
+    monkeypatch.setenv("STACKCHAN_IRODORI_SPEAKER", "7")
+    monkeypatch.setenv("STACKCHAN_IRODORI_STEPS", "48")
+    assert engine.default_speaker == "7"
+    assert engine.default_steps == "48"
+
+
 # ---------------------------------------------------------------------------
 # Unset URL — registers but fails clearly on synthesize
 # ---------------------------------------------------------------------------
