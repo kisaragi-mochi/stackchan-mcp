@@ -394,6 +394,178 @@ async def test_set_mouth_sequence_relays_steps_as_json_string(monkeypatch):
     assert json.loads(arguments["steps_json"]) == steps
 
 
+_PORT_B_WS2812_TOOL_NAMES = (
+    "port_b_ws2812_init",
+    "port_b_ws2812_set_pixel",
+    "port_b_ws2812_set_strip",
+    "port_b_ws2812_refresh",
+    "port_b_ws2812_clear",
+)
+
+
+@pytest.mark.asyncio
+async def test_list_tools_includes_port_b_ws2812_tools_with_schemas():
+    """Port B WS2812 wrappers are exposed with LLM-facing schemas."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools_by_name = {tool.name: tool for tool in result.root.tools}
+    for tool_name in _PORT_B_WS2812_TOOL_NAMES:
+        assert tool_name in tools_by_name, f"{tool_name} tool should be registered"
+        description = tools_by_name[tool_name].description
+        assert "Port B" in description
+        assert "GPIO 9" in description
+        assert "3.3 V CMOS data" in description
+        assert "level shifter" in description
+
+    init_schema = tools_by_name["port_b_ws2812_init"].inputSchema
+    assert init_schema["properties"]["led_count"] == {
+        "type": "integer",
+        "description": "Number of LEDs in the strip (1..256).",
+        "minimum": 1,
+        "maximum": 256,
+    }
+    assert init_schema["required"] == ["led_count"]
+
+    pixel_schema = tools_by_name["port_b_ws2812_set_pixel"].inputSchema
+    assert pixel_schema["properties"]["index"]["minimum"] == 0
+    assert pixel_schema["properties"]["index"]["maximum"] == 255
+    for channel in ("r", "g", "b"):
+        assert pixel_schema["properties"][channel]["minimum"] == 0
+        assert pixel_schema["properties"][channel]["maximum"] == 255
+    assert pixel_schema["properties"]["refresh"] == {
+        "type": "boolean",
+        "description": "True to latch the update immediately.",
+        "default": False,
+    }
+    assert pixel_schema["required"] == ["index", "r", "g", "b"]
+
+    strip_schema = tools_by_name["port_b_ws2812_set_strip"].inputSchema
+    colors_schema = strip_schema["properties"]["colors"]
+    assert colors_schema["type"] == "array"
+    assert colors_schema["minItems"] == 1
+    assert colors_schema["maxItems"] == 256
+    assert colors_schema["items"]["type"] == "array"
+    assert colors_schema["items"]["minItems"] == 3
+    assert colors_schema["items"]["maxItems"] == 3
+    assert colors_schema["items"]["items"] == {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255,
+    }
+    assert strip_schema["required"] == ["colors"]
+
+    for tool_name in ("port_b_ws2812_refresh", "port_b_ws2812_clear"):
+        assert tools_by_name[tool_name].inputSchema == {
+            "type": "object",
+            "properties": {},
+        }
+
+
+def _make_port_b_ws2812_fake_gateway(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, tool_name, arguments):
+            calls.append((tool_name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"ok": True}),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    return calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("gateway_name", "request_args", "firmware_name", "firmware_args"),
+    [
+        (
+            "port_b_ws2812_init",
+            {"led_count": 18},
+            "self.port_b.ws2812.init",
+            {"led_count": 18},
+        ),
+        (
+            "port_b_ws2812_set_pixel",
+            {"index": 2, "r": 10, "g": 20, "b": 30, "refresh": True},
+            "self.port_b.ws2812.set_pixel",
+            {"index": 2, "r": 10, "g": 20, "b": 30, "refresh": True},
+        ),
+        (
+            "port_b_ws2812_refresh",
+            {},
+            "self.port_b.ws2812.refresh",
+            {},
+        ),
+        (
+            "port_b_ws2812_clear",
+            {},
+            "self.port_b.ws2812.clear",
+            {},
+        ),
+    ],
+)
+async def test_port_b_ws2812_tools_relay_to_firmware(
+    monkeypatch,
+    gateway_name,
+    request_args,
+    firmware_name,
+    firmware_args,
+):
+    calls = _make_port_b_ws2812_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": gateway_name, "arguments": request_args},
+        )
+    )
+
+    assert calls == [(firmware_name, firmware_args)]
+    assert json.loads(result.root.content[0].text) == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_port_b_ws2812_set_strip_relays_colors_as_json_string(monkeypatch):
+    calls = _make_port_b_ws2812_fake_gateway(monkeypatch)
+    server = create_server()
+    colors = [[32, 0, 0], [0, 32, 0], [0, 0, 32]]
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "port_b_ws2812_set_strip",
+                "arguments": {"colors": colors},
+            },
+        )
+    )
+
+    assert len(calls) == 1
+    name, arguments = calls[0]
+    assert name == "self.port_b.ws2812.set_strip"
+    assert set(arguments.keys()) == {"colors"}
+    assert json.loads(arguments["colors"]) == colors
+    assert json.loads(result.root.content[0].text) == {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # move_head — Issue #109: schema + handler enforce the M5Stack-recommended
 # pitch operating range (5..85). pitch=0 motion-starts have been observed on

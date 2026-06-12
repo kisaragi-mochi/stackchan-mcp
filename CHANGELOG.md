@@ -32,6 +32,10 @@ documented-only.
 
 ### Gateway
 
+- Added gateway-side MCP wrappers for
+  `self.port_b.ws2812.{init,set_pixel,set_strip,refresh,clear}`, forwarding
+  Port B (GPIO 9) WS2812 calls to firmware and JSON-encoding
+  `set_strip.colors` for the device MCP property layer. (#224)
 - Add emoji-driven expression handling to `say`: a supported emoji
   switches the avatar face in the same MCP call, Irodori receives emoji
   verbatim for voice style, and non-emoji-aware engines strip emoji before
