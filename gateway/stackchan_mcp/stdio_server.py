@@ -537,6 +537,26 @@ async def _dispatch_mcp_tool(
             "self.led.clear",
             {},
         ),
+        "port_b_ws2812_init": (
+            "self.port_b.ws2812.init",
+            arguments,
+        ),
+        "port_b_ws2812_set_pixel": (
+            "self.port_b.ws2812.set_pixel",
+            arguments,
+        ),
+        "port_b_ws2812_set_strip": (
+            "self.port_b.ws2812.set_strip",
+            {"colors": json.dumps(arguments.get("colors", []))},
+        ),
+        "port_b_ws2812_refresh": (
+            "self.port_b.ws2812.refresh",
+            {},
+        ),
+        "port_b_ws2812_clear": (
+            "self.port_b.ws2812.clear",
+            {},
+        ),
         "i2c_scan": (
             "self.i2c.scan",
             {},
@@ -1027,6 +1047,139 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
             Tool(
                 name="clear_leds",
                 description="Turn off all 12 RGB LEDs on the StackChan base.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="port_b_ws2812_init",
+                description=(
+                    "Initialize a WS2812-compatible LED strip connected to "
+                    "Port B (CoreS3 HY2.0-4P digital OUTPUT, GPIO 9). "
+                    "led_count is the number of LEDs in the strip (1..256). "
+                    "Repeated calls with the same led_count are no-ops; a "
+                    "different led_count rebuilds the strip handle. Port B "
+                    "outputs 3.3 V CMOS data on GPIO 9; older strict 5 V "
+                    "WS2812 variants may require a level shifter."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "led_count": {
+                            "type": "integer",
+                            "description": "Number of LEDs in the strip (1..256).",
+                            "minimum": 1,
+                            "maximum": 256,
+                        },
+                    },
+                    "required": ["led_count"],
+                },
+            ),
+            Tool(
+                name="port_b_ws2812_set_pixel",
+                description=(
+                    "Set one LED in the Port B WS2812 strip buffer. Call "
+                    "port_b_ws2812_init first. index is 0..255, with the "
+                    "effective range bounded by led_count. r, g, and b are "
+                    "0..255. By default the color is buffered only; pass "
+                    "refresh=true to latch it immediately, or call "
+                    "port_b_ws2812_refresh after several buffered updates. "
+                    "Port B outputs 3.3 V CMOS data on GPIO 9; older strict "
+                    "5 V WS2812 variants may require a level shifter."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "index": {
+                            "type": "integer",
+                            "description": "LED index (0..255).",
+                            "minimum": 0,
+                            "maximum": 255,
+                        },
+                        "r": {
+                            "type": "integer",
+                            "description": "Red 0..255.",
+                            "minimum": 0,
+                            "maximum": 255,
+                        },
+                        "g": {
+                            "type": "integer",
+                            "description": "Green 0..255.",
+                            "minimum": 0,
+                            "maximum": 255,
+                        },
+                        "b": {
+                            "type": "integer",
+                            "description": "Blue 0..255.",
+                            "minimum": 0,
+                            "maximum": 255,
+                        },
+                        "refresh": {
+                            "type": "boolean",
+                            "description": "True to latch the update immediately.",
+                            "default": False,
+                        },
+                    },
+                    "required": ["index", "r", "g", "b"],
+                },
+            ),
+            Tool(
+                name="port_b_ws2812_set_strip",
+                description=(
+                    "Set multiple LEDs in the Port B WS2812 strip and refresh "
+                    "immediately. Call port_b_ws2812_init first. colors is an "
+                    "array of [r,g,b] integer triples applied from LED index 0; "
+                    "up to led_count entries are written, extras are ignored, "
+                    "and missing trailing entries preserve the previous buffer. "
+                    "The firmware validates the full payload before writing. "
+                    "Port B outputs 3.3 V CMOS data on GPIO 9; older strict "
+                    "5 V WS2812 variants may require a level shifter."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "colors": {
+                            "type": "array",
+                            "description": (
+                                "Array of [r,g,b] triples, each integer 0..255."
+                            ),
+                            "items": {
+                                "type": "array",
+                                "items": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 255,
+                                },
+                                "minItems": 3,
+                                "maxItems": 3,
+                            },
+                            "minItems": 1,
+                            "maxItems": 256,
+                        },
+                    },
+                    "required": ["colors"],
+                },
+            ),
+            Tool(
+                name="port_b_ws2812_refresh",
+                description=(
+                    "Refresh the Port B WS2812 strip, latching the current "
+                    "buffered colors out on CoreS3 HY2.0-4P digital OUTPUT "
+                    "GPIO 9. Call port_b_ws2812_init first. Use this after "
+                    "one or more port_b_ws2812_set_pixel calls made with "
+                    "refresh=false. Port B outputs 3.3 V CMOS data; older "
+                    "strict 5 V WS2812 variants may require a level shifter."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="port_b_ws2812_clear",
+                description=(
+                    "Turn off every LED in the Port B WS2812 strip and "
+                    "refresh immediately on CoreS3 HY2.0-4P digital OUTPUT "
+                    "GPIO 9. Call port_b_ws2812_init first. This clears the "
+                    "driver's per-pixel buffer. Port B outputs 3.3 V CMOS "
+                    "data; older strict 5 V WS2812 variants may require a "
+                    "level shifter."
+                ),
                 inputSchema={"type": "object", "properties": {}},
             ),
             Tool(
