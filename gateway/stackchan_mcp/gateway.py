@@ -176,6 +176,15 @@ class Gateway:
 
     async def stop(self) -> None:
         """Stop the gateway."""
+        # Cancel any active pose-stream follower before the rest of the
+        # shutdown sequence closes gateway-side services.
+        try:
+            from .follow_pose_stream import stop_follow
+
+            await stop_follow()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("follow_pose_stream shutdown failed: %s", exc)
+
         self._running = False
         if self._mdns_advertiser:
             try:

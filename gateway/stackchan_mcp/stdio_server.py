@@ -331,6 +331,112 @@ def _resolve_speed_dps(speed: Any) -> int | None:
     )
 
 
+def _follow_pose_text(payload: dict[str, Any]) -> list[TextContent]:
+    return [TextContent(type="text", text=json.dumps(payload))]
+
+
+def _follow_pose_error(message: str) -> list[TextContent]:
+    return _follow_pose_text({"ok": False, "error": message})
+
+
+def _is_int_arg(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number_arg(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _optional_non_empty_string(
+    arguments: dict[str, Any],
+    name: str,
+) -> tuple[str | None, str | None]:
+    value = arguments.get(name)
+    if value is None:
+        return None, None
+    if not isinstance(value, str) or value == "":
+        return None, f"{name} must be a non-empty string or null"
+    return value, None
+
+
+async def _handle_follow_pose_stream(
+    gateway: Any,
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    from .follow_pose_stream import (
+        FollowPoseStreamConfig,
+        get_follow_status,
+        start_follow,
+        stop_follow,
+    )
+
+    action = arguments.get("action", "start")
+    if action not in {"start", "stop", "status"}:
+        return _follow_pose_error("action must be one of: start, stop, status")
+
+    if action == "status":
+        return _follow_pose_text({"ok": True, **get_follow_status()})
+
+    if action == "stop":
+        status = await stop_follow()
+        return _follow_pose_text({"ok": True, **status})
+
+    url_value = arguments.get("url")
+    if not isinstance(url_value, str) or url_value.strip() == "":
+        return _follow_pose_error("url is required when action=start")
+    url = url_value.strip()
+    if not (url.startswith("ws://") or url.startswith("wss://")):
+        return _follow_pose_error("url must start with ws:// or wss://")
+
+    flip_yaw = arguments.get("flip_yaw", 1)
+    if not _is_int_arg(flip_yaw) or flip_yaw not in (-1, 1):
+        return _follow_pose_error("flip_yaw must be -1 or 1")
+
+    flip_pitch = arguments.get("flip_pitch", 1)
+    if not _is_int_arg(flip_pitch) or flip_pitch not in (-1, 1):
+        return _follow_pose_error("flip_pitch must be -1 or 1")
+
+    pitch_center_deg = arguments.get("pitch_center_deg", 45)
+    if (
+        not _is_int_arg(pitch_center_deg)
+        or not 5 <= pitch_center_deg <= 85
+    ):
+        return _follow_pose_error("pitch_center_deg must be an integer in 5..85")
+
+    downsample_hz = arguments.get("downsample_hz", 20.0)
+    if not _is_number_arg(downsample_hz) or not 0 < downsample_hz <= 60:
+        return _follow_pose_error("downsample_hz must be a number in (0, 60]")
+
+    max_step_deg = arguments.get("max_step_deg", 12.0)
+    if not _is_number_arg(max_step_deg) or not 0 < max_step_deg <= 30:
+        return _follow_pose_error("max_step_deg must be a number in (0, 30]")
+
+    speed_dps = arguments.get("speed_dps", 240)
+    if not _is_int_arg(speed_dps) or not 1 <= speed_dps <= 240:
+        return _follow_pose_error("speed_dps must be an integer in 1..240")
+
+    source_filter, error = _optional_non_empty_string(arguments, "source_filter")
+    if error:
+        return _follow_pose_error(error)
+    frame_filter, error = _optional_non_empty_string(arguments, "frame_filter")
+    if error:
+        return _follow_pose_error(error)
+
+    cfg = FollowPoseStreamConfig(
+        url=url,
+        source_filter=source_filter,
+        frame_filter=frame_filter,
+        flip_yaw=flip_yaw,
+        flip_pitch=flip_pitch,
+        pitch_center_deg=pitch_center_deg,
+        downsample_hz=float(downsample_hz),
+        max_step_deg=float(max_step_deg),
+        speed_dps=speed_dps,
+    )
+    status = await start_follow(gateway, cfg)
+    return _follow_pose_text({"ok": True, **status})
+
+
 async def _dispatch_mcp_tool(
     name: str,
     arguments: dict[str, Any],
@@ -390,6 +496,9 @@ async def _dispatch_mcp_tool(
             ]
         result = await gateway.load_avatar_set(archive_path, mode, timeout)
         return [TextContent(type="text", text=json.dumps(result))]
+
+    if name == "stackchan_follow_pose_stream":
+        return await _handle_follow_pose_stream(gateway, arguments)
 
     if not gateway.esp32.device_connected:
         return [
@@ -744,6 +853,115 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                     },
                     "required": ["yaw", "pitch"],
+                },
+            ),
+            Tool(
+                name="stackchan_follow_pose_stream",
+                description=(
+                    "Subscribes to an arbitrary upstream WebSocket pose-stream "
+                    "using action=start, stop, or status. Sensor yaw is "
+                    "forwarded 1:1 and clamped to +/-90 degrees; sensor "
+                    "pitch is shifted by pitch_center_deg (default 45) so "
+                    "sensor neutral maps to head neutral, then clamped to "
+                    "5..85 degrees. Inputs beyond the head's mechanical range "
+                    "saturate at the limit without scaling. The subscriber "
+                    "applies moving-average smoothing, a downsample cap, and "
+                    "an angular-velocity clamp. Only one subscription is "
+                    "active at a time; a new start cancels the previous task. "
+                    "Connections reconnect with exponential backoff and are "
+                    "stopped cleanly when the gateway shuts down."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["start", "stop", "status"],
+                            "default": "start",
+                            "description": "Lifecycle control. Default is 'start'.",
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": (
+                                "WebSocket URL (ws:// or wss://) to subscribe to. "
+                                "Required when action=start."
+                            ),
+                        },
+                        "source_filter": {
+                            "type": "string",
+                            "description": (
+                                "Optional: ignore frames whose top-level 'source' "
+                                "field does not equal this string."
+                            ),
+                        },
+                        "frame_filter": {
+                            "type": "string",
+                            "description": (
+                                "Optional: ignore frames whose top-level 'frame' "
+                                "field does not equal this string "
+                                "(e.g. 'calibrated')."
+                            ),
+                        },
+                        "flip_yaw": {
+                            "type": "integer",
+                            "enum": [-1, 1],
+                            "default": 1,
+                            "description": (
+                                "Multiplier applied to sensor yaw before clamping. "
+                                "Use -1 if the upstream IMU yaw convention is "
+                                "reversed."
+                            ),
+                        },
+                        "flip_pitch": {
+                            "type": "integer",
+                            "enum": [-1, 1],
+                            "default": 1,
+                        },
+                        "pitch_center_deg": {
+                            "type": "integer",
+                            "default": 45,
+                            "minimum": 5,
+                            "maximum": 85,
+                            "description": (
+                                "Servo pitch (deg) treated as the sensor-pitch=0 "
+                                "anchor. Defaults to the head's neutral pose."
+                            ),
+                        },
+                        "downsample_hz": {
+                            "type": "number",
+                            "default": 20,
+                            "exclusiveMinimum": 0,
+                            "maximum": 60,
+                            "description": (
+                                "Cap servo command rate. Recent frames are "
+                                "smoothed; commands are issued at most this "
+                                "frequently."
+                            ),
+                        },
+                        "max_step_deg": {
+                            "type": "number",
+                            "default": 12,
+                            "exclusiveMinimum": 0,
+                            "maximum": 30,
+                            "description": (
+                                "Per-tick angular delta limit. With "
+                                "downsample_hz=20 and max_step_deg=12 the "
+                                "effective angular velocity is bounded by "
+                                "240 dps."
+                            ),
+                        },
+                        "speed_dps": {
+                            "type": "integer",
+                            "default": 240,
+                            "minimum": 1,
+                            "maximum": 240,
+                            "description": (
+                                "speed_dps forwarded to set_head_angles per "
+                                "command. Capped at the SCS0009 datasheet "
+                                "working speed (240)."
+                            ),
+                        },
+                    },
                 },
             ),
             Tool(
