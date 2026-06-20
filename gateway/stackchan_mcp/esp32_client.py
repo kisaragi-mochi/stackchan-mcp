@@ -45,6 +45,7 @@ ToolCallResult = tuple[Any, dict[str, Any] | None]
 
 _TOOL_LANES = {
     "self.robot.": "servo",
+    "self.wifi.": "wifi",
     "self.led.": "led",
     "self.display.": "avatar",
     "self.screen.": "display",
@@ -416,6 +417,7 @@ class ESP32Manager:
         self._device_driven_session_id: str | None = None
         self._tool_lane_locks = {
             "servo": asyncio.Lock(),
+            "wifi": asyncio.Lock(),
             "led": asyncio.Lock(),
             "avatar": asyncio.Lock(),
             "display": asyncio.Lock(),

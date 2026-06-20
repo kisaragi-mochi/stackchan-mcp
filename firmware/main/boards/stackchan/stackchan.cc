@@ -35,6 +35,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
+#include <esp_wifi.h>
 #include <driver/i2c_master.h>
 #include <driver/gpio.h>
 #include <driver/uart.h>
@@ -5305,6 +5306,57 @@ private:
                 cJSON_AddNumberToObject(root, "pitch_pos", pitch_pos);
                 cJSON_AddNumberToObject(root, "yaw_motion_started", yaw_motion_started ? 1 : 0);
                 cJSON_AddNumberToObject(root, "pitch_motion_started", pitch_motion_started ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.wifi.set_power_save",
+            "Set the ESP32 WiFi power-save mode at runtime. Mode \"none\" disables modem sleep so high-rate command streams (for example, the pose-stream follower) avoid the ~800 ms TCP send jitter caused by the DTIM beacon cycle, at the cost of higher idle WiFi power consumption. Mode \"min_modem\" restores the xiaozhi-esp32 default light modem sleep for normal interactive use. Returns {ok, previous, current}.",
+            PropertyList({Property("mode", kPropertyTypeString)}),
+            [](const PropertyList& properties) -> ReturnValue {
+                std::string mode_str = properties["mode"].value<std::string>();
+                wifi_ps_type_t target;
+                if (mode_str == "none") {
+                    target = WIFI_PS_NONE;
+                } else if (mode_str == "min_modem") {
+                    target = WIFI_PS_MIN_MODEM;
+                } else if (mode_str == "max_modem") {
+                    target = WIFI_PS_MAX_MODEM;
+                } else {
+                    cJSON* root = cJSON_CreateObject();
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "invalid mode (expected 'none' | 'min_modem' | 'max_modem')");
+                    return root;
+                }
+
+                auto ps_str = [](wifi_ps_type_t mode) -> const char* {
+                    switch (mode) {
+                    case WIFI_PS_NONE:
+                        return "none";
+                    case WIFI_PS_MIN_MODEM:
+                        return "min_modem";
+                    case WIFI_PS_MAX_MODEM:
+                        return "max_modem";
+                    default:
+                        return "unknown";
+                    }
+                };
+
+                wifi_ps_type_t previous = WIFI_PS_MIN_MODEM;
+                esp_err_t get_result = esp_wifi_get_ps(&previous);
+                esp_err_t set_result = esp_wifi_set_ps(target);
+                const char* previous_str = get_result == ESP_OK ? ps_str(previous) : "unknown";
+
+                ESP_LOGI(TAG, "wifi.set_power_save: target=%s previous=%s set_result=%d get_result=%d",
+                         ps_str(target), previous_str, (int)set_result, (int)get_result);
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", set_result == ESP_OK);
+                cJSON_AddStringToObject(root, "previous", previous_str);
+                cJSON_AddStringToObject(root, "current", set_result == ESP_OK ? ps_str(target) : ps_str(previous));
+                if (set_result != ESP_OK) {
+                    cJSON_AddNumberToObject(root, "esp_err", (int)set_result);
+                }
                 return root;
             });
 

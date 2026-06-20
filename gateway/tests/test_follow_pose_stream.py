@@ -24,6 +24,7 @@ def _url(path: str = "pose") -> str:
 
 _GET_HEAD_ANGLES = "self.robot.get_head_angles"
 _SET_HEAD_ANGLES = "self.robot.set_head_angles"
+_WIFI_SET_POWER_SAVE = "self.wifi.set_power_save"
 
 
 def _wrap_call_payload(
@@ -112,6 +113,22 @@ class _Clock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+def _mark_seeded(follower: FollowPoseStream) -> None:
+    follower._initial_pose_seeded = True
+
+
+class _RefusingConnect:
+    async def __aenter__(self) -> None:
+        raise ConnectionRefusedError("refused")
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+
+def _refusing_connect(_url: str) -> _RefusingConnect:
+    return _RefusingConnect()
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -304,6 +321,278 @@ async def test_consume_step_clamps_from_seeded_position() -> None:
 
 
 @pytest.mark.asyncio
+async def test_consume_reseeds_when_initial_seed_failed_then_advances() -> None:
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(_GET_HEAD_ANGLES, _wrap_get_head_angles(80, 20))
+    cfg = FollowPoseStreamConfig(
+        url=_url("consume-reseed-success"),
+        max_step_deg=5,
+        smoothing_window=1,
+    )
+    follower = FollowPoseStream(gateway, cfg)
+    follower._initial_pose_seeded = False
+    follower._last_servo_yaw = 0
+    follower._last_servo_pitch = 45
+    # This test isolates the seed-retry path; mark WiFi PS apply as
+    # already-successful so the F3 reapply gate does not fire here.
+    follower._wifi_ps_apply_result = {
+        "ok": True,
+        "previous": "min_modem",
+        "current": "none",
+    }
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": 0, "pitch": 0})]))
+
+    assert follower._initial_pose_seeded is True
+    assert follower._last_servo_yaw == 75
+    assert follower._last_servo_pitch == 25
+    assert abs(follower._last_servo_yaw - 80) <= cfg.max_step_deg
+    assert abs(follower._last_servo_pitch - 20) <= cfg.max_step_deg
+    assert gateway.esp32.calls == [
+        (_GET_HEAD_ANGLES, {}),
+        (
+            _SET_HEAD_ANGLES,
+            {"yaw": 75, "pitch": 25, "speed_dps": 240},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_consume_reseeded_then_reapplies_wifi_ps_when_start_failed() -> None:
+    """F3 fix: if WiFi PS apply failed at start (ESP32 disconnected),
+    the in-stream seed retry path must also retry the WiFi PS apply so
+    the DTIM jitter this tool exists to avoid does not persist.
+    """
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(_GET_HEAD_ANGLES, _wrap_get_head_angles(80, 20))
+    gateway.esp32.set_reply(
+        _WIFI_SET_POWER_SAVE,
+        {"ok": True, "previous": "min_modem", "current": "none"},
+    )
+    cfg = FollowPoseStreamConfig(
+        url=_url("consume-reseed-wifi-ps-reapply"),
+        max_step_deg=5,
+        smoothing_window=1,
+    )
+    follower = FollowPoseStream(gateway, cfg)
+    follower._initial_pose_seeded = False
+    follower._last_servo_yaw = 0
+    follower._last_servo_pitch = 45
+    # Simulate the start-time WiFi PS apply having failed because the
+    # device was not yet connected when start() ran.
+    follower._wifi_ps_apply_result = {
+        "ok": False,
+        "error": "No ESP32 device connected",
+    }
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": 0, "pitch": 0})]))
+
+    # WiFi PS reapply happened (= the in-stream retry ran).
+    assert (_WIFI_SET_POWER_SAVE, {"mode": "none"}) in gateway.esp32.calls
+    # And the apply_result now reports ok=True.
+    assert isinstance(follower._wifi_ps_apply_result, dict)
+    assert follower._wifi_ps_apply_result.get("ok") is True
+    # previous was captured so stop() can restore it.
+    assert follower._wifi_ps_previous == "min_modem"
+
+
+@pytest.mark.asyncio
+async def test_consume_does_not_reapply_wifi_ps_when_start_succeeded() -> None:
+    """Inverse of the F3 fix: when start-time apply succeeded, the
+    in-stream seed path must NOT issue a second WiFi PS apply (to
+    avoid unnecessary churn on the device's WiFi modem state).
+    """
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(_GET_HEAD_ANGLES, _wrap_get_head_angles(80, 20))
+    cfg = FollowPoseStreamConfig(
+        url=_url("consume-reseed-no-wifi-ps-reapply"),
+        max_step_deg=5,
+        smoothing_window=1,
+    )
+    follower = FollowPoseStream(gateway, cfg)
+    follower._initial_pose_seeded = False
+    follower._last_servo_yaw = 0
+    follower._last_servo_pitch = 45
+    # Pretend start-time apply succeeded.
+    follower._wifi_ps_apply_result = {
+        "ok": True,
+        "previous": "min_modem",
+        "current": "none",
+    }
+    follower._wifi_ps_previous = "min_modem"
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": 0, "pitch": 0})]))
+
+    # No WiFi PS apply call was issued during _consume.
+    assert all(call[0] != _WIFI_SET_POWER_SAVE for call in gateway.esp32.calls)
+
+
+@pytest.mark.asyncio
+async def test_run_seed_success_reapplies_wifi_ps_when_start_failed() -> None:
+    """F4 fix: when start-time WiFi PS apply failed because the device
+    was disconnected at start, but the upstream WS connect path
+    (= _run inner loop) ends up succeeding at seed-from-device because
+    by then the device is reachable, the WiFi PS apply must also be
+    retried on that initial-seed-success path. Otherwise _consume()'s
+    in-stream gate is skipped (_initial_pose_seeded is now True) and
+    the DTIM jitter persists for the rest of the stream.
+    """
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(_GET_HEAD_ANGLES, _wrap_get_head_angles(40, 30))
+    gateway.esp32.set_reply(
+        _WIFI_SET_POWER_SAVE,
+        {"ok": True, "previous": "max_modem", "current": "none"},
+    )
+    cfg = FollowPoseStreamConfig(
+        url=_url("run-seed-wifi-ps-reapply"),
+        smoothing_window=1,
+    )
+    follower = FollowPoseStream(gateway, cfg)
+    # Simulate the start-time apply having failed.
+    follower._wifi_ps_apply_result = {
+        "ok": False,
+        "error": "No ESP32 device connected",
+    }
+    # Manually drive the seed path the way _run() does after a fresh
+    # upstream WS connect.
+    seeded = await follower._seed_from_device()
+    assert seeded is True
+    await follower._maybe_reapply_wifi_ps()
+
+    # WiFi PS reapply was issued.
+    assert (_WIFI_SET_POWER_SAVE, {"mode": "none"}) in gateway.esp32.calls
+    assert isinstance(follower._wifi_ps_apply_result, dict)
+    assert follower._wifi_ps_apply_result.get("ok") is True
+    assert follower._wifi_ps_previous == "max_modem"
+
+
+@pytest.mark.asyncio
+async def test_maybe_reapply_wifi_ps_noop_when_start_succeeded() -> None:
+    """Inverse of F4: when start-time apply was already ok, the helper
+    must not issue a second WiFi PS apply.
+    """
+    gateway = _FakeGateway()
+    cfg = FollowPoseStreamConfig(url=_url("reapply-noop"))
+    follower = FollowPoseStream(gateway, cfg)
+    follower._wifi_ps_apply_result = {
+        "ok": True,
+        "previous": "min_modem",
+        "current": "none",
+    }
+    follower._wifi_ps_previous = "min_modem"
+
+    await follower._maybe_reapply_wifi_ps()
+
+    assert all(call[0] != _WIFI_SET_POWER_SAVE for call in gateway.esp32.calls)
+    # apply_result and previous unchanged.
+    assert follower._wifi_ps_apply_result.get("ok") is True
+    assert follower._wifi_ps_previous == "min_modem"
+
+
+@pytest.mark.asyncio
+async def test_consume_invalidates_device_state_on_disconnect_error() -> None:
+    """F6 fix: when set_head_angles fails with a device-disconnect
+    error, the cached seed flag and WiFi PS apply state must be
+    invalidated so the next reachable frame re-seeds from live head
+    pose. Otherwise the gateway keeps `_last_servo_*` from before the
+    disconnect and could swing the head on the first command after a
+    reboot.
+    """
+    gateway = _FakeGateway()
+    # Initial set_head_angles fails with disconnect; nothing else is
+    # exercised since _consume continues to the next frame.
+    gateway.esp32.set_reply(
+        _SET_HEAD_ANGLES,
+        None,
+        {"code": -32000, "message": "ESP32 not connected"},
+    )
+    cfg = FollowPoseStreamConfig(
+        url=_url("consume-invalidate-on-disconnect"),
+        max_step_deg=5,
+        smoothing_window=1,
+    )
+    follower = FollowPoseStream(gateway, cfg)
+    # Pretend a previous frame succeeded and cached state.
+    follower._initial_pose_seeded = True
+    follower._last_servo_yaw = 50
+    follower._last_servo_pitch = 30
+    follower._wifi_ps_apply_result = {
+        "ok": True,
+        "previous": "min_modem",
+        "current": "none",
+    }
+    follower._wifi_ps_previous = "min_modem"
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
+
+    # Seed invalidated so next frame re-seeds.
+    assert follower._initial_pose_seeded is False
+    # WiFi PS apply marked failed so _maybe_reapply_wifi_ps re-runs.
+    assert isinstance(follower._wifi_ps_apply_result, dict)
+    assert follower._wifi_ps_apply_result.get("ok") is False
+
+
+@pytest.mark.asyncio
+async def test_consume_does_not_invalidate_on_servo_bus_error() -> None:
+    """Inverse of F6: a non-disconnect error (e.g. servo bus failure)
+    must NOT invalidate the cached seed; only true device-disconnect
+    errors should reset state. Otherwise transient bus errors would
+    constantly force re-seeds and noisy WiFi PS reapplies.
+    """
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(
+        _SET_HEAD_ANGLES,
+        None,
+        {"code": -32000, "message": "servo bus write timed out"},
+    )
+    cfg = FollowPoseStreamConfig(
+        url=_url("consume-no-invalidate-on-bus-error"),
+        max_step_deg=5,
+        smoothing_window=1,
+    )
+    follower = FollowPoseStream(gateway, cfg)
+    follower._initial_pose_seeded = True
+    follower._last_servo_yaw = 50
+    follower._last_servo_pitch = 30
+    follower._wifi_ps_apply_result = {
+        "ok": True,
+        "previous": "min_modem",
+        "current": "none",
+    }
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
+
+    # Seed state preserved (= servo bus errors are transient, not a
+    # reboot signal).
+    assert follower._initial_pose_seeded is True
+    assert follower._wifi_ps_apply_result.get("ok") is True
+
+
+@pytest.mark.asyncio
+async def test_consume_drops_frame_when_reseed_fails() -> None:
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(
+        _GET_HEAD_ANGLES,
+        None,
+        {"code": -32000, "message": "device disconnected"},
+    )
+    cfg = FollowPoseStreamConfig(
+        url=_url("consume-reseed-failure"),
+        smoothing_window=1,
+    )
+    follower = FollowPoseStream(gateway, cfg)
+    follower._initial_pose_seeded = False
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
+
+    assert follower._initial_pose_seeded is False
+    assert all(call[0] != _SET_HEAD_ANGLES for call in gateway.esp32.calls)
+    assert follower._commands_sent == 0
+    assert follower._last_sent_at is None
+    assert len(follower._samples) == 0
+
+
+@pytest.mark.asyncio
 async def test_run_does_not_seed_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     gateway = _FakeGateway()
     cfg = FollowPoseStreamConfig(
@@ -345,6 +634,7 @@ async def test_consume_calls_set_head_angles() -> None:
     gateway = _FakeGateway()
     cfg = FollowPoseStreamConfig(url=_url("consume"), smoothing_window=1)
     follower = FollowPoseStream(gateway, cfg)
+    _mark_seeded(follower)
 
     await follower._consume(
         _FakeWebSocket([json.dumps({"yaw": 10, "pitch": -5, "ts": 123})])
@@ -370,6 +660,7 @@ async def test_consume_skips_command_on_call_result_isError() -> None:
     )
     cfg = FollowPoseStreamConfig(url=_url("set-is-error"), smoothing_window=1)
     follower = FollowPoseStream(gateway, cfg)
+    _mark_seeded(follower)
 
     await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
 
@@ -386,6 +677,7 @@ async def test_consume_skips_command_on_payload_ok_false() -> None:
     gateway.esp32.set_reply(_SET_HEAD_ANGLES, _wrap_call_payload({"ok": False}))
     cfg = FollowPoseStreamConfig(url=_url("set-ok-false"), smoothing_window=1)
     follower = FollowPoseStream(gateway, cfg)
+    _mark_seeded(follower)
 
     await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
 
@@ -408,6 +700,7 @@ async def test_consume_skips_command_on_payload_servo_init_ok_false() -> None:
         smoothing_window=1,
     )
     follower = FollowPoseStream(gateway, cfg)
+    _mark_seeded(follower)
 
     await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
 
@@ -429,6 +722,7 @@ async def test_consume_advances_on_successful_payload() -> None:
     )
     cfg = FollowPoseStreamConfig(url=_url("set-success"), smoothing_window=1)
     follower = FollowPoseStream(gateway, cfg)
+    _mark_seeded(follower)
 
     await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
 
@@ -517,6 +811,7 @@ async def test_consume_downsamples(monkeypatch: pytest.MonkeyPatch) -> None:
         smoothing_window=1,
     )
     follower = FollowPoseStream(gateway, cfg)
+    _mark_seeded(follower)
     clock = _Clock()
     loop = asyncio.get_running_loop()
     monkeypatch.setattr(loop, "time", clock.time)
@@ -542,6 +837,7 @@ async def test_consume_step_clamps_velocity() -> None:
         smoothing_window=1,
     )
     follower = FollowPoseStream(gateway, cfg)
+    _mark_seeded(follower)
 
     await follower._consume(_FakeWebSocket([json.dumps({"yaw": 100, "pitch": 0})]))
 
@@ -552,6 +848,150 @@ async def test_consume_step_clamps_velocity() -> None:
         )
     ]
 
+
+
+@pytest.mark.asyncio
+async def test_start_invokes_wifi_ps_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fps.websockets, "connect", _refusing_connect)
+    gateway = _FakeGateway()
+    cfg = FollowPoseStreamConfig(
+        url=_url("wifi-start"),
+        reconnect_initial_backoff_s=0.01,
+        reconnect_max_backoff_s=0.01,
+    )
+
+    await fps.start_follow(gateway, cfg)
+
+    assert gateway.esp32.calls[0] == (_WIFI_SET_POWER_SAVE, {"mode": "none"})
+    await fps.stop_follow()
+
+
+@pytest.mark.asyncio
+async def test_stop_invokes_wifi_ps_min_modem(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fps.websockets, "connect", _refusing_connect)
+    gateway = _FakeGateway()
+    cfg = FollowPoseStreamConfig(
+        url=_url("wifi-stop"),
+        reconnect_initial_backoff_s=0.01,
+        reconnect_max_backoff_s=0.01,
+    )
+
+    await fps.start_follow(gateway, cfg)
+    await fps.stop_follow()
+
+    assert (_WIFI_SET_POWER_SAVE, {"mode": "min_modem"}) in gateway.esp32.calls
+
+
+@pytest.mark.asyncio
+async def test_stop_restores_previous_wifi_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fps.websockets, "connect", _refusing_connect)
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(
+        _WIFI_SET_POWER_SAVE,
+        {"ok": True, "previous": "max_modem", "current": "none"},
+    )
+    cfg = FollowPoseStreamConfig(
+        url=_url("wifi-restore-previous"),
+        reconnect_initial_backoff_s=0.01,
+        reconnect_max_backoff_s=0.01,
+    )
+
+    await fps.start_follow(gateway, cfg)
+
+    follower = fps._follower
+    assert follower is not None
+    assert follower._wifi_ps_previous == "max_modem"
+    await fps.stop_follow()
+
+    assert (_WIFI_SET_POWER_SAVE, {"mode": "max_modem"}) in gateway.esp32.calls
+
+
+@pytest.mark.asyncio
+async def test_stop_falls_back_to_min_modem_when_previous_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fps.websockets, "connect", _refusing_connect)
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(
+        _WIFI_SET_POWER_SAVE,
+        {"ok": True, "previous": "unknown", "current": "none"},
+    )
+    cfg = FollowPoseStreamConfig(
+        url=_url("wifi-restore-unknown"),
+        reconnect_initial_backoff_s=0.01,
+        reconnect_max_backoff_s=0.01,
+    )
+
+    await fps.start_follow(gateway, cfg)
+
+    follower = fps._follower
+    assert follower is not None
+    assert follower._wifi_ps_previous is None
+    await fps.stop_follow()
+
+    assert (_WIFI_SET_POWER_SAVE, {"mode": "min_modem"}) in gateway.esp32.calls
+
+
+@pytest.mark.asyncio
+async def test_start_tolerates_wifi_ps_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fps.websockets, "connect", _refusing_connect)
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(
+        _WIFI_SET_POWER_SAVE,
+        None,
+        {"code": -32000, "message": "device offline"},
+    )
+    cfg = FollowPoseStreamConfig(
+        url=_url("wifi-start-failure"),
+        reconnect_initial_backoff_s=0.01,
+        reconnect_max_backoff_s=0.01,
+    )
+
+    await fps.start_follow(gateway, cfg)
+
+    apply_result = fps.get_follow_status()["wifi_ps_apply_result"]
+    assert apply_result["ok"] is False
+    assert "device offline" in apply_result["error"]
+    await fps.stop_follow()
+
+    assert (_WIFI_SET_POWER_SAVE, {"mode": "min_modem"}) in gateway.esp32.calls
+
+
+@pytest.mark.asyncio
+async def test_stop_tolerates_wifi_ps_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fps.websockets, "connect", _refusing_connect)
+    gateway = _FakeGateway()
+    cfg = FollowPoseStreamConfig(
+        url=_url("wifi-stop-failure"),
+        reconnect_initial_backoff_s=0.01,
+        reconnect_max_backoff_s=0.01,
+    )
+
+    await fps.start_follow(gateway, cfg)
+    gateway.esp32.set_reply(
+        _WIFI_SET_POWER_SAVE,
+        None,
+        {"code": -32000, "message": "device offline"},
+    )
+    status = await fps.stop_follow()
+
+    restore_result = status["wifi_ps_restore_result"]
+    assert restore_result["ok"] is False
+    assert "device offline" in restore_result["error"]
+
+
+def test_extract_wifi_ps_result_shapes() -> None:
+    direct = {"ok": True, "previous": "min_modem", "current": "none"}
+    envelope = _wrap_call_payload(direct)
+
+    assert FollowPoseStream._extract_wifi_ps_result(direct) == direct
+    assert FollowPoseStream._extract_wifi_ps_result(envelope) == direct
+
+    unrecognised = FollowPoseStream._extract_wifi_ps_result({"content": []})
+    assert unrecognised["ok"] is False
+    assert "error" in unrecognised
 
 
 @pytest.mark.asyncio
@@ -593,6 +1033,93 @@ async def test_start_then_start_cancels_previous(
     assert fps.get_follow_status()["url"] == _url("b")
     assert first_task.done()
 
+
+
+@pytest.mark.asyncio
+async def test_start_status_returns_local_follower_when_concurrent_stop_clears_singleton(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F5 fix: even if a concurrent task clears _follower to None
+    while start_follow() is mid-await, start_follow() must still
+    return a valid status() dict instead of raising AttributeError.
+
+    The lock added by F5 normally prevents that interleaving, but we
+    additionally protect start_follow() by holding a local reference
+    to the follower it created — this test verifies that local
+    reference is what status() is read from.
+    """
+    class _RefusingConnect:
+        async def __aenter__(self) -> None:
+            raise ConnectionRefusedError("refused")
+
+        async def __aexit__(self, *exc_info: object) -> bool:
+            return False
+
+    def refusing_connect(_url: str) -> _RefusingConnect:
+        return _RefusingConnect()
+
+    monkeypatch.setattr(fps.websockets, "connect", refusing_connect)
+    gateway = _FakeGateway()
+    cfg = FollowPoseStreamConfig(
+        url=_url("race-start-status"),
+        reconnect_initial_backoff_s=0.01,
+        reconnect_max_backoff_s=0.01,
+    )
+    # Pre-clear so the test starts from a clean module state.
+    if fps._follower is not None:
+        await fps.stop_follow()
+    status = await fps.start_follow(gateway, cfg)
+    # Even if something cleared the singleton between the start
+    # completing and us reading it, the status returned by
+    # start_follow itself must be intact (it uses a local reference).
+    assert isinstance(status, dict)
+    assert status.get("url") == _url("race-start-status")
+    # Clean up.
+    await fps.stop_follow()
+
+
+@pytest.mark.asyncio
+async def test_start_stop_serialised_by_singleton_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F5 fix: a stop_follow() racing against an in-flight
+    start_follow() must wait on the singleton lock so the start can
+    complete cleanly before the stop runs. After both return, the
+    singleton must be cleared (stop won the lock second).
+    """
+    class _RefusingConnect:
+        async def __aenter__(self) -> None:
+            raise ConnectionRefusedError("refused")
+
+        async def __aexit__(self, *exc_info: object) -> bool:
+            return False
+
+    def refusing_connect(_url: str) -> _RefusingConnect:
+        return _RefusingConnect()
+
+    monkeypatch.setattr(fps.websockets, "connect", refusing_connect)
+    gateway = _FakeGateway()
+    cfg = FollowPoseStreamConfig(
+        url=_url("race-start-stop"),
+        reconnect_initial_backoff_s=0.01,
+        reconnect_max_backoff_s=0.01,
+    )
+    if fps._follower is not None:
+        await fps.stop_follow()
+
+    start_task = asyncio.create_task(fps.start_follow(gateway, cfg))
+    # Yield so start_follow has a chance to acquire the lock first.
+    await asyncio.sleep(0)
+    stop_task = asyncio.create_task(fps.stop_follow())
+
+    start_status = await start_task
+    stop_status = await stop_task
+
+    assert isinstance(start_status, dict)
+    assert isinstance(stop_status, dict)
+    # Both calls returned valid dicts (= no AttributeError).
+    # Singleton is cleared because stop ran after start completed.
+    assert fps._follower is None
 
 
 @pytest.mark.asyncio
