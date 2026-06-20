@@ -45,6 +45,42 @@ documented-only.
   scope. Lifecycle operations remain callable while the ESP32 is
   disconnected (HTTP transport `BYPASS_TOOLS` allow-list entry).
   (#304)
+- `stackchan_follow_pose_stream` now toggles ESP32 WiFi power-save
+  to `none` while a stream is active and restores the previously
+  observed mode (or `min_modem` as a fallback) on stop. This
+  eliminates the ~800 ms TCP send jitter caused by the IEEE 802.11
+  DTIM beacon cycle when `set_head_angles` is dispatched in tight
+  loops. Real-device verification confirmed round-trip drops from
+  a bimodal 20 ms / 800-1100 ms distribution down to a steady
+  15-100 ms band, and the sustained command rate rises from
+  4-10 Hz up to the spec'd 20+ Hz cap. Outcome is surfaced via
+  the tool's `status` response under `wifi_ps_apply_result` /
+  `wifi_ps_restore_result`. Failures are tolerated and never block
+  start / stop. (#304)
+- `start_follow` / `stop_follow` lifecycle ops are now serialised
+  with a module `asyncio.Lock`; `start_follow` also holds a local
+  reference to the follower it created so a racing stop cannot
+  make the final `status()` call dereference `None`.
+  `get_follow_status` remains lock-free (snapshot read). This
+  resolves #305 in line with the design tracked there.
+- `stackchan_follow_pose_stream` retries the start-time WiFi PS
+  apply on the in-stream and connect-time seed paths when the
+  device was disconnected at start, and invalidates the cached
+  seed + WiFi PS state when `set_head_angles` reports a
+  device-disconnect error so the next reachable frame re-seeds
+  from the live head pose before issuing a command. Hardening for
+  the related clean ESP32 mid-stream reboot case is tracked
+  separately in #307. (#304)
+
+### Firmware
+
+- Added `self.wifi.set_power_save({mode})` MCP tool on the
+  stackchan board. Wraps `esp_wifi_set_ps` / `esp_wifi_get_ps`
+  with a string-keyed enum (`none` / `min_modem` / `max_modem`)
+  and returns `{ok, previous, current}` so the gateway can toggle
+  ESP32 WiFi power-save at runtime. Used by
+  `stackchan_follow_pose_stream` to disable modem sleep while a
+  pose-stream subscription is active. (#304)
 
 ## [0.11.0] - 2026-06-13
 
