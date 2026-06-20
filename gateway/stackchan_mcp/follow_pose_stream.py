@@ -41,6 +41,7 @@ class FollowPoseStreamConfig:
     max_step_deg: float = 12.0
     speed_dps: int = 240
     smoothing_window: int = 5
+    seed_from_device: bool = True
     reconnect_initial_backoff_s: float = 1.5
     reconnect_max_backoff_s: float = 30.0
 
@@ -116,6 +117,7 @@ class FollowPoseStream:
         self._last_servo_pitch = int(
             round(_clamp(cfg.pitch_center_deg, SERVO_PITCH_MIN, SERVO_PITCH_MAX))
         )
+        self._initial_pose_seeded = False
         self._last_sent_at: float | None = None
         self._samples: deque[tuple[float, float]] = deque(
             maxlen=cfg.smoothing_window
@@ -177,6 +179,8 @@ class FollowPoseStream:
                     async with websockets.connect(self._cfg.url) as ws:
                         self._connect_state = "connected"
                         backoff = self._cfg.reconnect_initial_backoff_s
+                        if self._cfg.seed_from_device and not self._initial_pose_seeded:
+                            await self._seed_from_device()
                         await self._consume(ws)
                 except asyncio.CancelledError:
                     raise
@@ -200,6 +204,38 @@ class FollowPoseStream:
                 backoff = min(backoff * 2, self._cfg.reconnect_max_backoff_s)
         finally:
             self._connect_state = "stopped"
+
+    async def _seed_from_device(self) -> None:
+        try:
+            result, error = await self._gateway.esp32.call_tool(
+                "self.robot.get_head_angles",
+                {},
+            )
+        except Exception as exc:
+            self._last_error = str(exc)
+            self._initial_pose_seeded = True
+            return
+
+        if error or not isinstance(result, dict):
+            if error:
+                if isinstance(error, dict):
+                    self._last_error = str(error.get("message", error))
+                else:
+                    self._last_error = str(error)
+            self._initial_pose_seeded = True
+            return
+
+        yaw = result.get("yaw")
+        pitch = result.get("pitch")
+        if _is_finite_number(yaw):
+            self._last_servo_yaw = int(
+                round(_clamp(float(yaw), SERVO_YAW_MIN, SERVO_YAW_MAX))
+            )
+        if _is_finite_number(pitch):
+            self._last_servo_pitch = int(
+                round(_clamp(float(pitch), SERVO_PITCH_MIN, SERVO_PITCH_MAX))
+            )
+        self._initial_pose_seeded = True
 
     async def _consume(self, ws: Any) -> None:
         async for msg in ws:

@@ -23,21 +23,44 @@ def _url(path: str = "pose") -> str:
 
 
 class _FakeESP32:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        head_angles: dict[str, Any] | None = None,
+        head_error: Any = None,
+        head_exception: Exception | None = None,
+    ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self._head_angles = head_angles
+        self._head_error = head_error
+        self._head_exception = head_exception
 
     async def call_tool(
         self,
         method: str,
         args: dict[str, Any],
-    ) -> tuple[dict[str, bool], None]:
+    ) -> tuple[Any, Any]:
         self.calls.append((method, args))
+        if method == "self.robot.get_head_angles":
+            if self._head_exception is not None:
+                raise self._head_exception
+            return self._head_angles, self._head_error
         return {"ok": True}, None
 
 
 class _FakeGateway:
-    def __init__(self) -> None:
-        self.esp32 = _FakeESP32()
+    def __init__(
+        self,
+        *,
+        head_angles: dict[str, Any] | None = None,
+        head_error: Any = None,
+        head_exception: Exception | None = None,
+    ) -> None:
+        self.esp32 = _FakeESP32(
+            head_angles=head_angles,
+            head_error=head_error,
+            head_exception=head_exception,
+        )
 
 
 class _FakeWebSocket:
@@ -135,6 +158,108 @@ def test_step_clamp_above_step_limits() -> None:
 def test_step_clamp_below_step_limits() -> None:
     assert step_clamp(target=-20, last=0, max_step_deg=5) == -5
 
+
+
+@pytest.mark.asyncio
+async def test_seed_from_device_initializes_last_servo() -> None:
+    gateway = _FakeGateway(head_angles={"yaw": 60, "pitch": 70})
+    follower = FollowPoseStream(gateway, FollowPoseStreamConfig(url=_url("seed-ok")))
+
+    await follower._seed_from_device()
+
+    assert follower._last_servo_yaw == 60
+    assert follower._last_servo_pitch == 70
+    assert follower._initial_pose_seeded is True
+
+
+@pytest.mark.asyncio
+async def test_seed_from_device_failure_keeps_defaults() -> None:
+    gateway = _FakeGateway(head_error="device offline")
+    follower = FollowPoseStream(
+        gateway,
+        FollowPoseStreamConfig(url=_url("seed-error")),
+    )
+
+    await follower._seed_from_device()
+
+    assert follower._last_servo_yaw == 0
+    assert follower._last_servo_pitch == 45
+    assert follower._last_error == "device offline"
+    assert follower._initial_pose_seeded is True
+
+
+@pytest.mark.asyncio
+async def test_seed_from_device_exception_keeps_defaults() -> None:
+    gateway = _FakeGateway(head_exception=RuntimeError("seed failed"))
+    follower = FollowPoseStream(
+        gateway,
+        FollowPoseStreamConfig(url=_url("seed-exception")),
+    )
+
+    await follower._seed_from_device()
+
+    assert follower._last_servo_yaw == 0
+    assert follower._last_servo_pitch == 45
+    assert follower._last_error == "seed failed"
+    assert follower._initial_pose_seeded is True
+
+
+@pytest.mark.asyncio
+async def test_consume_step_clamps_from_seeded_position() -> None:
+    gateway = _FakeGateway()
+    cfg = FollowPoseStreamConfig(
+        url=_url("seeded-step-clamp"),
+        max_step_deg=5,
+        smoothing_window=1,
+    )
+    follower = FollowPoseStream(gateway, cfg)
+    follower._last_servo_yaw = 90
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": -90, "pitch": 0})]))
+
+    assert gateway.esp32.calls == [
+        (
+            "self.robot.set_head_angles",
+            {"yaw": 85, "pitch": 45, "speed_dps": 240},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_seed_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    gateway = _FakeGateway(head_angles={"yaw": 60, "pitch": 70})
+    cfg = FollowPoseStreamConfig(
+        url=_url("no-seed"),
+        seed_from_device=False,
+        reconnect_initial_backoff_s=0.01,
+        reconnect_max_backoff_s=0.01,
+    )
+    follower = FollowPoseStream(gateway, cfg)
+
+    class _StopWebSocket:
+        def __aiter__(self) -> "_StopWebSocket":
+            return self
+
+        async def __anext__(self) -> str:
+            follower._stop_event.set()
+            raise StopAsyncIteration
+
+    class _Connect:
+        async def __aenter__(self) -> _StopWebSocket:
+            return _StopWebSocket()
+
+        async def __aexit__(self, *exc_info: object) -> bool:
+            return False
+
+    def connect(url: str) -> _Connect:
+        assert url == cfg.url
+        return _Connect()
+
+    monkeypatch.setattr(fps.websockets, "connect", connect)
+
+    await follower._run()
+
+    assert all(call[0] != "self.robot.get_head_angles" for call in gateway.esp32.calls)
 
 
 @pytest.mark.asyncio

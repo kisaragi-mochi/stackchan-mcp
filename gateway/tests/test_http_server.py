@@ -460,9 +460,14 @@ async def test_response_correlation_for_two_concurrent_clients() -> None:
     assert body_b["client_request_id"] == "client-b"
 
 
+def test_bypass_tools_include_status_and_follow_pose_stream() -> None:
+    assert "get_status" in BYPASS_TOOLS
+    assert "stackchan_follow_pose_stream" in BYPASS_TOOLS
+
+
 @pytest.mark.asyncio
 async def test_bypass_tool_get_status_does_not_enter_dispatcher() -> None:
-    assert BYPASS_TOOLS == frozenset({"get_status"})
+    assert BYPASS_TOOLS == frozenset({"get_status", "stackchan_follow_pose_stream"})
     queue = CommandQueue(capacity=2)
 
     async def dispatch(_item: QueueItem):

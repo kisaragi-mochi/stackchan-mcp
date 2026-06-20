@@ -27,7 +27,9 @@ from .notify_config import NotifyConfig
 from .queue import CommandQueue, QueueFull, QueueItem, build_queue_full_error
 from .stdio_server import _dispatch_mcp_tool, create_server
 
-BYPASS_TOOLS = frozenset({"get_status"})
+# Follower lifecycle operations must remain callable when the ESP32 is
+# disconnected so HTTP clients can supervise the background task.
+BYPASS_TOOLS = frozenset({"get_status", "stackchan_follow_pose_stream"})
 MCP_HTTP_ALLOWED_HOSTS_ENV = "MCP_HTTP_ALLOWED_HOSTS"
 AUTH_FAILURE_MESSAGE = "Unauthorized: missing or invalid bearer token"
 HOST_FAILURE_MESSAGE = "Forbidden: invalid Host header"
