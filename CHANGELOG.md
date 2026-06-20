@@ -30,6 +30,8 @@ documented-only.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-20
+
 ### Gateway
 
 - Added `stackchan_follow_pose_stream` MCP tool. Subscribes to an
@@ -71,6 +73,8 @@ documented-only.
   from the live head pose before issuing a command. Hardening for
   the related clean ESP32 mid-stream reboot case is tracked
   separately in #307. (#304)
+
+## [firmware-v1.12.0] - 2026-06-20
 
 ### Firmware
 
@@ -1666,7 +1670,9 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.11.0...v0.12.0
+[firmware-v1.12.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.11.0...firmware-v1.12.0
 [0.11.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.10.0...v0.11.0
 [firmware-v1.11.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.10.0...firmware-v1.11.0
 [0.10.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.1...v0.10.0
