@@ -22,6 +22,18 @@ def _url(path: str = "pose") -> str:
     return f"{_URL_BASE}/{path}"
 
 
+def _wrap_get_head_angles(
+    yaw: Any,
+    pitch: Any,
+    *,
+    is_error: bool = False,
+) -> dict[str, Any]:
+    return {
+        "content": [{"text": json.dumps({"yaw": yaw, "pitch": pitch})}],
+        "isError": is_error,
+    }
+
+
 class _FakeESP32:
     def __init__(
         self,
@@ -162,7 +174,7 @@ def test_step_clamp_below_step_limits() -> None:
 
 @pytest.mark.asyncio
 async def test_seed_from_device_initializes_last_servo() -> None:
-    gateway = _FakeGateway(head_angles={"yaw": 60, "pitch": 70})
+    gateway = _FakeGateway(head_angles=_wrap_get_head_angles(60, 70))
     follower = FollowPoseStream(gateway, FollowPoseStreamConfig(url=_url("seed-ok")))
 
     await follower._seed_from_device()
@@ -174,7 +186,9 @@ async def test_seed_from_device_initializes_last_servo() -> None:
 
 @pytest.mark.asyncio
 async def test_seed_from_device_failure_keeps_defaults() -> None:
-    gateway = _FakeGateway(head_error="device offline")
+    gateway = _FakeGateway(
+        head_angles=_wrap_get_head_angles(60, 70, is_error=True),
+    )
     follower = FollowPoseStream(
         gateway,
         FollowPoseStreamConfig(url=_url("seed-error")),
@@ -184,7 +198,7 @@ async def test_seed_from_device_failure_keeps_defaults() -> None:
 
     assert follower._last_servo_yaw == 0
     assert follower._last_servo_pitch == 45
-    assert follower._last_error == "device offline"
+    assert follower._last_error == "self.robot.get_head_angles returned isError"
     assert follower._initial_pose_seeded is True
 
 
@@ -205,16 +219,49 @@ async def test_seed_from_device_exception_keeps_defaults() -> None:
 
 
 @pytest.mark.asyncio
+async def test_seed_from_device_handles_plain_dict_payload() -> None:
+    gateway = _FakeGateway(head_angles={"yaw": 60, "pitch": 70})
+    follower = FollowPoseStream(
+        gateway,
+        FollowPoseStreamConfig(url=_url("seed-plain-dict")),
+    )
+
+    await follower._seed_from_device()
+
+    assert follower._last_servo_yaw == 60
+    assert follower._last_servo_pitch == 70
+    assert follower._initial_pose_seeded is True
+
+
+@pytest.mark.asyncio
+async def test_seed_from_device_handles_malformed_content() -> None:
+    gateway = _FakeGateway(
+        head_angles={"content": [{"text": "not json"}], "isError": False},
+    )
+    follower = FollowPoseStream(
+        gateway,
+        FollowPoseStreamConfig(url=_url("seed-malformed")),
+    )
+
+    await follower._seed_from_device()
+
+    assert follower._last_servo_yaw == 0
+    assert follower._last_servo_pitch == 45
+    assert follower._initial_pose_seeded is True
+
+
+@pytest.mark.asyncio
 async def test_consume_step_clamps_from_seeded_position() -> None:
-    gateway = _FakeGateway()
+    gateway = _FakeGateway(head_angles=_wrap_get_head_angles(90, 45))
     cfg = FollowPoseStreamConfig(
         url=_url("seeded-step-clamp"),
         max_step_deg=5,
         smoothing_window=1,
     )
     follower = FollowPoseStream(gateway, cfg)
-    follower._last_servo_yaw = 90
 
+    await follower._seed_from_device()
+    gateway.esp32.calls.clear()
     await follower._consume(_FakeWebSocket([json.dumps({"yaw": -90, "pitch": 0})]))
 
     assert gateway.esp32.calls == [

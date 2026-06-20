@@ -216,17 +216,29 @@ class FollowPoseStream:
             self._initial_pose_seeded = True
             return
 
-        if error or not isinstance(result, dict):
-            if error:
-                if isinstance(error, dict):
-                    self._last_error = str(error.get("message", error))
-                else:
-                    self._last_error = str(error)
+        if error:
+            if isinstance(error, dict):
+                self._last_error = str(error.get("message", error))
+            else:
+                self._last_error = str(error)
             self._initial_pose_seeded = True
             return
 
-        yaw = result.get("yaw")
-        pitch = result.get("pitch")
+        if not isinstance(result, dict):
+            self._initial_pose_seeded = True
+            return
+
+        if result.get("isError"):
+            self._last_error = "self.robot.get_head_angles returned isError"
+            self._initial_pose_seeded = True
+            return
+
+        angles = self._unpack_head_angles_result(result)
+        if angles is None:
+            self._initial_pose_seeded = True
+            return
+
+        yaw, pitch = angles
         if _is_finite_number(yaw):
             self._last_servo_yaw = int(
                 round(_clamp(float(yaw), SERVO_YAW_MIN, SERVO_YAW_MAX))
@@ -236,6 +248,39 @@ class FollowPoseStream:
                 round(_clamp(float(pitch), SERVO_PITCH_MIN, SERVO_PITCH_MAX))
             )
         self._initial_pose_seeded = True
+
+    @staticmethod
+    def _unpack_head_angles_result(
+        result: dict[str, Any],
+    ) -> Optional[tuple[Any, Any]]:
+        """Extract yaw/pitch from a get_head_angles CallToolResult.
+
+        The MCP transport wraps tool replies as
+        ``{"content": [{"text": "<json>"}], "isError": ...}`` where the
+        text is a JSON-encoded payload from the firmware side. Also
+        tolerate a plain ``{"yaw": ..., "pitch": ...}`` dict so compact
+        test stubs keep working. Returns ``None`` if the shape is not
+        recognised so the caller keeps the seed defaults.
+        """
+        if "yaw" in result or "pitch" in result:
+            return result.get("yaw"), result.get("pitch")
+
+        content = result.get("content")
+        if not isinstance(content, list) or not content:
+            return None
+        first = content[0]
+        if not isinstance(first, dict):
+            return None
+        text = first.get("text")
+        if not isinstance(text, str):
+            return None
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload.get("yaw"), payload.get("pitch")
 
     async def _consume(self, ws: Any) -> None:
         async for msg in ws:
