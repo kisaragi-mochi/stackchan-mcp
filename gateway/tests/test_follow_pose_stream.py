@@ -22,30 +22,42 @@ def _url(path: str = "pose") -> str:
     return f"{_URL_BASE}/{path}"
 
 
+_GET_HEAD_ANGLES = "self.robot.get_head_angles"
+_SET_HEAD_ANGLES = "self.robot.set_head_angles"
+
+
+def _wrap_call_payload(
+    payload: dict[str, Any],
+    *,
+    is_error: bool = False,
+) -> dict[str, Any]:
+    return {
+        "content": [{"text": json.dumps(payload)}],
+        "isError": is_error,
+    }
+
+
 def _wrap_get_head_angles(
     yaw: Any,
     pitch: Any,
     *,
     is_error: bool = False,
 ) -> dict[str, Any]:
-    return {
-        "content": [{"text": json.dumps({"yaw": yaw, "pitch": pitch})}],
-        "isError": is_error,
-    }
+    return _wrap_call_payload({"yaw": yaw, "pitch": pitch}, is_error=is_error)
 
 
 class _FakeESP32:
-    def __init__(
-        self,
-        *,
-        head_angles: dict[str, Any] | None = None,
-        head_error: Any = None,
-        head_exception: Exception | None = None,
-    ) -> None:
+    def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
-        self._head_angles = head_angles
-        self._head_error = head_error
-        self._head_exception = head_exception
+        self._replies: dict[str, tuple[Any, Any]] = {}
+        self._exc: dict[str, BaseException] = {}
+
+    def set_reply(self, method: str, result: Any, error: Any = None) -> None:
+        self._replies[method] = (result, error)
+        self._exc.pop(method, None)
+
+    def set_raise(self, method: str, exc: BaseException) -> None:
+        self._exc[method] = exc
 
     async def call_tool(
         self,
@@ -53,26 +65,16 @@ class _FakeESP32:
         args: dict[str, Any],
     ) -> tuple[Any, Any]:
         self.calls.append((method, args))
-        if method == "self.robot.get_head_angles":
-            if self._head_exception is not None:
-                raise self._head_exception
-            return self._head_angles, self._head_error
+        if method in self._exc:
+            raise self._exc[method]
+        if method in self._replies:
+            return self._replies[method]
         return {"ok": True}, None
 
 
 class _FakeGateway:
-    def __init__(
-        self,
-        *,
-        head_angles: dict[str, Any] | None = None,
-        head_error: Any = None,
-        head_exception: Exception | None = None,
-    ) -> None:
-        self.esp32 = _FakeESP32(
-            head_angles=head_angles,
-            head_error=head_error,
-            head_exception=head_exception,
-        )
+    def __init__(self) -> None:
+        self.esp32 = _FakeESP32()
 
 
 class _FakeWebSocket:
@@ -174,7 +176,8 @@ def test_step_clamp_below_step_limits() -> None:
 
 @pytest.mark.asyncio
 async def test_seed_from_device_initializes_last_servo() -> None:
-    gateway = _FakeGateway(head_angles=_wrap_get_head_angles(60, 70))
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(_GET_HEAD_ANGLES, _wrap_get_head_angles(60, 70))
     follower = FollowPoseStream(gateway, FollowPoseStreamConfig(url=_url("seed-ok")))
 
     await follower._seed_from_device()
@@ -185,9 +188,11 @@ async def test_seed_from_device_initializes_last_servo() -> None:
 
 
 @pytest.mark.asyncio
-async def test_seed_from_device_failure_keeps_defaults() -> None:
-    gateway = _FakeGateway(
-        head_angles=_wrap_get_head_angles(60, 70, is_error=True),
+async def test_seed_from_device_failure_does_not_lock_seeded_flag() -> None:
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(
+        _GET_HEAD_ANGLES,
+        _wrap_get_head_angles(60, 70, is_error=True),
     )
     follower = FollowPoseStream(
         gateway,
@@ -199,12 +204,20 @@ async def test_seed_from_device_failure_keeps_defaults() -> None:
     assert follower._last_servo_yaw == 0
     assert follower._last_servo_pitch == 45
     assert follower._last_error == "self.robot.get_head_angles returned isError"
+    assert follower._initial_pose_seeded is False
+
+    gateway.esp32.set_reply(_GET_HEAD_ANGLES, _wrap_get_head_angles(30, 55))
+    await follower._seed_from_device()
+
+    assert follower._last_servo_yaw == 30
+    assert follower._last_servo_pitch == 55
     assert follower._initial_pose_seeded is True
 
 
 @pytest.mark.asyncio
-async def test_seed_from_device_exception_keeps_defaults() -> None:
-    gateway = _FakeGateway(head_exception=RuntimeError("seed failed"))
+async def test_seed_from_device_exception_does_not_lock_seeded_flag() -> None:
+    gateway = _FakeGateway()
+    gateway.esp32.set_raise(_GET_HEAD_ANGLES, RuntimeError("seed failed"))
     follower = FollowPoseStream(
         gateway,
         FollowPoseStreamConfig(url=_url("seed-exception")),
@@ -215,12 +228,20 @@ async def test_seed_from_device_exception_keeps_defaults() -> None:
     assert follower._last_servo_yaw == 0
     assert follower._last_servo_pitch == 45
     assert follower._last_error == "seed failed"
+    assert follower._initial_pose_seeded is False
+
+    gateway.esp32.set_reply(_GET_HEAD_ANGLES, _wrap_get_head_angles(-20, 65))
+    await follower._seed_from_device()
+
+    assert follower._last_servo_yaw == -20
+    assert follower._last_servo_pitch == 65
     assert follower._initial_pose_seeded is True
 
 
 @pytest.mark.asyncio
 async def test_seed_from_device_handles_plain_dict_payload() -> None:
-    gateway = _FakeGateway(head_angles={"yaw": 60, "pitch": 70})
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(_GET_HEAD_ANGLES, {"yaw": 60, "pitch": 70})
     follower = FollowPoseStream(
         gateway,
         FollowPoseStreamConfig(url=_url("seed-plain-dict")),
@@ -234,9 +255,11 @@ async def test_seed_from_device_handles_plain_dict_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_seed_from_device_handles_malformed_content() -> None:
-    gateway = _FakeGateway(
-        head_angles={"content": [{"text": "not json"}], "isError": False},
+async def test_seed_from_device_unpack_failure_does_not_lock_seeded_flag() -> None:
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(
+        _GET_HEAD_ANGLES,
+        {"content": [{"text": "not json"}], "isError": False},
     )
     follower = FollowPoseStream(
         gateway,
@@ -247,12 +270,20 @@ async def test_seed_from_device_handles_malformed_content() -> None:
 
     assert follower._last_servo_yaw == 0
     assert follower._last_servo_pitch == 45
+    assert follower._initial_pose_seeded is False
+
+    gateway.esp32.set_reply(_GET_HEAD_ANGLES, _wrap_get_head_angles(10, 75))
+    await follower._seed_from_device()
+
+    assert follower._last_servo_yaw == 10
+    assert follower._last_servo_pitch == 75
     assert follower._initial_pose_seeded is True
 
 
 @pytest.mark.asyncio
 async def test_consume_step_clamps_from_seeded_position() -> None:
-    gateway = _FakeGateway(head_angles=_wrap_get_head_angles(90, 45))
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(_GET_HEAD_ANGLES, _wrap_get_head_angles(90, 45))
     cfg = FollowPoseStreamConfig(
         url=_url("seeded-step-clamp"),
         max_step_deg=5,
@@ -266,7 +297,7 @@ async def test_consume_step_clamps_from_seeded_position() -> None:
 
     assert gateway.esp32.calls == [
         (
-            "self.robot.set_head_angles",
+            _SET_HEAD_ANGLES,
             {"yaw": 85, "pitch": 45, "speed_dps": 240},
         )
     ]
@@ -274,7 +305,7 @@ async def test_consume_step_clamps_from_seeded_position() -> None:
 
 @pytest.mark.asyncio
 async def test_run_does_not_seed_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    gateway = _FakeGateway(head_angles={"yaw": 60, "pitch": 70})
+    gateway = _FakeGateway()
     cfg = FollowPoseStreamConfig(
         url=_url("no-seed"),
         seed_from_device=False,
@@ -321,13 +352,90 @@ async def test_consume_calls_set_head_angles() -> None:
 
     assert gateway.esp32.calls == [
         (
-            "self.robot.set_head_angles",
+            _SET_HEAD_ANGLES,
             {"yaw": 10, "pitch": 40, "speed_dps": 240},
         )
     ]
     assert follower.status()["frames_received"] == 1
     assert follower.status()["frames_accepted"] == 1
     assert follower.status()["last_frame_ts"] == 123
+
+
+@pytest.mark.asyncio
+async def test_consume_skips_command_on_call_result_isError() -> None:
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(
+        _SET_HEAD_ANGLES,
+        {"isError": True, "content": [{"text": json.dumps({"error": "failed"})}]},
+    )
+    cfg = FollowPoseStreamConfig(url=_url("set-is-error"), smoothing_window=1)
+    follower = FollowPoseStream(gateway, cfg)
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
+
+    assert follower.status()["commands_sent"] == 0
+    assert follower._last_servo_yaw == 0
+    assert follower._last_servo_pitch == 45
+    assert follower._last_sent_at is None
+    assert follower._last_error == "set_head_angles reported isError"
+
+
+@pytest.mark.asyncio
+async def test_consume_skips_command_on_payload_ok_false() -> None:
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(_SET_HEAD_ANGLES, _wrap_call_payload({"ok": False}))
+    cfg = FollowPoseStreamConfig(url=_url("set-ok-false"), smoothing_window=1)
+    follower = FollowPoseStream(gateway, cfg)
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
+
+    assert follower.status()["commands_sent"] == 0
+    assert follower._last_servo_yaw == 0
+    assert follower._last_servo_pitch == 45
+    assert follower._last_sent_at is None
+    assert follower._last_error == "set_head_angles payload reported ok=false"
+
+
+@pytest.mark.asyncio
+async def test_consume_skips_command_on_payload_servo_init_ok_false() -> None:
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(
+        _SET_HEAD_ANGLES,
+        _wrap_call_payload({"servo_init_ok": False}),
+    )
+    cfg = FollowPoseStreamConfig(
+        url=_url("set-servo-init-false"),
+        smoothing_window=1,
+    )
+    follower = FollowPoseStream(gateway, cfg)
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
+
+    assert follower.status()["commands_sent"] == 0
+    assert follower._last_servo_yaw == 0
+    assert follower._last_servo_pitch == 45
+    assert follower._last_sent_at is None
+    assert follower._last_error == (
+        "set_head_angles payload reported servo_init_ok=false"
+    )
+
+
+@pytest.mark.asyncio
+async def test_consume_advances_on_successful_payload() -> None:
+    gateway = _FakeGateway()
+    gateway.esp32.set_reply(
+        _SET_HEAD_ANGLES,
+        _wrap_call_payload({"servo_init_ok": True}),
+    )
+    cfg = FollowPoseStreamConfig(url=_url("set-success"), smoothing_window=1)
+    follower = FollowPoseStream(gateway, cfg)
+
+    await follower._consume(_FakeWebSocket([json.dumps({"yaw": 10, "pitch": 0})]))
+
+    assert follower.status()["commands_sent"] == 1
+    assert follower._last_servo_yaw == 10
+    assert follower._last_servo_pitch == 45
+    assert follower._last_sent_at is not None
 
 
 
@@ -439,7 +547,7 @@ async def test_consume_step_clamps_velocity() -> None:
 
     assert gateway.esp32.calls == [
         (
-            "self.robot.set_head_angles",
+            _SET_HEAD_ANGLES,
             {"yaw": 5, "pitch": 45, "speed_dps": 240},
         )
     ]

@@ -213,7 +213,6 @@ class FollowPoseStream:
             )
         except Exception as exc:
             self._last_error = str(exc)
-            self._initial_pose_seeded = True
             return
 
         if error:
@@ -221,33 +220,55 @@ class FollowPoseStream:
                 self._last_error = str(error.get("message", error))
             else:
                 self._last_error = str(error)
-            self._initial_pose_seeded = True
             return
 
         if not isinstance(result, dict):
-            self._initial_pose_seeded = True
             return
 
         if result.get("isError"):
             self._last_error = "self.robot.get_head_angles returned isError"
-            self._initial_pose_seeded = True
             return
 
         angles = self._unpack_head_angles_result(result)
         if angles is None:
-            self._initial_pose_seeded = True
             return
 
         yaw, pitch = angles
+        seeded = False
         if _is_finite_number(yaw):
             self._last_servo_yaw = int(
                 round(_clamp(float(yaw), SERVO_YAW_MIN, SERVO_YAW_MAX))
             )
+            seeded = True
         if _is_finite_number(pitch):
             self._last_servo_pitch = int(
                 round(_clamp(float(pitch), SERVO_PITCH_MIN, SERVO_PITCH_MAX))
             )
-        self._initial_pose_seeded = True
+            seeded = True
+        if seeded:
+            self._initial_pose_seeded = True
+
+    @staticmethod
+    def _decode_call_result_payload(result: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Decode a firmware CallToolResult or return a plain dict fallback."""
+        if "content" not in result:
+            return result
+        content = result.get("content")
+        if not isinstance(content, list) or not content:
+            return None
+        first = content[0]
+        if not isinstance(first, dict):
+            return None
+        text = first.get("text")
+        if not isinstance(text, str):
+            return None
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
 
     @staticmethod
     def _unpack_head_angles_result(
@@ -265,20 +286,8 @@ class FollowPoseStream:
         if "yaw" in result or "pitch" in result:
             return result.get("yaw"), result.get("pitch")
 
-        content = result.get("content")
-        if not isinstance(content, list) or not content:
-            return None
-        first = content[0]
-        if not isinstance(first, dict):
-            return None
-        text = first.get("text")
-        if not isinstance(text, str):
-            return None
-        try:
-            payload = json.loads(text)
-        except (TypeError, ValueError):
-            return None
-        if not isinstance(payload, dict):
+        payload = FollowPoseStream._decode_call_result_payload(result)
+        if payload is None:
             return None
         return payload.get("yaw"), payload.get("pitch")
 
@@ -355,7 +364,7 @@ class FollowPoseStream:
             speed_dps = int(_clamp(self._cfg.speed_dps, 1, SERVO_MAX_SPEED_DPS))
 
             try:
-                _result, error = await self._gateway.esp32.call_tool(
+                result, error = await self._gateway.esp32.call_tool(
                     "self.robot.set_head_angles",
                     {
                         "yaw": servo_yaw,
@@ -373,6 +382,32 @@ class FollowPoseStream:
                 else:
                     self._last_error = str(error)
                 continue
+
+            if isinstance(result, dict):
+                if result.get("isError"):
+                    self._last_error = "set_head_angles reported isError"
+                    continue
+                payload = self._decode_call_result_payload(result)
+                if isinstance(payload, dict):
+                    if payload.get("isError"):
+                        self._last_error = (
+                            "set_head_angles payload reported isError"
+                        )
+                        continue
+                    if payload.get("ok") is False:
+                        self._last_error = "set_head_angles payload reported ok=false"
+                        continue
+                    if payload.get("servo_init_ok") is False:
+                        self._last_error = (
+                            "set_head_angles payload reported "
+                            "servo_init_ok=false"
+                        )
+                        continue
+                    if payload.get("servo_ok") is False:
+                        self._last_error = (
+                            "set_head_angles payload reported servo_ok=false"
+                        )
+                        continue
 
             self._last_sent_at = now
             self._last_servo_yaw = servo_yaw
