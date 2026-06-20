@@ -64,6 +64,7 @@
 | `clear_leds` | ベース部の RGB LED 12 個すべて消灯 | ✅ |
 | `say(text, voice?, speaker_id?, reference_audio?)` | gateway 側 TTS でデバイススピーカーから喋らせる。本文内の対応 emoji で、同じ呼び出し内にアバター表情も切り替え可能。デフォルトエンジンは **VOICEVOX**（別 HTTP サービスとして起動 — [TTS セットアップ](#4-オプション-tts-セットアップ-voicevox) 参照）。`[tts]` extras が必要 | ✅ |
 | `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | デバイスマイクから短い発話をキャプチャし、gateway 側 STT で文字起こし。デフォルトエンジンは **faster-whisper**（ローカル動作・MIT — [STT セットアップ](#5-オプション-stt-セットアップ-faster-whisper) 参照）。任意の `motion` feedback で、キャプチャ中に `thinking` face を出したり、頭を上向きに傾けたりできます。`[stt-faster-whisper]`（または `[stt-openai]`）extras と、`listen` ワイヤタイプを受け付けるファームウェアが必要 | ✅ |
+| `stackchan_follow_pose_stream(action, url, ...)` | 任意の外部 WebSocket pose-stream を購読し、 受信した `yaw` / `pitch` フレームに対して 1:1 で首を追従させる（SCS0009 動作範囲内、 yaw ±90°、 pitch 5..85°）。 `action` は `start` / `stop` / `status` を切替。 軸反転、 pitch センター offset、 ダウンサンプル、 角速度クランプ、 exponential backoff 付き reconnect を内包し、 初期姿勢はデバイス側から seed することで初回フレームから角速度クランプが実サーボ位置を基準に効きます。 上流サーバ側のプロトコル（zero-offset コマンド、 ソース選択、 トランスポート）は本 gateway のスコープ外。 | ✅ |
 
 詳細スキーマは `gateway/README.md` 参照。
 

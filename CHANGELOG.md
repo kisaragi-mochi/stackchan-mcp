@@ -30,6 +30,22 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Added `stackchan_follow_pose_stream` MCP tool. Subscribes to an
+  arbitrary external WebSocket pose-stream and drives the
+  Stack-chan head to follow incoming yaw/pitch frames 1:1 within
+  the SCS0009 working range (yaw ±90°, pitch 5..85°), with
+  downsampling, moving-average smoothing, per-axis flip,
+  angular-velocity clamping, initial-pose seeding from the device
+  on connect, and WebSocket reconnect with exponential backoff.
+  `action` switches between `start` / `stop` / `status`. The
+  upstream server's protocol (zero-offset commands, source
+  dispatching, transport) is intentionally outside this gateway's
+  scope. Lifecycle operations remain callable while the ESP32 is
+  disconnected (HTTP transport `BYPASS_TOOLS` allow-list entry).
+  (#304)
+
 ## [0.11.0] - 2026-06-13
 
 ### Gateway
