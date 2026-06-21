@@ -431,8 +431,8 @@ async def _handle_follow_pose_stream(
         if "downsample_hz" in arguments
         else resolve_default(tool_name, "downsample_hz", 20.0)
     )
-    if not _is_number_arg(downsample_hz) or not 0 < downsample_hz <= 60:
-        return _follow_pose_error("downsample_hz must be a number in (0, 60]")
+    if not _is_number_arg(downsample_hz) or not 0 < downsample_hz <= 20:
+        return _follow_pose_error("downsample_hz must be a number in (0, 20]")
 
     max_step_deg = (
         arguments["max_step_deg"]
@@ -986,11 +986,14 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "type": "number",
                             "default": 20,
                             "exclusiveMinimum": 0,
-                            "maximum": 60,
+                            "maximum": 20,
                             "description": (
                                 "Cap servo command rate. Recent frames are "
                                 "smoothed; commands are issued at most this "
-                                "frequently."
+                                "frequently. Capped at 20 to match the "
+                                "SCS0009 servo's observed sustained WritePos "
+                                "rate; higher continuous rates can trigger "
+                                "UART hang."
                             ),
                         },
                         "max_step_deg": {

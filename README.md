@@ -433,7 +433,7 @@ Minimal example:
 ```toml
 [tool.stackchan_follow_pose_stream]
 smoothing_window = 1
-downsample_hz = 60
+downsample_hz = 20
 max_step_deg = 30
 ```
 

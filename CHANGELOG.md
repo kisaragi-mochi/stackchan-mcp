@@ -51,6 +51,14 @@ documented-only.
   Callers whose upstream pose source already applies smoothing can
   disable the redundant gateway-side moving average. Omitting the
   argument preserves the previous behaviour. (#309)
+- Lowered `stackchan_follow_pose_stream.downsample_hz` schema maximum
+  from 60 to 20 to match the SCS0009 servo's observed sustained
+  `WritePos` rate. Continuous command rates above ~20 Hz triggered
+  UART hangs during real-device dogfood. **BREAKING**: callers that
+  previously set values above 20 will now be rejected with
+  "downsample_hz must be a number in (0, 20]". The schema default
+  (20) is unchanged, so calls that omit the argument behave the
+  same. (#315)
 
 ## [0.12.0] - 2026-06-20
 
