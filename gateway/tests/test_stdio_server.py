@@ -227,6 +227,125 @@ async def test_gateway_config_set_relays_optional_strings(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_tools_includes_touch_sensor_tools():
+    """Touch sensor enable/disable tools are exposed with expected schemas."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools = {tool.name: tool for tool in result.root.tools}
+    assert "get_touch_sensor_enabled" in tools
+    assert "set_touch_sensor_enabled" in tools
+
+    get_tool = tools["get_touch_sensor_enabled"]
+    assert get_tool.inputSchema == {"type": "object", "properties": {}}
+    assert "NVS" in get_tool.description
+    assert "local motion response" in get_tool.description
+    assert "stackchan/event" in get_tool.description
+
+    set_tool = tools["set_touch_sensor_enabled"]
+    assert set_tool.inputSchema == {
+        "type": "object",
+        "properties": {
+            "enabled": {
+                "type": "boolean",
+                "description": (
+                    "True to enable tap/stroke detection; false to disable "
+                    "local reactions and event emission."
+                ),
+            },
+        },
+        "required": ["enabled"],
+    }
+    assert "persists across reboot" in set_tool.description
+    assert "local motion response" in set_tool.description
+    assert "stackchan/event" in set_tool.description
+
+
+@pytest.mark.asyncio
+async def test_set_touch_sensor_enabled_relays_to_esp32(monkeypatch):
+    """set_touch_sensor_enabled maps to the firmware robot tool."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "ok": True,
+                                "enabled": arguments["enabled"],
+                                "takes_effect": "immediate",
+                            }
+                        ),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    arguments = {"enabled": False}
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "set_touch_sensor_enabled", "arguments": arguments},
+        )
+    )
+
+    assert calls == [("self.robot.set_touch_sensor_enabled", arguments)]
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is True
+    assert payload["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_touch_sensor_enabled_relays_to_esp32(monkeypatch):
+    """get_touch_sensor_enabled maps to the firmware robot tool."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"enabled": False}),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "get_touch_sensor_enabled", "arguments": {}},
+        )
+    )
+
+    assert calls == [("self.robot.get_touch_sensor_enabled", {})]
+    assert json.loads(result.root.content[0].text) == {"enabled": False}
+
+
+@pytest.mark.asyncio
 async def test_list_tools_includes_set_mouth_sequence():
     """set_mouth_sequence is exposed to MCP clients with an array schema."""
     server = create_server()

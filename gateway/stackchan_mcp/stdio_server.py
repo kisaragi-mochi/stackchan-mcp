@@ -646,6 +646,14 @@ async def _dispatch_mcp_tool(
             "self.gateway_config.set",
             arguments,
         ),
+        "get_touch_sensor_enabled": (
+            "self.robot.get_touch_sensor_enabled",
+            {},
+        ),
+        "set_touch_sensor_enabled": (
+            "self.robot.set_touch_sensor_enabled",
+            arguments,
+        ),
         "set_avatar": (
             "self.display.set_avatar",
             arguments,
@@ -1107,6 +1115,38 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             ),
                         },
                     },
+                },
+            ),
+            Tool(
+                name="get_touch_sensor_enabled",
+                description=(
+                    "Read the device's NVS-backed head-touch sensor enable "
+                    "flag. When disabled, the firmware stops both the local "
+                    "motion response and the MCP stackchan/event emission; "
+                    "the setting persists across reboot."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="set_touch_sensor_enabled",
+                description=(
+                    "Enable or disable the device's head-touch sensor at "
+                    "runtime. The NVS-backed setting persists across reboot. "
+                    "Disabling stops both the firmware local motion response "
+                    "and the MCP stackchan/event emission."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True to enable tap/stroke detection; false "
+                                "to disable local reactions and event emission."
+                            ),
+                        },
+                    },
+                    "required": ["enabled"],
                 },
             ),
             Tool(

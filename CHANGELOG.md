@@ -30,12 +30,22 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- Added the NVS-backed `touch.enabled` field, handler guards, and
+  `self.robot.set_touch_sensor_enabled` /
+  `self.robot.get_touch_sensor_enabled` MCP tools so users can disable
+  head-touch detection while stopping both local reactions and
+  `stackchan/event` emission. (#312)
+
 ### Gateway
 
 - Added optional user-local `user-defaults.toml` support for gateway-side
   MCP argument defaults, starting with `stackchan_follow_pose_stream`. Explicit
   MCP call arguments still take precedence, while absent, empty, or invalid
   config files fall back to schema defaults. (#311)
+- Added `set_touch_sensor_enabled` and `get_touch_sensor_enabled` MCP
+  wrappers for the firmware head-touch enable flag. (#312)
 - `stackchan_follow_pose_stream` now exposes `smoothing_window` as an
   MCP tool argument (integer, default 5, range 1..20; 1 = passthrough).
   Callers whose upstream pose source already applies smoothing can

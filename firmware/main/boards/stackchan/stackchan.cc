@@ -680,6 +680,7 @@ private:
                                                        // bus hangs.
     static constexpr int SERVO_WOBBLE_AMPLITUDE_DEG = 20;
 
+    std::atomic<bool> touch_sensor_enabled_{true};
     std::unique_ptr<Si12T> si12t_;
     bool si12t_ok_ = false;
     esp_timer_handle_t touch_poll_timer_ = nullptr;
@@ -3876,6 +3877,9 @@ private:
     }
 
     void HandleTap(uint64_t duration_ms) {
+        if (!touch_sensor_enabled_.load(std::memory_order_acquire)) {
+            return;
+        }
         LogTouchEvent("TAP", duration_ms);
         last_event_ = TouchEvent::TAP;
         last_event_us_ = esp_timer_get_time();
@@ -3887,6 +3891,9 @@ private:
     }
 
     void HandleStroke(uint64_t duration_ms) {
+        if (!touch_sensor_enabled_.load(std::memory_order_acquire)) {
+            return;
+        }
         LogTouchEvent("STROKE", duration_ms);
         last_event_ = TouchEvent::STROKE;
         last_event_us_ = esp_timer_get_time();
@@ -3982,6 +3989,13 @@ private:
             }
             cooldown_until_us_ = now_us + (uint64_t)COOLDOWN_MS * 1000ULL;
         }
+    }
+
+    void InitializeTouchSettings() {
+        Settings settings("touch", false);
+        bool enabled = settings.GetBool("enabled", true);
+        touch_sensor_enabled_.store(enabled, std::memory_order_release);
+        ESP_LOGI(TAG, "Touch sensor setting loaded: enabled=%d", enabled ? 1 : 0);
     }
 
     void InitializeSi12tTouch() {
@@ -5218,6 +5232,40 @@ private:
                                         IsGatewayFallbackUrlForced());
                 AddGatewayForcedKeyNote(notes, "token", token_provided, IsGatewayTokenForced());
                 cJSON_AddItemToObject(root, "notes", notes);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.robot.get_touch_sensor_enabled",
+            "Read the NVS-backed head-touch sensor enable flag. When disabled, "
+            "HandleTap / HandleStroke skip both the local motion response and "
+            "the stackchan/event emission.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "enabled",
+                                      touch_sensor_enabled_.load(std::memory_order_acquire));
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.robot.set_touch_sensor_enabled",
+            "Update the NVS-backed head-touch sensor enable flag. Disabling "
+            "takes effect immediately and persists across reboot; subsequent "
+            "HandleTap / HandleStroke calls skip both the local motion "
+            "response and the stackchan/event emission.",
+            PropertyList({Property("enabled", kPropertyTypeBoolean)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                bool enabled = properties["enabled"].value<bool>();
+                Settings settings("touch", true);
+                settings.SetBool("enabled", enabled);
+                touch_sensor_enabled_.store(enabled, std::memory_order_release);
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddBoolToObject(root, "enabled", enabled);
+                cJSON_AddStringToObject(root, "takes_effect", "immediate");
+                cJSON_AddStringToObject(root, "persistence", "nvs");
                 return root;
             });
 
@@ -6554,6 +6602,7 @@ public:
         GetBacklight()->RestoreBrightness();
         InitializeIOExpander();
         InitializeServo();
+        InitializeTouchSettings();
         InitializeSi12tTouch();
         I2cDetect();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
