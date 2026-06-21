@@ -21,6 +21,7 @@ from mcp.types import Notification, TextContent, Tool
 from . import __version__
 from .gateway import get_gateway
 from .notify_config import NotifyConfig, load_notify_config
+from .user_defaults import resolve_default
 from .stt import listen_and_transcribe
 from .tts import synthesize_and_send
 
@@ -388,34 +389,64 @@ async def _handle_follow_pose_stream(
     if not (url.startswith("ws://") or url.startswith("wss://")):
         return _follow_pose_error("url must start with ws:// or wss://")
 
-    flip_yaw = arguments.get("flip_yaw", 1)
+    tool_name = "stackchan_follow_pose_stream"
+
+    flip_yaw = (
+        arguments["flip_yaw"]
+        if "flip_yaw" in arguments
+        else resolve_default(tool_name, "flip_yaw", 1)
+    )
     if not _is_int_arg(flip_yaw) or flip_yaw not in (-1, 1):
         return _follow_pose_error("flip_yaw must be -1 or 1")
 
-    flip_pitch = arguments.get("flip_pitch", 1)
+    flip_pitch = (
+        arguments["flip_pitch"]
+        if "flip_pitch" in arguments
+        else resolve_default(tool_name, "flip_pitch", 1)
+    )
     if not _is_int_arg(flip_pitch) or flip_pitch not in (-1, 1):
         return _follow_pose_error("flip_pitch must be -1 or 1")
 
-    pitch_center_deg = arguments.get("pitch_center_deg", 45)
+    pitch_center_deg = (
+        arguments["pitch_center_deg"]
+        if "pitch_center_deg" in arguments
+        else resolve_default(tool_name, "pitch_center_deg", 45)
+    )
     if (
         not _is_int_arg(pitch_center_deg)
         or not 5 <= pitch_center_deg <= 85
     ):
         return _follow_pose_error("pitch_center_deg must be an integer in 5..85")
 
-    smoothing_window = arguments.get("smoothing_window", 5)
+    smoothing_window = (
+        arguments["smoothing_window"]
+        if "smoothing_window" in arguments
+        else resolve_default(tool_name, "smoothing_window", 5)
+    )
     if not _is_int_arg(smoothing_window) or not 1 <= smoothing_window <= 20:
         return _follow_pose_error("smoothing_window must be an integer in 1..20")
 
-    downsample_hz = arguments.get("downsample_hz", 20.0)
+    downsample_hz = (
+        arguments["downsample_hz"]
+        if "downsample_hz" in arguments
+        else resolve_default(tool_name, "downsample_hz", 20.0)
+    )
     if not _is_number_arg(downsample_hz) or not 0 < downsample_hz <= 60:
         return _follow_pose_error("downsample_hz must be a number in (0, 60]")
 
-    max_step_deg = arguments.get("max_step_deg", 12.0)
+    max_step_deg = (
+        arguments["max_step_deg"]
+        if "max_step_deg" in arguments
+        else resolve_default(tool_name, "max_step_deg", 12.0)
+    )
     if not _is_number_arg(max_step_deg) or not 0 < max_step_deg <= 30:
         return _follow_pose_error("max_step_deg must be a number in (0, 30]")
 
-    speed_dps = arguments.get("speed_dps", 240)
+    speed_dps = (
+        arguments["speed_dps"]
+        if "speed_dps" in arguments
+        else resolve_default(tool_name, "speed_dps", 240)
+    )
     if not _is_int_arg(speed_dps) or not 1 <= speed_dps <= 240:
         return _follow_pose_error("speed_dps must be an integer in 1..240")
 

@@ -745,6 +745,10 @@ def _configure_gateway_startup() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    from .user_defaults import log_user_defaults_startup
+
+    log_user_defaults_startup()
+
 
 def _acquire_startup_lock(
     *,

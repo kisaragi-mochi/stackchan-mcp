@@ -1,0 +1,27 @@
+# stackchan-mcp user-defaults template
+#
+# Copy this file to your user config directory as user-defaults.toml.
+# On typical Linux/XDG setups the path is:
+#   ~/.config/stackchan-mcp/user-defaults.toml
+# The gateway uses platformdirs to resolve the OS-specific user config path
+# on macOS, Linux, and Windows.
+#
+# This file is optional. If it is absent or empty, the gateway uses the MCP
+# schema defaults.
+#
+# Values here overlay schema defaults per argument. Arguments you do not list
+# keep their schema default. Explicit MCP tool-call arguments still win over
+# this file.
+#
+# This file does not replace the firmware-side NVS settings handled by
+# gateway_config_get / gateway_config_set. Those are on-device connection
+# settings. This file only sets user-level Python defaults for MCP arguments.
+
+[tool.stackchan_follow_pose_stream]
+# smoothing_window = 5    # schema default: 5
+# downsample_hz = 20      # schema default: 20
+# max_step_deg = 12       # schema default: 12
+# speed_dps = 240         # schema default: 240
+# flip_yaw = 1            # schema default: 1
+# flip_pitch = 1          # schema default: 1
+# pitch_center_deg = 45   # schema default: 45

@@ -34,6 +34,8 @@ dependencies = [
     "pydantic>=2",
     "python-dotenv",
     "PyYAML>=6",
+    "platformdirs>=4.0,<5.0",
+    "tomli>=2.0,<3.0; python_version < '3.11'",
     # The stdio server captures the active ServerSession via a subclassed
     # Server.run() loop because the public MCP SDK does not yet expose a
     # stable hook for server-side notifications. That subclass relies on

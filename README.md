@@ -401,6 +401,40 @@ If you installed from source via `uv`:
 
 See `gateway/README.md` for details.
 
+### Gateway user-defaults TOML file
+
+The Python gateway can optionally read user-local default argument values from
+a TOML file under the OS-standard user config directory:
+
+- Linux / XDG: `~/.config/stackchan-mcp/user-defaults.toml`
+- macOS: `~/Library/Application Support/stackchan-mcp/user-defaults.toml`
+- Windows: `%APPDATA%\stackchan-mcp\user-defaults.toml`
+
+The exact path is resolved with `platformdirs`, and the gateway logs the
+resolved path at startup. The tracked `user-defaults.toml.example` file at the
+repository root is the template.
+
+The file is an overlay on top of the MCP schema defaults. If the file is absent
+or empty, schema defaults are used. If a key is omitted from the file, that key
+keeps its schema default. Explicit MCP tool-call arguments always take
+precedence over the file, so the order is: explicit argument > user-defaults
+file > schema default.
+
+This is a gateway-side Python setting. It is separate from the firmware-side
+NVS connection settings exposed by `gateway_config_get` / `gateway_config_set`
+(added in PR #293). Those tools read or update the device's saved WebSocket
+connection settings; this TOML file only changes default MCP argument values
+used by the Python gateway.
+
+Minimal example:
+
+```toml
+[tool.stackchan_follow_pose_stream]
+smoothing_window = 1
+downsample_hz = 60
+max_step_deg = 30
+```
+
 ### 4. Optional: TTS setup (VOICEVOX)
 
 To make the device speak, install the `[tts]` extra and run a

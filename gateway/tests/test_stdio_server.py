@@ -26,6 +26,27 @@ from stackchan_mcp.stdio_server import (
 from stackchan_mcp.tts import get_registry
 
 
+@pytest.fixture(autouse=True)
+def _isolate_user_defaults_config(monkeypatch, tmp_path):
+    """Keep stdio tests independent from any real user-defaults file."""
+    import stackchan_mcp.user_defaults as user_defaults
+
+    config_dir = tmp_path / "user-defaults-config"
+
+    def fake_user_config_path(appname: str, **kwargs):
+        assert appname == "stackchan-mcp"
+        return config_dir
+
+    monkeypatch.setattr(
+        user_defaults.platformdirs,
+        "user_config_path",
+        fake_user_config_path,
+    )
+    user_defaults._clear_user_defaults_cache_for_tests()
+    yield
+    user_defaults._clear_user_defaults_cache_for_tests()
+
+
 def test_create_server():
     """Server creation succeeds with correct name."""
     server = create_server()
@@ -1178,6 +1199,45 @@ async def test_follow_pose_smoothing_window_defaults_to_five(monkeypatch):
         f"response text={result.root.content[0].text!r}"
     )
     assert captured[0].smoothing_window == 5
+
+
+@pytest.mark.asyncio
+async def test_follow_pose_explicit_smoothing_window_wins_over_user_default(
+    monkeypatch,
+    tmp_path,
+):
+    """Explicit MCP args override user-defaults TOML values."""
+    import stackchan_mcp.user_defaults as user_defaults
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "user-defaults.toml").write_text(
+        "[tool.stackchan_follow_pose_stream]\n"
+        "smoothing_window = 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        user_defaults.platformdirs,
+        "user_config_path",
+        lambda appname: config_dir,
+    )
+    user_defaults._clear_user_defaults_cache_for_tests()
+
+    try:
+        captured = _make_follow_pose_fake_gateway(monkeypatch)
+        server = create_server()
+
+        result = await server.request_handlers[CallToolRequest](
+            _follow_pose_request(smoothing_window=20)
+        )
+    finally:
+        user_defaults._clear_user_defaults_cache_for_tests()
+
+    assert len(captured) == 1, (
+        "start_follow should fire once with the explicit argument; "
+        f"response text={result.root.content[0].text!r}"
+    )
+    assert captured[0].smoothing_window == 20
 
 
 @pytest.mark.asyncio
