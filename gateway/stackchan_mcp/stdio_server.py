@@ -403,6 +403,10 @@ async def _handle_follow_pose_stream(
     ):
         return _follow_pose_error("pitch_center_deg must be an integer in 5..85")
 
+    smoothing_window = arguments.get("smoothing_window", 5)
+    if not _is_int_arg(smoothing_window) or not 1 <= smoothing_window <= 20:
+        return _follow_pose_error("smoothing_window must be an integer in 1..20")
+
     downsample_hz = arguments.get("downsample_hz", 20.0)
     if not _is_number_arg(downsample_hz) or not 0 < downsample_hz <= 60:
         return _follow_pose_error("downsample_hz must be a number in (0, 60]")
@@ -429,6 +433,7 @@ async def _handle_follow_pose_stream(
         flip_yaw=flip_yaw,
         flip_pitch=flip_pitch,
         pitch_center_deg=pitch_center_deg,
+        smoothing_window=smoothing_window,
         downsample_hz=float(downsample_hz),
         max_step_deg=float(max_step_deg),
         speed_dps=speed_dps,
@@ -925,6 +930,17 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "description": (
                                 "Servo pitch (deg) treated as the sensor-pitch=0 "
                                 "anchor. Defaults to the head's neutral pose."
+                            ),
+                        },
+                        "smoothing_window": {
+                            "type": "integer",
+                            "default": 5,
+                            "minimum": 1,
+                            "maximum": 20,
+                            "description": (
+                                "Moving-average window size for incoming sensor "
+                                "frames. 1 = passthrough (disable gateway-side "
+                                "smoothing). Default 5."
                             ),
                         },
                         "downsample_hz": {

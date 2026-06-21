@@ -1110,3 +1110,116 @@ class _FakeNotificationSession:
                 exclude_none=True,
             )
         )
+
+
+def _make_follow_pose_fake_gateway(monkeypatch):
+    """Helper: capture the FollowPoseStreamConfig that reaches start_follow.
+
+    Returns a single-element ``captured`` list; the handler imports
+    start_follow from follow_pose_stream at call time, so patching the
+    module attribute is enough to intercept the config without driving a
+    real WebSocket subscription.
+    """
+    captured: list = []
+
+    class FakeGateway:
+        pass
+
+    async def fake_start_follow(gateway, cfg):
+        captured.append(cfg)
+        return {"running": True}
+
+    import stackchan_mcp.follow_pose_stream as follow_pose_stream
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(follow_pose_stream, "start_follow", fake_start_follow)
+    return captured
+
+
+def _follow_pose_request(**arguments):
+    arguments.setdefault("action", "start")
+    arguments.setdefault("url", "ws://example.test/pose")
+    return CallToolRequest(
+        method="tools/call",
+        params={"name": "stackchan_follow_pose_stream", "arguments": arguments},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", [1, 5, 20])
+async def test_follow_pose_smoothing_window_propagates(monkeypatch, window):
+    """Explicit in-range smoothing_window reaches FollowPoseStreamConfig."""
+    captured = _make_follow_pose_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_pose_request(smoothing_window=window)
+    )
+
+    assert len(captured) == 1, (
+        f"start_follow should fire once for smoothing_window={window}; "
+        f"response text={result.root.content[0].text!r}"
+    )
+    assert captured[0].smoothing_window == window
+
+
+@pytest.mark.asyncio
+async def test_follow_pose_smoothing_window_defaults_to_five(monkeypatch):
+    """Omitting smoothing_window reproduces the dataclass default of 5."""
+    captured = _make_follow_pose_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_pose_request()
+    )
+
+    assert len(captured) == 1, (
+        "start_follow should fire once when smoothing_window is omitted; "
+        f"response text={result.root.content[0].text!r}"
+    )
+    assert captured[0].smoothing_window == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", [0, 21, -1, 100])
+async def test_follow_pose_smoothing_window_out_of_range_rejected(monkeypatch, window):
+    """Out-of-range smoothing_window is refused without starting a follow."""
+    captured = _make_follow_pose_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_pose_request(smoothing_window=window)
+    )
+
+    assert captured == [], (
+        "Out-of-range smoothing_window must not start a follow. "
+        f"Got captured={captured}, "
+        f"response text={result.root.content[0].text!r}"
+    )
+    response_text = result.root.content[0].text.lower()
+    assert any(
+        keyword in response_text
+        for keyword in ("error", "invalid", "minimum", "maximum", "type")
+    ), f"Expected an error signal in {result.root.content[0].text!r}"
+
+
+@pytest.mark.asyncio
+async def test_follow_pose_smoothing_window_non_integer_rejected(monkeypatch):
+    """A non-integer smoothing_window is refused without starting a follow."""
+    captured = _make_follow_pose_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_pose_request(smoothing_window=3.5)
+    )
+
+    assert captured == [], (
+        "Non-integer smoothing_window must not start a follow. "
+        f"Got captured={captured}, "
+        f"response text={result.root.content[0].text!r}"
+    )
+    response_text = result.root.content[0].text.lower()
+    assert any(
+        keyword in response_text
+        for keyword in ("error", "invalid", "type", "integer")
+    ), f"Expected an error signal in {result.root.content[0].text!r}"

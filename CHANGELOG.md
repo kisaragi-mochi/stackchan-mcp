@@ -30,6 +30,14 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- `stackchan_follow_pose_stream` now exposes `smoothing_window` as an
+  MCP tool argument (integer, default 5, range 1..20; 1 = passthrough).
+  Callers whose upstream pose source already applies smoothing can
+  disable the redundant gateway-side moving average. Omitting the
+  argument preserves the previous behaviour. (#309)
+
 ## [0.12.0] - 2026-06-20
 
 ### Gateway
