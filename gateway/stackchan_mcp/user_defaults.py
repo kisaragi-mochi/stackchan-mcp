@@ -78,7 +78,7 @@ def _is_supported_value(tool_name: str, arg_name: str, value: Any) -> bool:
     if arg_name == "smoothing_window":
         return 1 <= value <= 20
     if arg_name == "downsample_hz":
-        return 0 < float(value) <= 60
+        return 0 < float(value) <= 20
     if arg_name == "max_step_deg":
         return 0 < float(value) <= 30
     if arg_name == "speed_dps":
