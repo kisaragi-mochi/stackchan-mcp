@@ -32,6 +32,10 @@ documented-only.
 
 ### Gateway
 
+- Added optional user-local `user-defaults.toml` support for gateway-side
+  MCP argument defaults, starting with `stackchan_follow_pose_stream`. Explicit
+  MCP call arguments still take precedence, while absent, empty, or invalid
+  config files fall back to schema defaults. (#311)
 - `stackchan_follow_pose_stream` now exposes `smoothing_window` as an
   MCP tool argument (integer, default 5, range 1..20; 1 = passthrough).
   Callers whose upstream pose source already applies smoothing can

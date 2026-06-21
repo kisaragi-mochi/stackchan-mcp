@@ -336,6 +336,40 @@ callback 設定を [`docs/remote-access.md`](docs/remote-access.md) にまとめ
 
 詳細は `gateway/README.md` 参照。
 
+### gateway user-defaults TOML ファイル
+
+Python gateway は、ユーザーごとの既定引数を任意で OS 標準の user config
+ディレクトリ配下の TOML ファイルから読み込めます:
+
+- Linux / XDG: `~/.config/stackchan-mcp/user-defaults.toml`
+- macOS: `~/Library/Application Support/stackchan-mcp/user-defaults.toml`
+- Windows: `%APPDATA%\stackchan-mcp\user-defaults.toml`
+
+実際の path は `platformdirs` で解決され、gateway 起動時のログに解決後の
+path が出ます。リポジトリ直下の `user-defaults.toml.example` が
+テンプレートです。
+
+このファイルは MCP schema default の上に重ねる overlay です。ファイルが
+存在しない、または空の場合は schema default が使われます。ファイルに
+書かなかった引数も schema default のままです。MCP tool 呼び出しで明示
+された引数は常にこのファイルより優先されるため、優先順位は
+`明示引数 > user-defaults ファイル > schema default` です。
+
+これは gateway 側 Python の設定です。`gateway_config_get` /
+`gateway_config_set`（PR #293 で追加）が扱う firmware 側 NVS の接続設定とは
+別レイヤーです。そちらはデバイスに保存された WebSocket 接続設定を読み書き
+します。この TOML ファイルは Python gateway が使う MCP 引数の既定値だけを
+変更します。
+
+最小例:
+
+```toml
+[tool.stackchan_follow_pose_stream]
+smoothing_window = 1
+downsample_hz = 60
+max_step_deg = 30
+```
+
 ### 4. オプション: TTS セットアップ (VOICEVOX)
 
 デバイスを喋らせるには、`[tts]` extras をインストールして

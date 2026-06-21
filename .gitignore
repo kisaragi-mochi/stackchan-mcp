@@ -10,6 +10,7 @@ venv/
 # Environment / secrets
 .env
 .env.local
+/user-defaults.toml
 *.local
 AGENTS.local.md
 CLAUDE.md

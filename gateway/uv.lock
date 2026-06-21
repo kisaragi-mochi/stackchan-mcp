@@ -1390,6 +1390,15 @@ wheels = [
 ]
 
 [[package]]
+name = "platformdirs"
+version = "4.10.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d7/47/e4501f49c178ae1d9f4a75073fda4204f52647993f075a9db4d14930e0c5/platformdirs-4.10.0.tar.gz", hash = "sha256:31e761a6a0ca04faf7353ea759bdba55652be214725111e5aac52dfa29d4bef7", size = 31224, upload-time = "2026-05-28T03:32:53.587Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/81/e6/cd9575ac904136b3cbf7aa7ee819ef86eedb7274e46f230e94ea4342e729/platformdirs-4.10.0-py3-none-any.whl", hash = "sha256:fb516cdb12eb0d857d0cd85a7c57cea4d060bee4578d6cf5a14dfdf8cbf8784a", size = 22743, upload-time = "2026-05-28T03:32:52.175Z" },
+]
+
+[[package]]
 name = "pluggy"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2064,9 +2073,11 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "mcp" },
+    { name = "platformdirs" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "websockets" },
     { name = "zeroconf" },
 ]
@@ -2114,9 +2125,11 @@ requires-dist = [
     { name = "openai", marker = "extra == 'stt-openai'", specifier = ">=1.0" },
     { name = "opuslib", marker = "extra == 'stt'", specifier = ">=3" },
     { name = "opuslib", marker = "extra == 'tts'", specifier = ">=3" },
+    { name = "platformdirs", specifier = ">=4.0,<5.0" },
     { name = "pydantic", specifier = ">=2" },
     { name = "python-dotenv" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "tomli", marker = "python_version < '3.11'", specifier = ">=2.0,<3.0" },
     { name = "stackchan-mcp", extras = ["stt"], marker = "extra == 'stt-faster-whisper'" },
     { name = "stackchan-mcp", extras = ["stt"], marker = "extra == 'stt-openai'" },
     { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-irodori'" },
