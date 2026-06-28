@@ -238,6 +238,7 @@ async def synthesize_and_send(
         )
 
     speaker_id = arguments.get("speaker_id")
+    speaker_name = arguments.get("speaker_name")
     reference_audio = arguments.get("reference_audio")
 
     tts_text = text
@@ -308,6 +309,7 @@ async def synthesize_and_send(
         pcm = await engine.synthesize(
             tts_text,
             speaker_id=speaker_id,
+            speaker_name=speaker_name,
             reference_audio=reference_audio,
         )
     except ValueError:

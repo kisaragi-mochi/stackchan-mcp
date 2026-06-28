@@ -54,8 +54,15 @@ def _register_irodori() -> None:
     get_registry().register(IrodoriEngine())
 
 
+def _register_edge_tts() -> None:
+    from .edge_tts import EdgeTTSEngine
+
+    get_registry().register(EdgeTTSEngine())
+
+
 _try_register(_register_voicevox, "voicevox")
 _try_register(_register_irodori, "irodori")
+_try_register(_register_edge_tts, "edge-tts")
 
 
 __all__ = [
