@@ -1606,8 +1606,20 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         "speaker_id": {
                             "type": "integer",
                             "description": (
-                                "Engine-specific speaker identifier "
+                                "Engine-specific numeric speaker identifier "
                                 "(e.g. a VOICEVOX speaker ID)."
+                            ),
+                        },
+                        "speaker_name": {
+                            "type": "string",
+                            "description": (
+                                "Engine-specific string speaker/voice "
+                                "identifier (e.g. an Edge TTS voice name "
+                                "such as 'en-US-AriaNeural'). Distinct from "
+                                "'voice', which selects the engine itself "
+                                "(e.g. 'edge-tts'); use speaker_name for "
+                                "engines whose speaker selector is a string "
+                                "name rather than the numeric speaker_id."
                             ),
                         },
                         "reference_audio": {

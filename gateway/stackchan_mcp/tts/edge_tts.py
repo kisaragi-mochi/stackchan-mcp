@@ -13,6 +13,17 @@ get raw 16 kHz mono PCM.
 This is intentionally a subprocess-based engine (not an HTTP client like
 VoicevoxEngine) since edge-tts ships as a CLI tool, not a long-running
 server.
+
+Configuration (environment variables):
+
+    STACKCHAN_EDGE_TTS_DEFAULT_VOICE
+        Voice name used when the say() tool does not specify one via
+        speaker_name. Default "en-GB-SoniaNeural". Read lazily on each
+        access (not cached at import/construction time) so a .env file
+        loaded after engine registration — e.g. under
+        `serve --transport streamable-http`, where the tts package import
+        chain resolves before _configure_gateway_startup() loads .env —
+        still takes effect.
 """
 
 from __future__ import annotations
@@ -31,8 +42,6 @@ logger = logging.getLogger(__name__)
 
 
 #: Default voice. en-GB-SoniaNeural is a natural British English voice.
-#: Override per-call via the say() tool's `speaker_id` opt (repurposed here
-#: as a voice name string) or globally via STACKCHAN_EDGE_TTS_DEFAULT_VOICE.
 DEFAULT_EDGE_TTS_VOICE = "en-GB-SoniaNeural"
 
 #: Timeout for the edge-tts subprocess and the ffmpeg conversion step.
@@ -44,12 +53,6 @@ class EdgeTTSEngine(TTSEngine):
 
     Setup: `pip install edge-tts` (already on PATH as `edge-tts` once
     installed) and `ffmpeg` on PATH for MP3 -> PCM conversion.
-
-    Configuration:
-
-        STACKCHAN_EDGE_TTS_DEFAULT_VOICE
-            Voice name used when the say() tool does not specify one.
-            Default "en-GB-SoniaNeural".
     """
 
     name = "edge-tts"
@@ -61,33 +64,48 @@ class EdgeTTSEngine(TTSEngine):
         edge_tts_binary: str | None = None,
         ffmpeg_binary: str | None = None,
     ) -> None:
-        env_voice = os.getenv("STACKCHAN_EDGE_TTS_DEFAULT_VOICE")
-        self._default_voice = default_voice or env_voice or DEFAULT_EDGE_TTS_VOICE
+        # Only the explicit constructor override is stored here. The
+        # STACKCHAN_EDGE_TTS_DEFAULT_VOICE environment variable is
+        # intentionally NOT read in __init__ — see default_voice below
+        # and the module docstring for why.
+        self._default_voice_override = default_voice
         self._timeout_seconds = timeout_seconds
         self._edge_tts_binary = edge_tts_binary or "edge-tts"
         self._ffmpeg_binary = ffmpeg_binary or "ffmpeg"
 
     @property
     def default_voice(self) -> str:
-        """Voice name used when no voice is specified per-call."""
-        return self._default_voice
+        """Voice name used when no voice is specified per-call.
+
+        Resolved lazily on every access: explicit constructor override
+        wins, otherwise STACKCHAN_EDGE_TTS_DEFAULT_VOICE is read fresh
+        from the environment, falling back to DEFAULT_EDGE_TTS_VOICE.
+        """
+        if self._default_voice_override is not None:
+            return self._default_voice_override
+        return os.getenv("STACKCHAN_EDGE_TTS_DEFAULT_VOICE") or DEFAULT_EDGE_TTS_VOICE
 
     async def synthesize(self, text: str, **opts: Any) -> bytes:
         """Run edge-tts + ffmpeg, return 16 kHz mono signed-16-bit PCM.
 
         Recognised opts:
 
-            voice: str
+            speaker_name: str
                 Edge TTS voice name (e.g. "en-GB-SoniaNeural",
-                "en-US-AriaNeural"). Falls back to `default_voice`.
-            speaker_id: str
-                Alternate way to pass the Edge voice name, matching the
-                say() tool's generic per-engine option naming.
+                "en-US-AriaNeural"). Falls back to `default_voice`. This
+                is distinct from the say() tool's `voice` argument, which
+                selects the engine itself (e.g. "edge-tts"); speaker_name
+                is the string equivalent of VOICEVOX's numeric
+                speaker_id, for engines whose speaker selector is a name.
+            speaker_id: int | None
+                Ignored. Accepted only so the orchestrator can pass a
+                uniform argument set across engines without raising.
         """
         if not text:
             raise ValueError("text must not be empty")
 
-        voice = opts.get("voice") or opts.get("speaker_id") or self._default_voice
+        speaker_name = opts.get("speaker_name")
+        voice = speaker_name if isinstance(speaker_name, str) and speaker_name else self.default_voice
 
         with tempfile.TemporaryDirectory() as tmpdir:
             mp3_path = Path(tmpdir) / "out.mp3"
@@ -98,6 +116,7 @@ class EdgeTTSEngine(TTSEngine):
                 "--voice", voice,
                 "--text", text,
                 "--write-media", str(mp3_path),
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -111,9 +130,10 @@ class EdgeTTSEngine(TTSEngine):
                 )
 
             ffmpeg_proc = await asyncio.create_subprocess_exec(
-                self._ffmpeg_binary, "-y", "-i", str(mp3_path),
+                self._ffmpeg_binary, "-nostdin", "-y", "-i", str(mp3_path),
                 "-f", "s16le", "-ar", str(DEVICE_SAMPLE_RATE), "-ac", "1",
                 str(pcm_path),
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
