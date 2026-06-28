@@ -59,6 +59,16 @@ documented-only.
   "downsample_hz must be a number in (0, 20]". The schema default
   (20) is unchanged, so calls that omit the argument behave the
   same. (#315)
+- Added `edge-tts` TTS engine — a subprocess-based engine using
+  Microsoft's Edge TTS CLI and ffmpeg, registered as `edge-tts`.
+  Provides natural English and multilingual voices (`voicevox` is
+  Japanese-only by default). Setup: install `edge-tts` CLI on PATH
+  (e.g. `pip install edge-tts`) plus `ffmpeg`. Default voice is
+  `en-GB-SoniaNeural`, overridable per-call via the new
+  `say(speaker_name=...)` argument (added to the say() schema as a
+  string field, distinct from `speaker_id` integer and the `voice`
+  engine selector) or globally via the `STACKCHAN_EDGE_TTS_DEFAULT_VOICE`
+  env var. (#317)
 
 ## [0.12.0] - 2026-06-20
 
