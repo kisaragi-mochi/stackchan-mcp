@@ -6155,10 +6155,15 @@ private:
             "from a prior command). For typical 'write register address, "
             "then read' patterns, use self.i2c.write_read instead. Returns "
             "{\"ok\":true, \"bytes\":[...]} or "
-            "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK.",
+            "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK. Optional "
+            "`scl_speed_hz` (default 400000) sets the I2C clock for this "
+            "transaction; lower it (e.g. 200000) for slower Units such as the "
+            "RCWL-9620 ultrasonic ranger that fail at 400 kHz with "
+            "ESP_ERR_INVALID_STATE.",
             PropertyList({
                 Property("addr", kPropertyTypeInteger, 0x08, 0x77),
-                Property("n_bytes", kPropertyTypeInteger, 1, 256)
+                Property("n_bytes", kPropertyTypeInteger, 1, 256),
+                Property("scl_speed_hz", kPropertyTypeInteger, 400000, 100000, 1000000)
             }),
             [this](const PropertyList& props) -> ReturnValue {
                 cJSON* root = cJSON_CreateObject();
@@ -6168,7 +6173,7 @@ private:
                 i2c_device_config_t cfg = {
                     .dev_addr_length = I2C_ADDR_BIT_LEN_7,
                     .device_address = addr,
-                    .scl_speed_hz = 400000,
+                    .scl_speed_hz = static_cast<uint32_t>(props["scl_speed_hz"].value<int>()),
                 };
                 i2c_master_dev_handle_t dev;
                 esp_err_t err = i2c_master_bus_add_device(port_a_i2c_bus_, &cfg, &dev);
@@ -6214,10 +6219,15 @@ private:
             "external Port A bus only; on-board ICs (PMIC, AW9523, touch, "
             "etc.) on the internal bus are not reachable. Returns "
             "{\"ok\":true} on ACK or "
-            "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK.",
+            "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK. Optional "
+            "`scl_speed_hz` (default 400000) sets the I2C clock for this "
+            "transaction; lower it (e.g. 200000) for slower Units such as the "
+            "RCWL-9620 ultrasonic ranger that fail at 400 kHz with "
+            "ESP_ERR_INVALID_STATE.",
             PropertyList({
                 Property("addr", kPropertyTypeInteger, 0x08, 0x77),
-                i2c_write_bytes_prop
+                i2c_write_bytes_prop,
+                Property("scl_speed_hz", kPropertyTypeInteger, 400000, 100000, 1000000)
             }),
             [this](const PropertyList& props) -> ReturnValue {
                 cJSON* root = cJSON_CreateObject();
@@ -6227,7 +6237,7 @@ private:
                 i2c_device_config_t cfg = {
                     .dev_addr_length = I2C_ADDR_BIT_LEN_7,
                     .device_address = addr,
-                    .scl_speed_hz = 400000,
+                    .scl_speed_hz = static_cast<uint32_t>(props["scl_speed_hz"].value<int>()),
                 };
                 i2c_master_dev_handle_t dev;
                 esp_err_t err = i2c_master_bus_add_device(port_a_i2c_bus_, &cfg, &dev);
@@ -6271,11 +6281,16 @@ private:
             "register pointer, then read' pattern: pass write_bytes=[reg_addr] "
             "to read from a specific register. Returns "
             "{\"ok\":true, \"bytes\":[...]} or "
-            "{\"ok\":false, \"error\":\"...\"} on failure.",
+            "{\"ok\":false, \"error\":\"...\"} on failure. Optional "
+            "`scl_speed_hz` (default 400000) sets the I2C clock for this "
+            "transaction; lower it (e.g. 200000) for slower Units such as the "
+            "RCWL-9620 ultrasonic ranger that fail at 400 kHz with "
+            "ESP_ERR_INVALID_STATE.",
             PropertyList({
                 Property("addr", kPropertyTypeInteger, 0x08, 0x77),
                 i2c_wr_write_bytes_prop,
-                Property("n_bytes", kPropertyTypeInteger, 1, 256)
+                Property("n_bytes", kPropertyTypeInteger, 1, 256),
+                Property("scl_speed_hz", kPropertyTypeInteger, 400000, 100000, 1000000)
             }),
             [this](const PropertyList& props) -> ReturnValue {
                 cJSON* root = cJSON_CreateObject();
@@ -6286,7 +6301,7 @@ private:
                 i2c_device_config_t cfg = {
                     .dev_addr_length = I2C_ADDR_BIT_LEN_7,
                     .device_address = addr,
-                    .scl_speed_hz = 400000,
+                    .scl_speed_hz = static_cast<uint32_t>(props["scl_speed_hz"].value<int>()),
                 };
                 i2c_master_dev_handle_t dev;
                 esp_err_t err = i2c_master_bus_add_device(port_a_i2c_bus_, &cfg, &dev);
