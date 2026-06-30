@@ -32,6 +32,15 @@ documented-only.
 
 ### Firmware
 
+- Added an optional `scl_speed_hz` property (default `400000`, range
+  `100000`–`1000000`) to the Port A I2C tools `self.i2c.read`,
+  `self.i2c.write`, and `self.i2c.write_read`, applied to the per-call
+  `i2c_master_bus_add_device` config. This lets slow Units that cannot
+  sustain the hardcoded 400 kHz clock be driven without recompiling the
+  firmware (e.g. the RCWL-9620 ultrasonic ranger, which ACKs a probe but
+  fails the transfer with `ESP_ERR_INVALID_STATE` at 400 kHz and only
+  reads stably at 100 kHz). Behaviour is unchanged when the property is
+  omitted. (#319)
 - Added the NVS-backed `touch.enabled` field, handler guards, and
   `self.robot.set_touch_sensor_enabled` /
   `self.robot.get_touch_sensor_enabled` MCP tools so users can disable
