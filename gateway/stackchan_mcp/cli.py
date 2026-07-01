@@ -438,9 +438,20 @@ def _run_ownership_check() -> int:
     """Print the current ownership lock status and exit cleanly."""
     from .ownership import is_pid_alive, read_lock
 
-    info = read_lock()
+    # Load ``.env`` first so that a WS_PORT / PORT defined only there resolves
+    # the same per-port lock the running gateway claims. Startup loads ``.env``
+    # before ``_acquire_startup_lock`` (via ``_run_stdio_gateway`` /
+    # ``_run_streamable_http_placeholder``), so ``--check`` must match it —
+    # otherwise a gateway owning ``owner-18765.lock`` would be inspected against
+    # the default ``owner-8765.lock`` and wrongly reported ready. Mirrors how
+    # ``--preflight`` loads ``.env`` inside ``_run_preflight``.
+    _load_dotenv()
+    # Inspect the per-WS_PORT lock this gateway would claim (not the legacy
+    # machine-global owner.lock), so the preflight reflects the actual port.
+    lock_path = _ws_port_lock_path()
+    info = read_lock(lock_path)
     if info is None:
-        print("no current owner")
+        print(f"no current owner (lock: {lock_path.name})")
         print("ownership preflight: ready")
         print("Result: ready. Exit 0.")
     elif is_pid_alive(info["pid"]):
@@ -750,6 +761,22 @@ def _configure_gateway_startup() -> None:
     log_user_defaults_startup()
 
 
+def _ws_port_lock_path():
+    """Per-WS_PORT ownership lock path.
+
+    複数機体対応: ownership lock を machine-global な ``owner.lock`` でなく
+    WS_PORT 単位に scope する。 lock は「同一 device を 2 つの gateway が
+    奪い合わない」 ための機構だが、 1 device = 1 gateway = 1 WS ポートで
+    複数機体を同時に動かす構成では global lock が 2 台目以降を誤って弾く。
+    ポート単位なら N gateway が共存でき、 同一ポート二重起動は従来通り弾ける。
+    WS_PORT 未解決時は従来の global パスにフォールバック。
+    """
+    from .ownership import LOCK_DIR
+
+    ws_port, _ = _resolve_ws_port()
+    return LOCK_DIR / (f"owner-{ws_port}.lock" if ws_port else "owner.lock")
+
+
 def _acquire_startup_lock(
     *,
     mode: "LockMode" = _STDIO_TRANSPORT,
@@ -764,13 +791,16 @@ def _acquire_startup_lock(
         release_lock_if_owner,
     )
 
+    lock_path = _ws_port_lock_path()
+
     owner_id = generate_owner_id()
     try:
         if mode == _STDIO_TRANSPORT and http_endpoint is None and started_by is None:
-            info = acquire_lock(owner_id)
+            info = acquire_lock(owner_id, path=lock_path)
         else:
             info = acquire_lock(
                 owner_id,
+                path=lock_path,
                 mode=mode,
                 http_endpoint=http_endpoint,
                 started_by=started_by,
@@ -782,12 +812,13 @@ def _acquire_startup_lock(
     try:
         print(
             "stackchan-mcp: acquired ownership lock "
-            f"(owner_id={info['owner_id']}, pid={info['pid']})",
+            f"(owner_id={info['owner_id']}, pid={info['pid']}, "
+            f"lock={lock_path.name})",
             file=sys.stderr,
         )
-        atexit.register(release_lock_if_owner, info)
+        atexit.register(release_lock_if_owner, info, lock_path)
     except BaseException:
-        release_lock_if_owner(info)
+        release_lock_if_owner(info, lock_path)
         raise
 
     return info
@@ -810,7 +841,7 @@ def _run_stdio_gateway(*, advertise_mdns: bool = True) -> None:
         except KeyboardInterrupt:
             pass
     finally:
-        release_lock_if_owner(info)
+        release_lock_if_owner(info, _ws_port_lock_path())
 
 
 def _resolve_mcp_http_endpoint() -> tuple[str, int]:
@@ -920,7 +951,7 @@ def _run_streamable_http_placeholder(*, advertise_mdns: bool = True) -> None:
             pass
     finally:
         if info is not None:
-            release_lock_if_owner(info)
+            release_lock_if_owner(info, _ws_port_lock_path())
 
 
 def main(argv: list[str] | None = None) -> None:

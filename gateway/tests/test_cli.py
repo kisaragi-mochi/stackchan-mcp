@@ -189,7 +189,7 @@ def test_main_default_advertises_mdns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "_ensure_libopus_findable", lambda: None)
     monkeypatch.setattr(cli, "_run", fake_run)
-    monkeypatch.setattr(ownership, "release_lock_if_owner", lambda info: True)
+    monkeypatch.setattr(ownership, "release_lock_if_owner", lambda info, path=None: True)
 
     main([])
 
@@ -210,7 +210,7 @@ def test_main_no_mdns_disables_advertisement(
     monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "_ensure_libopus_findable", lambda: None)
     monkeypatch.setattr(cli, "_run", fake_run)
-    monkeypatch.setattr(ownership, "release_lock_if_owner", lambda info: True)
+    monkeypatch.setattr(ownership, "release_lock_if_owner", lambda info, path=None: True)
 
     main(["--no-mdns"])
 
@@ -385,7 +385,9 @@ def test_streamable_http_releases_lock_after_daemon_exit(
     monkeypatch.setattr(cli, "_configure_gateway_startup", lambda: None)
     monkeypatch.setattr(cli, "_acquire_startup_lock", fake_acquire)
     monkeypatch.setattr(cli, "_run_streamable_http_daemon", fake_daemon)
-    monkeypatch.setattr(ownership, "release_lock_if_owner", released.append)
+    monkeypatch.setattr(
+        ownership, "release_lock_if_owner", lambda info, path=None: released.append(info)
+    )
     monkeypatch.delenv("MCP_HTTP_HOST", raising=False)
     monkeypatch.delenv("MCP_HTTP_PORT", raising=False)
     monkeypatch.delenv("STACKCHAN_TOKEN", raising=False)
@@ -752,7 +754,7 @@ def test_main_check_flag_runs_ownership_check_and_exits(
 
     _isolate_preflight_env(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_run_preflight", lambda: 99)
-    monkeypatch.setattr(ownership, "read_lock", lambda: None)
+    monkeypatch.setattr(ownership, "read_lock", lambda path=None: None)
 
     with pytest.raises(SystemExit) as exc:
         main(["--check"])
@@ -760,6 +762,38 @@ def test_main_check_flag_runs_ownership_check_and_exits(
     out = capsys.readouterr().out
     assert "ownership preflight" in out
     assert "Result: ready" in out
+
+
+def test_main_check_flag_inspects_per_ws_port_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``--check`` inspects the lock for the configured WS_PORT.
+
+    Guards against the ``--check`` preflight reading the default
+    ``owner-8765.lock`` while a gateway configured for another port owns
+    ``owner-<port>.lock``. ``_run_ownership_check`` loads ``.env`` before
+    deriving the lock path, mirroring the startup order, so a WS_PORT set in
+    the environment (or ``.env``) is reflected here.
+    """
+    from stackchan_mcp import ownership
+
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("WS_PORT", "18765")
+    seen: list[Path] = []
+
+    def fake_read_lock(path: Path | None = None) -> None:
+        seen.append(path)
+        return None
+
+    monkeypatch.setattr(ownership, "read_lock", fake_read_lock)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--check"])
+    assert exc.value.code == 0
+    assert seen and seen[0] is not None and seen[0].name == "owner-18765.lock"
+    assert "owner-18765.lock" in capsys.readouterr().out
 
 
 def test_main_preflight_flag_runs_preflight_and_exits(

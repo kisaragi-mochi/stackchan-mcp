@@ -38,6 +38,13 @@ documented-only.
 - Fail in-flight `load_avatar_set` calls with `disconnected` immediately
   when the ESP32 connection drops, instead of waiting for the avatar
   load timeout. (#228)
+- Scoped the gateway ownership lock per WS port (`owner-<ws_port>.lock`
+  instead of the machine-global `owner.lock`), so one gateway per device
+  can run on separate WS ports on the same host without the second
+  gateway being rejected at startup. Single-instance use is unaffected
+  (the default lock is simply named `owner-8765.lock`) and a duplicate
+  start on the same port is still rejected; `--check` reads the per-port
+  lock. (#320)
 
 ## [0.13.0] - 2026-07-02
 
