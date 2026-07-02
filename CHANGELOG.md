@@ -45,6 +45,15 @@ documented-only.
   (the default lock is simply named `owner-8765.lock`) and a duplicate
   start on the same port is still rejected; `--check` reads the per-port
   lock. (#320)
+- Fixed `/capture` rejecting photo uploads with HTTP 413 on aiohttp >= 3.14.
+  The capture app raised the per-request body cap with `client_max_size=0`
+  (so `/pcm` can stream long PCM), but aiohttp's multipart reader treats `0`
+  as a zero-byte limit — unlike `request.read()`/`.post()` — so every upload
+  carrying a non-empty `question` field was rejected with 413. Use a large
+  finite `client_max_size` instead; `/capture`'s real limit stays the explicit
+  per-route byte cap.
+- Hardened `/capture` to tolerate a non-UTF-8 `question` field (decode with
+  `errors="replace"`) instead of failing the upload with HTTP 500.
 
 ## [0.13.0] - 2026-07-02
 
