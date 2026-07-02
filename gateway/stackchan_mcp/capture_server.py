@@ -143,7 +143,11 @@ async def handle_capture(request: web.Request) -> web.Response:
 
     async for part in reader:
         if part.name == "question":
-            question = (await part.read()).decode("utf-8")
+            # Decode defensively: a malformed (non-UTF-8) question field must
+            # not turn a photo upload into a 500. The question is advisory
+            # metadata, so replacing undecodable bytes is preferable to
+            # dropping the whole capture.
+            question = (await part.read()).decode("utf-8", errors="replace")
         elif part.name == "file":
             timestamp = int(time.time() * 1000)
             filename = f"capture_{timestamp}.jpg"

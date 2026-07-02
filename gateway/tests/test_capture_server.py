@@ -238,3 +238,33 @@ async def test_capture_accepts_nonempty_question_field(tmp_path, monkeypatch):
         )
         resp = await client.post("/capture", data=form)
         assert resp.status == 200, await resp.text()
+
+
+@pytest.mark.asyncio
+async def test_capture_tolerates_non_utf8_question(tmp_path, monkeypatch):
+    """A malformed (non-UTF-8) question field must not 500 the upload.
+
+    The question is advisory metadata; a client that sends it in the wrong
+    encoding should still get its photo stored (decoded with errors=replace)
+    rather than a 500 that looks to the device like a failed capture.
+    """
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from stackchan_mcp import capture_server
+
+    monkeypatch.setattr(capture_server, "CAPTURE_DIR", str(tmp_path))
+    app = create_capture_app(capture_token="")
+
+    async with TestClient(TestServer(app)) as client:
+        with aiohttp.MultipartWriter("form-data") as mpwriter:
+            # Raw non-UTF-8 bytes (0x96 is a Shift-JIS lead byte, an invalid
+            # UTF-8 start byte) in the question part.
+            part = mpwriter.append(b"\x96\x96\x96")
+            part.set_content_disposition("form-data", name="question")
+            fpart = mpwriter.append(b"\xff\xd8\xff\xe0JFIF-dummy")
+            fpart.set_content_disposition(
+                "form-data", name="file", filename="photo.jpg"
+            )
+            resp = await client.post("/capture", data=mpwriter)
+        assert resp.status == 200, await resp.text()
