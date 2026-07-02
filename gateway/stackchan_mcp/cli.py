@@ -774,7 +774,9 @@ def _ws_port_lock_path():
     from .ownership import LOCK_DIR
 
     ws_port, _ = _resolve_ws_port()
-    return LOCK_DIR / (f"owner-{ws_port}.lock" if ws_port else "owner.lock")
+    return LOCK_DIR / (
+        f"owner-{ws_port}.lock" if ws_port is not None else "owner.lock"
+    )
 
 
 def _acquire_startup_lock(

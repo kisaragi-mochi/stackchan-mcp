@@ -325,7 +325,11 @@ def test_main_check_flag_remains_side_effect_free_with_no_mdns(
     async def fail_run(*, advertise_mdns: bool = True) -> None:
         raise AssertionError("--check must not start the gateway")
 
-    monkeypatch.setattr(cli, "_run_preflight", lambda: 0)
+    # ``--check`` runs ``_run_ownership_check()``, which calls ``_load_dotenv()``.
+    # Without stubbing it, the developer's real ``gateway/.env`` is loaded into
+    # ``os.environ`` outside monkeypatch's tracking and never restored, polluting
+    # later tests (e.g. a ``STACKCHAN_TOKEN`` there breaks the WS-server suite).
+    monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "_run", fail_run)
 
     with pytest.raises(SystemExit) as exc:
@@ -794,6 +798,35 @@ def test_main_check_flag_inspects_per_ws_port_lock(
     assert exc.value.code == 0
     assert seen and seen[0] is not None and seen[0].name == "owner-18765.lock"
     assert "owner-18765.lock" in capsys.readouterr().out
+
+
+def test_main_check_flag_scopes_lock_for_ephemeral_ws_port(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``WS_PORT=0`` scopes the lock to ``owner-0.lock``, not the legacy path.
+
+    Preflight treats ``0`` as a valid (OS-assigned ephemeral) port, so the
+    ownership lock must stay per-port for it too. A truthiness check would send
+    ``0`` to the machine-global ``owner.lock`` and diverge from startup.
+    """
+    from stackchan_mcp import ownership
+
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("WS_PORT", "0")
+    seen: list[Path] = []
+
+    def fake_read_lock(path: Path | None = None) -> None:
+        seen.append(path)
+        return None
+
+    monkeypatch.setattr(ownership, "read_lock", fake_read_lock)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--check"])
+    assert exc.value.code == 0
+    assert seen and seen[0] is not None and seen[0].name == "owner-0.lock"
 
 
 def test_main_preflight_flag_runs_preflight_and_exits(
