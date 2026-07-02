@@ -252,6 +252,9 @@ class ESP32Connection:
             return {"ok": False, "checksum": checksum, "error": "device_timeout"}
         except asyncio.CancelledError:
             return {"ok": False, "checksum": checksum, "error": "superseded"}
+        except ConnectionError:
+            self._avatar_set_waiters.pop(checksum, None)
+            return {"ok": False, "checksum": checksum, "error": "disconnected"}
         except Exception as exc:
             self._avatar_set_waiters.pop(checksum, None)
             return {"ok": False, "checksum": checksum, "error": f"send_failed: {exc}"}
@@ -372,6 +375,10 @@ class ESP32Connection:
             if not future.done():
                 future.set_exception(ConnectionError("ESP32 disconnected"))
         self._pending.clear()
+        for future in self._avatar_set_waiters.values():
+            if not future.done():
+                future.set_exception(ConnectionError("ESP32 disconnected"))
+        self._avatar_set_waiters.clear()
 
 
 class ESP32Manager:

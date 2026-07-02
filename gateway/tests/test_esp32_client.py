@@ -510,6 +510,81 @@ async def test_reconnect_auto_renders_idle_avatar_again():
     assert second_ws.tool_calls == [("self.display.set_avatar", {"face": "idle"})]
 
 
+@pytest.mark.asyncio
+async def test_send_avatar_set_fetch_resolves_when_loaded_event_arrives():
+    """avatar_set_loaded resolves the matching load_avatar_set waiter."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-avatar")  # type: ignore[arg-type]
+
+    task = asyncio.create_task(
+        conn.send_avatar_set_fetch(
+            url="https://example.invalid/avatar-set.bin",
+            token="test-token",
+            mode="replace",
+            checksum="sha256:avatar-set",
+            expected_size=1234,
+            timeout=30.0,
+        )
+    )
+
+    await asyncio.sleep(0)
+    assert len(ws.sent) == 1
+    assert json.loads(ws.sent[0]) == {
+        "type": "avatar_set_fetch",
+        "url": "https://example.invalid/avatar-set.bin",
+        "token": "test-token",
+        "mode": "replace",
+        "checksum": "sha256:avatar-set",
+        "expected_size": 1234,
+    }
+
+    payload = {
+        "ok": True,
+        "checksum": "sha256:avatar-set",
+        "bytes": 1234,
+    }
+    conn.handle_avatar_set_loaded(payload)
+
+    result = await asyncio.wait_for(task, timeout=1.0)
+    assert result == payload
+    assert conn._avatar_set_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_send_avatar_set_fetch_returns_disconnected_when_connection_drops():
+    """Disconnect wakes an in-flight avatar set fetch without waiting for timeout."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-avatar")  # type: ignore[arg-type]
+
+    task = asyncio.create_task(
+        conn.send_avatar_set_fetch(
+            url="https://example.invalid/avatar-set.bin",
+            token="test-token",
+            mode="replace",
+            checksum="sha256:avatar-set",
+            expected_size=1234,
+            timeout=30.0,
+        )
+    )
+
+    await asyncio.sleep(0)
+    assert len(ws.sent) == 1
+    assert len(conn._avatar_set_waiters) == 1
+
+    started_at = asyncio.get_running_loop().time()
+    conn.disconnect()
+    result = await asyncio.wait_for(task, timeout=1.0)
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert result == {
+        "ok": False,
+        "checksum": "sha256:avatar-set",
+        "error": "disconnected",
+    }
+    assert elapsed < 1.0
+    assert conn._avatar_set_waiters == {}
+
+
 class _GateableConnection:
     """Fake initialized connection with per-tool release gates."""
 

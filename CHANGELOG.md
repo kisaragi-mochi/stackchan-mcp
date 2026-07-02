@@ -35,6 +35,9 @@ documented-only.
 - Auto-render the idle avatar after a new ESP32 device session finishes
   initialization and tool discovery, unless `set_avatar` was already sent
   on that connection. (#77)
+- Fail in-flight `load_avatar_set` calls with `disconnected` immediately
+  when the ESP32 connection drops, instead of waiting for the avatar
+  load timeout. (#228)
 
 ## [0.13.0] - 2026-07-02
 
