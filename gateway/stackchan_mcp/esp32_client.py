@@ -43,6 +43,8 @@ RESPONSE_TIMEOUT = 10.0
 ToolCall = tuple[str, dict[str, Any]]
 ToolCallResult = tuple[Any, dict[str, Any] | None]
 
+_SET_AVATAR_TOOL = "self.display.set_avatar"
+
 _TOOL_LANES = {
     "self.robot.": "servo",
     "self.wifi.": "wifi",
@@ -82,6 +84,8 @@ class ESP32Connection:
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._connected = True
         self._initialized = False
+        self._tools_discovered = False
+        self._avatar_render_sent = False
         # Phase 4.5 avatar: pending load_avatar_set calls waiting for the
         # device's `avatar_set_loaded` reply. Keyed by expected checksum
         # so that overlapping fetches (different sets) can be discriminated.
@@ -101,6 +105,14 @@ class ESP32Connection:
     @property
     def initialized(self) -> bool:
         return self._initialized
+
+    @property
+    def tools_discovered(self) -> bool:
+        return self._tools_discovered
+
+    @property
+    def avatar_render_sent(self) -> bool:
+        return self._avatar_render_sent
 
     def _next_id(self) -> int:
         self._request_id += 1
@@ -162,6 +174,8 @@ class ESP32Connection:
         """Discover tools available on ESP32."""
         all_tools: list[dict[str, Any]] = []
         cursor = ""
+        self._tools_discovered = False
+        discovered = False
 
         while True:
             params: dict[str, Any] = {"cursor": cursor}
@@ -169,6 +183,7 @@ class ESP32Connection:
 
             if error:
                 logger.error("tools/list failed: %s", error)
+                self.tools = all_tools
                 break
 
             tools = result.get("tools", [])
@@ -176,10 +191,12 @@ class ESP32Connection:
 
             next_cursor = result.get("nextCursor", "")
             if not next_cursor:
+                discovered = True
                 break
             cursor = next_cursor
 
         self.tools = all_tools
+        self._tools_discovered = discovered
         logger.info("Discovered %d tools on ESP32", len(all_tools))
         return all_tools
 
@@ -187,6 +204,8 @@ class ESP32Connection:
         self, name: str, arguments: dict[str, Any]
     ) -> tuple[Any, dict[str, Any] | None]:
         """Call a tool on ESP32."""
+        if name == _SET_AVATAR_TOOL:
+            self._avatar_render_sent = True
         return await self.send_mcp_request(
             "tools/call", {"name": name, "arguments": arguments}
         )
@@ -732,6 +751,10 @@ class ESP32Manager:
             vision_token=self._vision_token,
         ):
             await connection.discover_tools()
+            if not connection.tools_discovered:
+                logger.error("ESP32 tools discovery failed")
+                return
+            await self._auto_render_idle_avatar(connection, device_id)
             logger.info(
                 "ESP32 ready: device=%s tools=%d",
                 device_id,
@@ -739,6 +762,37 @@ class ESP32Manager:
             )
         else:
             logger.error("ESP32 MCP initialization failed")
+
+    async def _auto_render_idle_avatar(
+        self, connection: ESP32Connection, device_id: str
+    ) -> None:
+        """Best-effort idle avatar render after a fresh device session init."""
+        if connection.avatar_render_sent:
+            return
+
+        logger.info(
+            "auto-rendering idle avatar (no explicit set_avatar yet): device=%s",
+            device_id,
+        )
+        try:
+            _result, error = await connection.call_tool(
+                _SET_AVATAR_TOOL,
+                {"face": "idle"},
+            )
+        except Exception as exc:
+            logger.warning(
+                "auto-rendering idle avatar failed: device=%s error=%s",
+                device_id,
+                exc,
+            )
+            return
+
+        if error:
+            logger.warning(
+                "auto-rendering idle avatar failed: device=%s error=%s",
+                device_id,
+                error,
+            )
 
     async def _emit_stackchan_event(self, payload: dict[str, Any]) -> None:
         """Forward a firmware-originated stackchan event to the MCP client."""
