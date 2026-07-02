@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import json
+import logging
 
 import pytest
 import pytest_asyncio
@@ -131,6 +132,13 @@ async def test_esp32_hello_handshake(manager):
             },
         }
         await ws.send(json.dumps(tools_resp))
+
+        auto_msg = await _expect_auto_idle_avatar(ws)
+        await _send_mcp_response(
+            ws,
+            auto_msg,
+            result={"content": [{"type": "text", "text": "true"}], "isError": False},
+        )
 
         # Wait for manager to process
         await asyncio.sleep(0.2)
@@ -316,6 +324,190 @@ async def test_connection_removes_pending_request_when_call_is_cancelled():
         await task
 
     assert conn._pending == {}
+
+
+# ---------------------------------------------------------------------------
+# Auto idle avatar render after session initialization (Issue #77)
+# ---------------------------------------------------------------------------
+
+
+class _InitDeviceConnection:
+    """Fake connection for exercising ESP32Manager._init_device."""
+
+    def __init__(
+        self,
+        *,
+        avatar_render_sent: bool = False,
+        discover_ok: bool = True,
+        auto_error: dict | None = None,
+        auto_exception: Exception | None = None,
+    ) -> None:
+        self.tools: list[dict] = []
+        self.tools_discovered = False
+        self.avatar_render_sent = avatar_render_sent
+        self.discover_ok = discover_ok
+        self.auto_error = auto_error
+        self.auto_exception = auto_exception
+        self.initialize_calls = 0
+        self.discover_calls = 0
+        self.call_tool_calls: list[tuple[str, dict]] = []
+
+    async def initialize(self, *, vision_url: str = "", vision_token: str = "") -> bool:
+        self.initialize_calls += 1
+        return True
+
+    async def discover_tools(self) -> list[dict]:
+        self.discover_calls += 1
+        if not self.discover_ok:
+            self.tools = []
+            self.tools_discovered = False
+            return self.tools
+
+        self.tools = [
+            {
+                "name": "self.display.set_avatar",
+                "description": "Set avatar",
+                "inputSchema": {"type": "object"},
+            }
+        ]
+        self.tools_discovered = True
+        return self.tools
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.call_tool_calls.append((name, arguments))
+        if name == "self.display.set_avatar":
+            self.avatar_render_sent = True
+        if self.auto_exception is not None:
+            raise self.auto_exception
+        return {"content": [{"type": "text", "text": "true"}]}, self.auto_error
+
+
+class _AutoMcpWebSocket:
+    """Fake WebSocket that responds to gateway MCP requests immediately."""
+
+    def __init__(self) -> None:
+        self.connection: ESP32Connection | None = None
+        self.sent: list[str] = []
+        self.tool_calls: list[tuple[str, dict]] = []
+
+    async def send(self, data: str) -> None:
+        self.sent.append(data)
+        message = json.loads(data)
+        payload = message["payload"]
+        method = payload["method"]
+
+        if method == "initialize":
+            result = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "test-device", "version": "1.0.0"},
+            }
+        elif method == "tools/list":
+            result = {
+                "tools": [
+                    {
+                        "name": "self.display.set_avatar",
+                        "description": "Set avatar",
+                        "inputSchema": {"type": "object"},
+                    }
+                ],
+                "nextCursor": "",
+            }
+        elif method == "tools/call":
+            params = payload["params"]
+            self.tool_calls.append((params["name"], params["arguments"]))
+            result = {"content": [{"type": "text", "text": "true"}], "isError": False}
+        else:
+            raise AssertionError(f"unexpected MCP method: {method}")
+
+        assert self.connection is not None
+        self.connection.handle_response(
+            {"jsonrpc": "2.0", "id": payload["id"], "result": result}
+        )
+
+
+@pytest.mark.asyncio
+async def test_init_auto_renders_idle_avatar_after_tools_list():
+    """A successful initialize + tools/list sends idle set_avatar once."""
+    ws = _AutoMcpWebSocket()
+    connection = ESP32Connection(ws, session_id="session-auto")  # type: ignore[arg-type]
+    ws.connection = connection
+    mgr = ESP32Manager()
+
+    await mgr._init_device(connection, "device-test")
+
+    assert ws.tool_calls == [("self.display.set_avatar", {"face": "idle"})]
+    assert connection.avatar_render_sent is True
+
+
+@pytest.mark.asyncio
+async def test_init_skips_auto_idle_avatar_when_avatar_already_sent():
+    """The connection-scoped flag suppresses the automatic idle render."""
+    mgr = ESP32Manager()
+    connection = _InitDeviceConnection(avatar_render_sent=True)
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert connection.initialize_calls == 1
+    assert connection.discover_calls == 1
+    assert connection.call_tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_init_skips_auto_idle_avatar_when_tools_discovery_fails(caplog):
+    """The auto-render path only runs after successful tools/list discovery."""
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    mgr = ESP32Manager()
+    connection = _InitDeviceConnection(discover_ok=False)
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert connection.initialize_calls == 1
+    assert connection.discover_calls == 1
+    assert connection.call_tool_calls == []
+    assert "ESP32 ready: device=device-test" not in caplog.text
+
+
+@pytest.mark.parametrize("failure_mode", ["error", "timeout"])
+@pytest.mark.asyncio
+async def test_init_continues_when_auto_idle_avatar_fails(failure_mode, caplog):
+    """Auto-render failures are warnings and do not block ESP32 ready."""
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    if failure_mode == "error":
+        connection = _InitDeviceConnection(
+            auto_error={"code": -32000, "message": "device rejected set_avatar"}
+        )
+    else:
+        connection = _InitDeviceConnection(
+            auto_exception=asyncio.TimeoutError("set_avatar timed out")
+        )
+    mgr = ESP32Manager()
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert connection.call_tool_calls == [
+        ("self.display.set_avatar", {"face": "idle"})
+    ]
+    assert "auto-rendering idle avatar failed" in caplog.text
+    assert "ESP32 ready: device=device-test tools=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_reconnect_auto_renders_idle_avatar_again():
+    """A new ESP32Connection gets a fresh auto-render flag."""
+    first_ws = _AutoMcpWebSocket()
+    first = ESP32Connection(first_ws, session_id="session-first")  # type: ignore[arg-type]
+    first_ws.connection = first
+    second_ws = _AutoMcpWebSocket()
+    second = ESP32Connection(second_ws, session_id="session-second")  # type: ignore[arg-type]
+    second_ws.connection = second
+    mgr = ESP32Manager()
+
+    await mgr._init_device(first, "device-test")
+    await mgr._init_device(second, "device-test")
+
+    assert first_ws.tool_calls == [("self.display.set_avatar", {"face": "idle"})]
+    assert second_ws.tool_calls == [("self.display.set_avatar", {"face": "idle"})]
 
 
 class _GateableConnection:
@@ -726,7 +918,7 @@ def test_connection_default_protocol_version_is_one():
 # ---------------------------------------------------------------------------
 
 
-async def _complete_handshake(ws, tools=None):
+async def _complete_handshake(ws, tools=None, *, consume_auto_avatar=True):
     """Complete the full ESP32 handshake sequence."""
     if tools is None:
         tools = []
@@ -774,6 +966,49 @@ async def _complete_handshake(ws, tools=None):
         },
     }
     await ws.send(json.dumps(tools_resp))
+    if not consume_auto_avatar:
+        return None
+
+    auto_msg = await _expect_auto_idle_avatar(ws)
+    await _send_mcp_response(
+        ws,
+        auto_msg,
+        result={"content": [{"type": "text", "text": "true"}], "isError": False},
+    )
+    return auto_msg
+
+
+async def _expect_auto_idle_avatar(ws):
+    """Receive and assert the automatic idle avatar tools/call."""
+    auto_raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+    auto_msg = json.loads(auto_raw)
+    assert auto_msg["type"] == "mcp"
+    assert auto_msg["payload"]["method"] == "tools/call"
+    assert auto_msg["payload"]["params"]["name"] == "self.display.set_avatar"
+    assert auto_msg["payload"]["params"]["arguments"] == {"face": "idle"}
+    return auto_msg
+
+
+async def _send_mcp_response(ws, req_msg, *, result=None, error=None):
+    """Send a JSON-RPC response for a gateway-originated MCP request."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": req_msg["payload"]["id"],
+    }
+    if error is None:
+        payload["result"] = result or {}
+    else:
+        payload["error"] = error
+
+    await ws.send(
+        json.dumps(
+            {
+                "session_id": req_msg["session_id"],
+                "type": "mcp",
+                "payload": payload,
+            }
+        )
+    )
 
 
 # --- Device-driven listen capture --------------------------------------------
@@ -932,4 +1167,3 @@ async def test_device_driven_listen_cleanup_on_disconnect(manager_with_hook):
     assert not is_recording(), "recording slot was leaked across connections"
     # No push should have fired for the aborted capture.
     assert calls == []
-

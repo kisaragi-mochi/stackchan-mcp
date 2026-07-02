@@ -30,6 +30,12 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Auto-render the idle avatar after a new ESP32 device session finishes
+  initialization and tool discovery, unless `set_avatar` was already sent
+  on that connection. (#77)
+
 ## [0.13.0] - 2026-07-02
 
 ### Gateway
