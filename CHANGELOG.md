@@ -78,6 +78,11 @@ documented-only.
   string field, distinct from `speaker_id` integer and the `voice`
   engine selector) or globally via the `STACKCHAN_EDGE_TTS_DEFAULT_VOICE`
   env var. (#317)
+- Exposed the optional Port A I2C `scl_speed_hz` argument in the gateway
+  schemas for `i2c_read`, `i2c_write`, and `i2c_write_read`, matching the
+  firmware-side 100000..1000000 Hz range so schema-driven MCP clients can
+  discover slower per-transaction I2C clocks. Behaviour is unchanged when
+  omitted. (#321)
 
 ## [0.12.0] - 2026-06-20
 

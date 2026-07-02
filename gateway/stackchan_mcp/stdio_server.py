@@ -1746,7 +1746,12 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "address, then read' patterns, use `i2c_write_read` "
                     "instead. Returns "
                     "{\"ok\": true, \"bytes\": [...]} or "
-                    "{\"ok\": false, \"error\": \"ESP_ERR_TIMEOUT\"} on NACK."
+                    "{\"ok\": false, \"error\": \"ESP_ERR_TIMEOUT\"} on NACK. "
+                    "Optional `scl_speed_hz` (default 400000) sets the I2C "
+                    "clock for this transaction; lower it (e.g. 100000 or "
+                    "200000) for slower Units such as the RCWL-9620 "
+                    "ultrasonic ranger that fail at 400 kHz with "
+                    "ESP_ERR_INVALID_STATE."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1767,6 +1772,19 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "minimum": 1,
                             "maximum": 256,
                         },
+                        "scl_speed_hz": {
+                            "type": "integer",
+                            "default": 400000,
+                            "description": (
+                                "I2C clock for this transaction. Default "
+                                "400000; lower it (e.g. 100000 or 200000) "
+                                "for slower Units such as the RCWL-9620 "
+                                "ultrasonic ranger that fail at 400 kHz "
+                                "with ESP_ERR_INVALID_STATE."
+                            ),
+                            "minimum": 100000,
+                            "maximum": 1000000,
+                        },
                     },
                     "required": ["addr", "n_bytes"],
                 },
@@ -1778,7 +1796,11 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "on Grove Port A. `bytes` is an array of integers "
                     "(0..255). This tool operates on the external Port A "
                     "bus only; on-board ICs (PMIC, AW9523, touch, etc.) "
-                    "on the internal bus are not reachable."
+                    "on the internal bus are not reachable. Optional "
+                    "`scl_speed_hz` (default 400000) sets the I2C clock for "
+                    "this transaction; lower it (e.g. 100000 or 200000) for "
+                    "slower Units such as the RCWL-9620 ultrasonic ranger "
+                    "that fail at 400 kHz with ESP_ERR_INVALID_STATE."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1802,6 +1824,19 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                                 "maximum": 255,
                             },
                         },
+                        "scl_speed_hz": {
+                            "type": "integer",
+                            "default": 400000,
+                            "description": (
+                                "I2C clock for this transaction. Default "
+                                "400000; lower it (e.g. 100000 or 200000) "
+                                "for slower Units such as the RCWL-9620 "
+                                "ultrasonic ranger that fail at 400 kHz "
+                                "with ESP_ERR_INVALID_STATE."
+                            ),
+                            "minimum": 100000,
+                            "maximum": 1000000,
+                        },
                     },
                     "required": ["addr", "bytes"],
                 },
@@ -1814,7 +1849,11 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "single Repeated Start transaction. Common 'set "
                     "register pointer, then read' idiom: pass "
                     "write_bytes=[reg_addr] to read from a specific "
-                    "register."
+                    "register. Optional `scl_speed_hz` (default 400000) "
+                    "sets the I2C clock for this transaction; lower it "
+                    "(e.g. 100000 or 200000) for slower Units such as the "
+                    "RCWL-9620 ultrasonic ranger that fail at 400 kHz with "
+                    "ESP_ERR_INVALID_STATE."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1846,6 +1885,19 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "description": "Bytes to read (1..256).",
                             "minimum": 1,
                             "maximum": 256,
+                        },
+                        "scl_speed_hz": {
+                            "type": "integer",
+                            "default": 400000,
+                            "description": (
+                                "I2C clock for this transaction. Default "
+                                "400000; lower it (e.g. 100000 or 200000) "
+                                "for slower Units such as the RCWL-9620 "
+                                "ultrasonic ranger that fail at 400 kHz "
+                                "with ESP_ERR_INVALID_STATE."
+                            ),
+                            "minimum": 100000,
+                            "maximum": 1000000,
                         },
                     },
                     "required": ["addr", "write_bytes", "n_bytes"],

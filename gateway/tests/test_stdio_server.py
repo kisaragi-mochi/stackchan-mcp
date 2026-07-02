@@ -726,6 +726,82 @@ async def test_list_tools_includes_port_b_ws2812_tools_with_schemas():
         }
 
 
+_PORT_A_I2C_TOOL_NAMES = ("i2c_read", "i2c_write", "i2c_write_read")
+
+
+@pytest.mark.asyncio
+async def test_list_tools_port_a_i2c_declares_scl_speed_hz_schema():
+    """Port A I2C wrappers expose the per-transaction clock schema."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools_by_name = {tool.name: tool for tool in result.root.tools}
+    for tool_name in _PORT_A_I2C_TOOL_NAMES:
+        assert tool_name in tools_by_name, f"{tool_name} tool should be registered"
+        description = tools_by_name[tool_name].description
+        assert "scl_speed_hz" in description
+        assert "400000" in description
+        assert "RCWL-9620" in description
+        assert "ESP_ERR_INVALID_STATE" in description
+
+        schema = tools_by_name[tool_name].inputSchema
+        assert schema["properties"]["scl_speed_hz"] == {
+            "type": "integer",
+            "default": 400000,
+            "description": (
+                "I2C clock for this transaction. Default 400000; lower it "
+                "(e.g. 100000 or 200000) for slower Units such as the "
+                "RCWL-9620 ultrasonic ranger that fail at 400 kHz with "
+                "ESP_ERR_INVALID_STATE."
+            ),
+            "minimum": 100000,
+            "maximum": 1000000,
+        }
+        assert "scl_speed_hz" not in schema["required"]
+
+
+@pytest.mark.asyncio
+async def test_i2c_read_relays_scl_speed_hz_to_firmware(monkeypatch):
+    """i2c_read forwards optional scl_speed_hz unchanged to the ESP32 tool."""
+    calls: list[tuple[str, dict]] = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, tool_name, arguments):
+            calls.append((tool_name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"ok": True, "bytes": [1, 2]}),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+    arguments = {"addr": 0x57, "n_bytes": 2, "scl_speed_hz": 200000}
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "i2c_read", "arguments": arguments},
+        )
+    )
+
+    assert calls == [("self.i2c.read", arguments)]
+    assert json.loads(result.root.content[0].text) == {"ok": True, "bytes": [1, 2]}
+
+
 def _make_port_b_ws2812_fake_gateway(monkeypatch):
     calls: list[tuple[str, dict]] = []
 
