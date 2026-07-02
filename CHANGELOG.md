@@ -30,22 +30,7 @@ documented-only.
 
 ## [Unreleased]
 
-### Firmware
-
-- Added an optional `scl_speed_hz` property (default `400000`, range
-  `100000`–`1000000`) to the Port A I2C tools `self.i2c.read`,
-  `self.i2c.write`, and `self.i2c.write_read`, applied to the per-call
-  `i2c_master_bus_add_device` config. This lets slow Units that cannot
-  sustain the hardcoded 400 kHz clock be driven without recompiling the
-  firmware (e.g. the RCWL-9620 ultrasonic ranger, which ACKs a probe but
-  fails the transfer with `ESP_ERR_INVALID_STATE` at 400 kHz and only
-  reads stably at 100 kHz). Behaviour is unchanged when the property is
-  omitted. (#319)
-- Added the NVS-backed `touch.enabled` field, handler guards, and
-  `self.robot.set_touch_sensor_enabled` /
-  `self.robot.get_touch_sensor_enabled` MCP tools so users can disable
-  head-touch detection while stopping both local reactions and
-  `stackchan/event` emission. (#312)
+## [0.13.0] - 2026-07-02
 
 ### Gateway
 
@@ -83,6 +68,25 @@ documented-only.
   firmware-side 100000..1000000 Hz range so schema-driven MCP clients can
   discover slower per-transaction I2C clocks. Behaviour is unchanged when
   omitted. (#321)
+
+## [firmware-v1.13.0] - 2026-07-02
+
+### Firmware
+
+- Added an optional `scl_speed_hz` property (default `400000`, range
+  `100000`–`1000000`) to the Port A I2C tools `self.i2c.read`,
+  `self.i2c.write`, and `self.i2c.write_read`, applied to the per-call
+  `i2c_master_bus_add_device` config. This lets slow Units that cannot
+  sustain the hardcoded 400 kHz clock be driven without recompiling the
+  firmware (e.g. the RCWL-9620 ultrasonic ranger, which ACKs a probe but
+  fails the transfer with `ESP_ERR_INVALID_STATE` at 400 kHz and only
+  reads stably at 100 kHz). Behaviour is unchanged when the property is
+  omitted. (#319)
+- Added the NVS-backed `touch.enabled` field, handler guards, and
+  `self.robot.set_touch_sensor_enabled` /
+  `self.robot.get_touch_sensor_enabled` MCP tools so users can disable
+  head-touch detection while stopping both local reactions and
+  `stackchan/event` emission. (#312)
 
 ## [0.12.0] - 2026-06-20
 
@@ -1724,7 +1728,9 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.12.0...v0.13.0
+[firmware-v1.13.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.12.0...firmware-v1.13.0
 [0.12.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.11.0...v0.12.0
 [firmware-v1.12.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.11.0...firmware-v1.12.0
 [0.11.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.10.0...v0.11.0
