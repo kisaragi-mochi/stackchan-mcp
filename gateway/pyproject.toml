@@ -1,6 +1,6 @@
 [project]
 name = "stackchan-mcp"
-version = "0.13.0"
+version = "0.14.0"
 description = "Two-faced MCP gateway for StackChan (xiaozhi-esp32): bridges stdio MCP clients to the ESP32 over WebSocket + HTTP."
 readme = "README.md"
 requires-python = ">=3.10"

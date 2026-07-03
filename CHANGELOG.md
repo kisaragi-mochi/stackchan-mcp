@@ -30,6 +30,8 @@ documented-only.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-03
+
 ### Gateway
 
 - Auto-render the idle avatar after a new ESP32 device session finishes
@@ -1753,7 +1755,8 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.12.0...v0.13.0
 [firmware-v1.13.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.12.0...firmware-v1.13.0
 [0.12.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.11.0...v0.12.0
