@@ -199,3 +199,72 @@ async def test_pcm_no_auth_allows_unauthed_request_when_token_blank():
     # We don't auth-reject (would be 401); the next guard (sample-rate)
     # fires first, so 400 here means auth was skipped as intended.
     assert response.status == 400
+
+
+# ---------------------------------------------------------------------------
+# /capture endpoint — multipart body-cap regression
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capture_accepts_nonempty_question_field(tmp_path, monkeypatch):
+    """A non-empty multipart ``question`` field must not be rejected with 413.
+
+    Regression guard. The capture app raises aiohttp's per-request body cap so
+    /pcm can stream long PCM. It must NOT do so by setting ``client_max_size=0``:
+    aiohttp's multipart reader (>= 3.14) checks ``len(data) > client_max_size``
+    directly and, unlike ``request.read()`` / ``request.post()``, does not treat
+    ``0`` as "unlimited". With ``client_max_size=0`` every /capture upload that
+    carries a non-empty ``question`` form field (read via ``part.read()``) fails
+    with HTTP 413, surfacing on the device as "Failed to upload photo". A large
+    finite cap keeps /pcm unbounded while letting normal uploads through.
+    """
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from stackchan_mcp import capture_server
+
+    monkeypatch.setattr(capture_server, "CAPTURE_DIR", str(tmp_path))
+    app = create_capture_app(capture_token="")  # blank token → auth skipped
+
+    async with TestClient(TestServer(app)) as client:
+        form = aiohttp.FormData()
+        form.add_field("question", "what is in front of you?")
+        form.add_field(
+            "file",
+            b"\xff\xd8\xff\xe0JFIF-dummy-jpeg-bytes",
+            filename="photo.jpg",
+            content_type="image/jpeg",
+        )
+        resp = await client.post("/capture", data=form)
+        assert resp.status == 200, await resp.text()
+
+
+@pytest.mark.asyncio
+async def test_capture_tolerates_non_utf8_question(tmp_path, monkeypatch):
+    """A malformed (non-UTF-8) question field must not 500 the upload.
+
+    The question is advisory metadata; a client that sends it in the wrong
+    encoding should still get its photo stored (decoded with errors=replace)
+    rather than a 500 that looks to the device like a failed capture.
+    """
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from stackchan_mcp import capture_server
+
+    monkeypatch.setattr(capture_server, "CAPTURE_DIR", str(tmp_path))
+    app = create_capture_app(capture_token="")
+
+    async with TestClient(TestServer(app)) as client:
+        with aiohttp.MultipartWriter("form-data") as mpwriter:
+            # Raw non-UTF-8 bytes (0x96 is a Shift-JIS lead byte, an invalid
+            # UTF-8 start byte) in the question part.
+            part = mpwriter.append(b"\x96\x96\x96")
+            part.set_content_disposition("form-data", name="question")
+            fpart = mpwriter.append(b"\xff\xd8\xff\xe0JFIF-dummy")
+            fpart.set_content_disposition(
+                "form-data", name="file", filename="photo.jpg"
+            )
+            resp = await client.post("/capture", data=mpwriter)
+        assert resp.status == 200, await resp.text()

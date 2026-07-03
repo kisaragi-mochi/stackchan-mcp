@@ -51,6 +51,7 @@ import json
 import logging
 import os
 import secrets
+import sys
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator
@@ -142,7 +143,11 @@ async def handle_capture(request: web.Request) -> web.Response:
 
     async for part in reader:
         if part.name == "question":
-            question = (await part.read()).decode("utf-8")
+            # Decode defensively: a malformed (non-UTF-8) question field must
+            # not turn a photo upload into a 500. The question is advisory
+            # metadata, so replacing undecodable bytes is preferable to
+            # dropping the whole capture.
+            question = (await part.read()).decode("utf-8", errors="replace")
         elif part.name == "file":
             timestamp = int(time.time() * 1000)
             filename = f"capture_{timestamp}.jpg"
@@ -445,19 +450,26 @@ def create_capture_app(
     dispatches to. May be ``None`` for tests of /capture alone; /pcm
     will return 503 in that case.
     """
-    # ``client_max_size=0`` disables aiohttp's per-request body size
-    # cap (default 1 MiB). The /pcm endpoint legitimately streams
-    # arbitrarily long PCM utterances (multi-minute TTS, live audio
-    # mixes); a 1 MiB cap would silently cut a chunked-transfer
-    # producer off mid-stream once its cumulative body exceeded that
-    # limit — observed in practice with a 200-second TTS push, which
-    # aborted around 36 s in (~2 MiB of source-rate PCM through the
-    # transfer-encoding pipe). The handler itself enforces no separate
-    # cap; back-pressure comes from the device-side Opus push rate
-    # inside ``send_pcm_stream``, which is the right place for it.
-    # /capture only receives JPEG snapshots from the ESP32 (well under
-    # 1 MiB each) so removing the cap costs it nothing.
-    app = web.Application(client_max_size=0)
+    # Raise aiohttp's per-request body cap (default 1 MiB) effectively to
+    # unlimited. The /pcm endpoint legitimately streams arbitrarily long PCM
+    # utterances (multi-minute TTS, live audio mixes); a 1 MiB cap would
+    # silently cut a chunked-transfer producer off mid-stream once its
+    # cumulative body exceeded that limit — observed in practice with a
+    # 200-second TTS push, which aborted around 36 s in (~2 MiB of
+    # source-rate PCM through the transfer-encoding pipe).
+    #
+    # Use ``sys.maxsize`` rather than ``0``. Although ``0`` disables the cap
+    # for ``request.read()`` / ``request.post()`` (both guard with
+    # ``if 0 < max_size``), aiohttp's multipart reader does NOT special-case
+    # ``0``: ``BodyPartReader.read()`` compares ``len(data) > client_max_size``
+    # directly (aiohttp >= 3.14), so a client_max_size of 0 propagated into
+    # ``request.multipart()`` rejects ANY non-empty multipart field with
+    # HTTP 413. /capture reads its ``question`` form field via ``part.read()``,
+    # so with ``client_max_size=0`` every photo upload carrying a non-empty
+    # question 413s ("Failed to upload photo"). A large finite value avoids
+    # that trap while keeping /pcm effectively unbounded. /capture's real
+    # size limit is the explicit CAPTURE_MAX_BYTES check in handle_capture.
+    app = web.Application(client_max_size=sys.maxsize)
     app[CAPTURE_TOKEN_KEY] = capture_token
     app[AVATAR_SETS_KEY] = {}
     app[AVATAR_SETS_LOCK_KEY] = asyncio.Lock()
