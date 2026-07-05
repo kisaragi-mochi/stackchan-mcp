@@ -30,6 +30,12 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Re-dispatch the emoji-selected avatar face after successful speech playback,
+  so emoji+text `say` calls keep the expression visible after lip-sync stops.
+  (#296)
+
 ## [firmware-v1.13.1] - 2026-07-06
 
 ### Firmware

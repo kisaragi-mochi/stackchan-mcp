@@ -133,6 +133,11 @@ def fake_encode(monkeypatch):
     import stackchan_mcp.tts.orchestrator as orchestrator
 
     monkeypatch.setattr(orchestrator, "encode_opus_frames", fake)
+    monkeypatch.setattr(
+        orchestrator,
+        "TTS_STOP_FACE_REDISPATCH_SETTLE_DELAY_S",
+        0,
+    )
     return fake
 
 
@@ -221,6 +226,8 @@ async def test_pipeline_no_emoji_keeps_text_and_skips_face_dispatch(fake_encode)
     assert result["face"] is None
     assert result["face_dispatched"] is False
     assert result["face_error"] is None
+    assert result["face_redispatched"] is False
+    assert result["face_redispatch_error"] is None
     assert result["text_stripped"] is False
     assert result["spoke"] is True
     assert "tts_text" not in result
@@ -244,22 +251,103 @@ async def test_pipeline_dispatches_face_and_strips_plain_engine_text(fake_encode
     )
 
     avatar_call = ("self.display.set_avatar", {"face": "happy"})
-    assert esp32.tool_calls == [avatar_call]
+    assert esp32.tool_calls == [avatar_call, avatar_call]
     assert esp32.events == [
         ("lock", "acquired"),
         ("tts_state", "start"),
         ("tool", avatar_call),
         ("frame", b"opus_frame_0"),
         ("tts_state", "stop"),
+        ("tool", avatar_call),
         ("lock", "released"),
     ]
     assert engine.calls[0][0] == "やったね rocket"
     assert result["face"] == "happy"
     assert result["face_dispatched"] is True
     assert result["face_error"] is None
+    assert result["face_redispatched"] is True
+    assert result["face_redispatch_error"] is None
     assert result["text_stripped"] is True
     assert result["tts_text"] == "やったね rocket"
     assert result["spoke"] is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_redispatches_face_after_speech_completion(fake_encode):
+    """Emoji-selected faces are reasserted after the TTS stop notification."""
+    pcm = b"\x01\x00" * 1440
+    engine = _PCMEngine(pcm)
+    esp32 = _FakeESP32(connected=True, record_lock=True)
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await synthesize_and_send(
+        {"text": "great 😊", "voice": "voicevox"},
+        gateway=gateway,
+        registry=reg,
+    )
+
+    avatar_call = ("self.display.set_avatar", {"face": "happy"})
+    assert esp32.tool_calls == [avatar_call, avatar_call]
+    assert esp32.events == [
+        ("lock", "acquired"),
+        ("tts_state", "start"),
+        ("tool", avatar_call),
+        ("frame", b"opus_frame_0"),
+        ("frame", b"opus_frame_1"),
+        ("tts_state", "stop"),
+        ("tool", avatar_call),
+        ("lock", "released"),
+    ]
+    assert result["face_dispatched"] is True
+    assert result["face_error"] is None
+    assert result["face_redispatched"] is True
+    assert result["face_redispatch_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_skips_face_redispatch_when_cancelled_mid_playback(
+    fake_encode,
+):
+    """Cancelled speech sends stop but does not reassert the emoji face."""
+
+    class BlockingESP32(_FakeESP32):
+        def __init__(self) -> None:
+            super().__init__(connected=True)
+            self.first_frame_sent = asyncio.Event()
+            self.release_frame = asyncio.Event()
+
+        async def send_audio_frame(self, frame: bytes) -> None:
+            await super().send_audio_frame(frame)
+            self.first_frame_sent.set()
+            await self.release_frame.wait()
+
+    pcm = b"\x01\x00" * 1440
+    engine = _PCMEngine(pcm)
+    esp32 = BlockingESP32()
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    task = asyncio.create_task(
+        synthesize_and_send(
+            {"text": "wait 😊", "voice": "voicevox"},
+            gateway=gateway,
+            registry=reg,
+        )
+    )
+    await asyncio.wait_for(esp32.first_frame_sent.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    avatar_call = ("self.display.set_avatar", {"face": "happy"})
+    assert esp32.tool_calls == [avatar_call]
+    assert esp32.tts_states == ["start", "stop"]
 
 
 @pytest.mark.asyncio
@@ -279,9 +367,12 @@ async def test_pipeline_keeps_emoji_for_emoji_style_engine(fake_encode):
         registry=reg,
     )
 
-    assert esp32.tool_calls == [("self.display.set_avatar", {"face": "happy"})]
+    avatar_call = ("self.display.set_avatar", {"face": "happy"})
+    assert esp32.tool_calls == [avatar_call, avatar_call]
     assert engine.calls[0][0] == text
     assert result["face"] == "happy"
+    assert result["face_redispatched"] is True
+    assert result["face_redispatch_error"] is None
     assert result["text_stripped"] is False
     assert "tts_text" not in result
 
@@ -322,6 +413,8 @@ async def test_pipeline_emoji_only_plain_engine_skips_speech_before_protocol_gat
     assert result["duration_ms"] == 0
     assert result["face"] == "happy"
     assert result["face_dispatched"] is True
+    assert result["face_redispatched"] is False
+    assert result["face_redispatch_error"] is None
     assert result["text_stripped"] is True
     assert result["tts_text"] == ""
     assert result["spoke"] is False
@@ -344,13 +437,16 @@ async def test_pipeline_face_dispatch_failure_does_not_abort_speech(fake_encode)
         registry=reg,
     )
 
-    assert esp32.tool_calls == [("self.display.set_avatar", {"face": "happy"})]
+    avatar_call = ("self.display.set_avatar", {"face": "happy"})
+    assert esp32.tool_calls == [avatar_call, avatar_call]
     assert engine.calls[0][0] == "hello"
     assert esp32.tts_states == ["start", "stop"]
     assert esp32.frames == [b"opus_frame_0"]
     assert result["face"] == "happy"
     assert result["face_dispatched"] is False
     assert result["face_error"] == "display offline"
+    assert result["face_redispatched"] is False
+    assert result["face_redispatch_error"] == "display offline"
     assert result["spoke"] is True
 
 
@@ -382,13 +478,16 @@ async def test_pipeline_face_payload_ok_false_reports_failure(
         registry=reg,
     )
 
-    assert esp32.tool_calls == [("self.display.set_avatar", {"face": "happy"})]
+    avatar_call = ("self.display.set_avatar", {"face": "happy"})
+    assert esp32.tool_calls == [avatar_call, avatar_call]
     assert engine.calls[0][0] == "hello"
     assert esp32.tts_states == ["start", "stop"]
     assert esp32.frames == [b"opus_frame_0"]
     assert result["face"] == "happy"
     assert result["face_dispatched"] is False
     assert result["face_error"] == expected_error
+    assert result["face_redispatched"] is False
+    assert result["face_redispatch_error"] == expected_error
     assert result["spoke"] is True
 
 
@@ -420,10 +519,13 @@ async def test_pipeline_face_odd_result_payloads_still_count_as_success(
         registry=reg,
     )
 
-    assert esp32.tool_calls == [("self.display.set_avatar", {"face": "happy"})]
+    avatar_call = ("self.display.set_avatar", {"face": "happy"})
+    assert esp32.tool_calls == [avatar_call, avatar_call]
     assert result["face"] == "happy"
     assert result["face_dispatched"] is True
     assert result["face_error"] is None
+    assert result["face_redispatched"] is True
+    assert result["face_redispatch_error"] is None
     assert result["spoke"] is True
 
 
@@ -488,8 +590,9 @@ async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
     """Concurrent ``say()`` invocations keep face dispatch with their speech.
 
     The TTS lock covers the start notification, emoji-driven avatar update,
-    audio frames, and stop notification. A later emoji face change must not
-    land between an earlier utterance's start and first frame.
+    audio frames, stop notification, and post-stop face re-dispatch. A later
+    emoji face change must not land inside an earlier utterance's playback
+    window.
     """
     pcm = b"\x01\x00" * 1440  # 1.5 -> 2 frames of audio
     engine_a = _PCMEngine(pcm, name="engine_a")
@@ -526,7 +629,7 @@ async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
 
     assert len(start_indices) == 2
     assert len(stop_indices) == 2
-    assert len(tool_indices) == 2
+    assert len(tool_indices) == 4
     assert len(frame_indices) == 4
 
     assert (
@@ -535,11 +638,13 @@ async def test_pipeline_serialises_concurrent_say_calls(fake_encode):
         < frame_indices[0]
         < frame_indices[1]
         < stop_indices[0]
-        < start_indices[1]
         < tool_indices[1]
+        < start_indices[1]
+        < tool_indices[2]
         < frame_indices[2]
         < frame_indices[3]
         < stop_indices[1]
+        < tool_indices[3]
     )
 
 

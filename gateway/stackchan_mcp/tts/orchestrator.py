@@ -45,6 +45,12 @@ if TYPE_CHECKING:
 #: but well below human-perceptible delay.
 TTS_START_TRANSITION_DELAY_S = 0.05
 
+#: Delay after the ``tts.stop`` notification before reasserting an
+#: emoji-selected face. Firmware handles stop by scheduling the idle /
+#: lip-sync reset on its main task, so this short settle delay lets that
+#: queued restore land before the gateway sends the final face update.
+TTS_STOP_FACE_REDISPATCH_SETTLE_DELAY_S = 0.05
+
 logger = logging.getLogger(__name__)
 
 
@@ -241,15 +247,20 @@ async def synthesize_and_send(
     speaker_name = arguments.get("speaker_name")
     reference_audio = arguments.get("reference_audio")
 
+    plain_tts_text = strip_emoji_for_plain_tts(text)
     tts_text = text
     text_stripped = False
     if not getattr(engine, "supports_emoji_style", False):
-        stripped_text = strip_emoji_for_plain_tts(text)
-        text_stripped = stripped_text != text
-        tts_text = stripped_text
+        text_stripped = plain_tts_text != text
+        tts_text = plain_tts_text
 
     face_dispatched = False
     face_error: str | None = None
+    face_redispatched = False
+    face_redispatch_error: str | None = None
+    should_redispatch_face_after_speech = (
+        face is not None and bool(plain_tts_text.strip())
+    )
 
     if not tts_text.strip():
         if face is not None:
@@ -274,6 +285,8 @@ async def synthesize_and_send(
             "face": face,
             "face_dispatched": face_dispatched,
             "face_error": face_error,
+            "face_redispatched": face_redispatched,
+            "face_redispatch_error": face_redispatch_error,
             "text_stripped": text_stripped,
             "spoke": False,
             "reason": "text empty after emoji strip",
@@ -335,6 +348,16 @@ async def synthesize_and_send(
                 face,
             )
 
+    async def redispatch_face_after_playback() -> None:
+        nonlocal face_redispatched, face_redispatch_error
+        if face is None:
+            return
+        await asyncio.sleep(TTS_STOP_FACE_REDISPATCH_SETTLE_DELAY_S)
+        face_redispatched, face_redispatch_error = await _try_set_avatar_face(
+            gateway,
+            face,
+        )
+
     # Hand the PCM off to the shared encode-and-push path. Engines that
     # have already resampled to DEVICE_SAMPLE_RATE (the documented
     # TTSEngine contract) need no further conversion here.
@@ -344,6 +367,11 @@ async def synthesize_and_send(
         source_label=f"engine:{voice}",
         before_first_frame=(
             dispatch_face_before_first_frame if face is not None else None
+        ),
+        after_playback_complete=(
+            redispatch_face_after_playback
+            if should_redispatch_face_after_speech
+            else None
         ),
     )
 
@@ -366,6 +394,8 @@ async def synthesize_and_send(
         "face": face,
         "face_dispatched": face_dispatched,
         "face_error": face_error,
+        "face_redispatched": face_redispatched,
+        "face_redispatch_error": face_redispatch_error,
         "text_stripped": text_stripped,
         "spoke": True,
     }
@@ -381,6 +411,7 @@ async def send_pcm_audio(
     source_rate: int = DEVICE_SAMPLE_RATE,
     source_label: str = "external",
     before_first_frame: Callable[[], Awaitable[None]] | None = None,
+    after_playback_complete: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Encode mono PCM and push as Opus frames to the connected device.
 
@@ -406,6 +437,9 @@ async def send_pcm_audio(
             synthesis (e.g. ``"voice-tts"``, ``"sfx:notification"``).
         before_first_frame: Internal hook for ``say()`` side effects that
             must be serialized with speech delivery.
+        after_playback_complete: Internal hook for side effects that must
+            run after the stop notification while the TTS lock is still
+            held. Skipped if frame delivery is cancelled or interrupted.
 
     Returns:
         Dict describing the push: ``source``, ``frame_count``,
@@ -517,6 +551,7 @@ async def send_pcm_audio(
         frame_period_s = DEVICE_FRAME_DURATION_MS / 1000.0
         loop = asyncio.get_event_loop()
 
+        playback_complete = False
         try:
             if before_first_frame is not None:
                 await before_first_frame()
@@ -538,6 +573,7 @@ async def send_pcm_audio(
                     break
                 sent += 1
                 next_send_time += frame_period_s
+            playback_complete = push_error is None
         finally:
             try:
                 await gateway.esp32.send_tts_state("stop")
@@ -546,6 +582,13 @@ async def send_pcm_audio(
                 # own when the WebSocket close lands; nothing to do
                 # here.
                 pass
+
+        if (
+            playback_complete
+            and push_error is None
+            and after_playback_complete is not None
+        ):
+            await after_playback_complete()
 
     if push_error is not None:
         raise RuntimeError(
