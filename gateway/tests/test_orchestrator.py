@@ -378,6 +378,47 @@ async def test_pipeline_keeps_emoji_for_emoji_style_engine(fake_encode):
 
 
 @pytest.mark.asyncio
+async def test_pipeline_emoji_only_emoji_style_engine_redispatches_face(
+    fake_encode,
+):
+    """Emoji-style engines can speak emoji-only text and reassert its face."""
+    text = "😊"
+    engine = _EmojiStylePCMEngine(b"\x01\x00" * 960, name="irodori")
+    esp32 = _FakeESP32(connected=True, record_lock=True)
+    gateway = _FakeGateway(esp32)
+
+    reg = EngineRegistry()
+    reg.register(engine)
+
+    result = await synthesize_and_send(
+        {"text": text, "voice": "irodori"},
+        gateway=gateway,
+        registry=reg,
+    )
+
+    avatar_call = ("self.display.set_avatar", {"face": "happy"})
+    assert esp32.tool_calls == [avatar_call, avatar_call]
+    assert esp32.events == [
+        ("lock", "acquired"),
+        ("tts_state", "start"),
+        ("tool", avatar_call),
+        ("frame", b"opus_frame_0"),
+        ("tts_state", "stop"),
+        ("tool", avatar_call),
+        ("lock", "released"),
+    ]
+    assert engine.calls[0][0] == text
+    assert result["face"] == "happy"
+    assert result["face_dispatched"] is True
+    assert result["face_error"] is None
+    assert result["face_redispatched"] is True
+    assert result["face_redispatch_error"] is None
+    assert result["text_stripped"] is False
+    assert result["spoke"] is True
+    assert "tts_text" not in result
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("protocol_version", [1, 2, 3])
 async def test_pipeline_emoji_only_plain_engine_skips_speech_before_protocol_gate(
     fake_encode, protocol_version

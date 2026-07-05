@@ -259,7 +259,7 @@ async def synthesize_and_send(
     face_redispatched = False
     face_redispatch_error: str | None = None
     should_redispatch_face_after_speech = (
-        face is not None and bool(plain_tts_text.strip())
+        face is not None and bool(tts_text.strip())
     )
 
     if not tts_text.strip():
