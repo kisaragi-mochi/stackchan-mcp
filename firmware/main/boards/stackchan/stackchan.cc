@@ -61,8 +61,6 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 
 #define TAG "StackChanBoard"
 
-LV_FONT_DECLARE(font_awesome_20_4);
-
 class Pmic : public Axp2101 {
 public:
     // Power Init
@@ -543,7 +541,9 @@ private:
 
     // Board-local listening cue shown above the full-screen avatar layer.
     lv_obj_t* listening_indicator_ = nullptr;
+    lv_obj_t* listening_indicator_dot_ = nullptr;
     std::atomic<bool> listening_indicator_visible_{false};
+    static constexpr int LISTENING_INDICATOR_DOT_SIZE_PX = 14;
 
     // Dynamic avatar set loaded via the load_avatar_set MCP tool. Stays
     // unloaded by default — the index-based image lookups then fall back
@@ -2252,11 +2252,20 @@ private:
     }
 
     bool EnsureListeningIndicatorObjectLocked() {
-        if (listening_indicator_ != nullptr &&
-            lv_obj_is_valid(listening_indicator_)) {
-            return true;
+        if (listening_indicator_ != nullptr) {
+            if (lv_obj_is_valid(listening_indicator_)) {
+                if (listening_indicator_dot_ != nullptr &&
+                    lv_obj_is_valid(listening_indicator_dot_)) {
+                    return true;
+                }
+                StopListeningIndicatorPulseLocked();
+                lv_obj_del(listening_indicator_);
+            } else {
+                StopListeningIndicatorPulseLocked();
+            }
         }
         listening_indicator_ = nullptr;
+        listening_indicator_dot_ = nullptr;
 
         lv_obj_t* screen = lv_screen_active();
         if (screen == nullptr) {
@@ -2277,16 +2286,25 @@ private:
         lv_obj_set_style_border_width(listening_indicator_, 0, 0);
         lv_obj_set_style_pad_all(listening_indicator_, 0, 0);
 
-        lv_obj_t* icon = lv_label_create(listening_indicator_);
-        if (icon == nullptr) {
+        listening_indicator_dot_ = lv_obj_create(listening_indicator_);
+        if (listening_indicator_dot_ == nullptr) {
             lv_obj_del(listening_indicator_);
             listening_indicator_ = nullptr;
+            listening_indicator_dot_ = nullptr;
             return false;
         }
-        lv_label_set_text(icon, LV_SYMBOL_AUDIO);
-        lv_obj_set_style_text_font(icon, &font_awesome_20_4, 0);
-        lv_obj_set_style_text_color(icon, lv_color_white(), 0);
-        lv_obj_center(icon);
+        lv_obj_set_size(listening_indicator_dot_,
+                        LISTENING_INDICATOR_DOT_SIZE_PX,
+                        LISTENING_INDICATOR_DOT_SIZE_PX);
+        lv_obj_clear_flag(listening_indicator_dot_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(listening_indicator_dot_, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(listening_indicator_dot_,
+                                  lv_color_hex(0xE0352B), 0);
+        lv_obj_set_style_bg_opa(listening_indicator_dot_, LV_OPA_COVER, 0);
+        lv_obj_set_style_opa(listening_indicator_dot_, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(listening_indicator_dot_, 0, 0);
+        lv_obj_set_style_pad_all(listening_indicator_dot_, 0, 0);
+        lv_obj_center(listening_indicator_dot_);
 
         lv_obj_add_flag(listening_indicator_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(listening_indicator_);
@@ -2294,12 +2312,52 @@ private:
         return true;
     }
 
+    static void SetListeningDotOpacity(void* obj, int32_t opa) {
+        auto* dot = static_cast<lv_obj_t*>(obj);
+        if (dot == nullptr || !lv_obj_is_valid(dot)) {
+            return;
+        }
+        lv_obj_set_style_opa(dot, static_cast<lv_opa_t>(opa), 0);
+    }
+
+    void StopListeningIndicatorPulseLocked() {
+        if (listening_indicator_dot_ == nullptr) {
+            return;
+        }
+        lv_anim_delete(listening_indicator_dot_, nullptr);
+        if (lv_obj_is_valid(listening_indicator_dot_)) {
+            lv_obj_set_style_opa(listening_indicator_dot_, LV_OPA_COVER, 0);
+        }
+    }
+
+    void StartListeningIndicatorPulseLocked() {
+        if (listening_indicator_dot_ == nullptr ||
+            !lv_obj_is_valid(listening_indicator_dot_)) {
+            return;
+        }
+
+        StopListeningIndicatorPulseLocked();
+
+        lv_anim_t anim;
+        lv_anim_init(&anim);
+        lv_anim_set_var(&anim, listening_indicator_dot_);
+        lv_anim_set_values(&anim, LV_OPA_COVER, LV_OPA_40);
+        lv_anim_set_exec_cb(&anim, SetListeningDotOpacity);
+        lv_anim_set_duration(&anim, 700);
+        lv_anim_set_reverse_duration(&anim, 700);
+        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_start(&anim);
+    }
+
     void BringListeningIndicatorToFrontLocked() {
         if (listening_indicator_ == nullptr) {
             return;
         }
         if (!lv_obj_is_valid(listening_indicator_)) {
+            StopListeningIndicatorPulseLocked();
             listening_indicator_ = nullptr;
+            listening_indicator_dot_ = nullptr;
             listening_indicator_visible_.store(false, std::memory_order_release);
             return;
         }
@@ -2314,15 +2372,18 @@ private:
             }
             lv_obj_clear_flag(listening_indicator_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_move_foreground(listening_indicator_);
+            StartListeningIndicatorPulseLocked();
             listening_indicator_visible_.store(true, std::memory_order_release);
             return;
         }
 
         if (listening_indicator_ != nullptr) {
+            StopListeningIndicatorPulseLocked();
             if (lv_obj_is_valid(listening_indicator_)) {
                 lv_obj_add_flag(listening_indicator_, LV_OBJ_FLAG_HIDDEN);
             } else {
                 listening_indicator_ = nullptr;
+                listening_indicator_dot_ = nullptr;
             }
         }
         listening_indicator_visible_.store(false, std::memory_order_release);
