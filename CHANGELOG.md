@@ -30,6 +30,8 @@ documented-only.
 
 ## [Unreleased]
 
+## [firmware-v1.13.1] - 2026-07-06
+
 ### Firmware
 
 - Fixed server-driven listen activation on an already connected WebSocket to arm
@@ -1761,7 +1763,8 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.13.1...HEAD
+[firmware-v1.13.1]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.13.0...firmware-v1.13.1
 [0.14.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.12.0...v0.13.0
 [firmware-v1.13.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.12.0...firmware-v1.13.0
