@@ -61,6 +61,8 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 
 #define TAG "StackChanBoard"
 
+LV_FONT_DECLARE(font_awesome_20_4);
+
 class Pmic : public Axp2101 {
 public:
     // Power Init
@@ -2282,6 +2284,7 @@ private:
             return false;
         }
         lv_label_set_text(icon, LV_SYMBOL_AUDIO);
+        lv_obj_set_style_text_font(icon, &font_awesome_20_4, 0);
         lv_obj_set_style_text_color(icon, lv_color_white(), 0);
         lv_obj_center(icon);
 
