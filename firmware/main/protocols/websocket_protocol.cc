@@ -209,6 +209,33 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
+    const bool existing_transport_ready = transport_connected_.load() &&
+        websocket_ != nullptr &&
+        websocket_->IsConnected() &&
+        !error_occurred_ &&
+        !session_id_.empty();
+    if (existing_transport_ready) {
+        // Issue #328: PR #136 and PR #192 made the audio session a logical
+        // state that can be closed while the WebSocket transport stays open.
+        // Server-driven listen.start, touch, and wake-word activations from
+        // that idle state should therefore arm the session on the current
+        // socket instead of rebuilding a healthy transport. Do not gate this
+        // transport predicate on Protocol::IsTimeout(): that tracks the
+        // audio-session inbound-frame deadline, while an idle persistent MCP
+        // socket can have no inbound frames for minutes and still be healthy.
+        // Refresh last_incoming_time_ when arming so IsAudioChannelOpened()
+        // starts its session deadline from this open, matching MQTT.
+        // A non-empty session_id_ is the ParseServerHello-acked signal.
+        // session_id_ is read here on the main task following the existing
+        // session-id gate pattern; broader cross-task hardening is out of
+        // scope for this fix.
+        last_incoming_time_ = std::chrono::steady_clock::now();
+        if (!audio_channel_open_.exchange(true) && on_audio_channel_opened_ != nullptr) {
+            on_audio_channel_opened_();
+        }
+        return true;
+    }
+
     return OpenAudioChannelInternal(true, true);
 }
 

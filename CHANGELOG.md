@@ -30,6 +30,12 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- Fixed server-driven listen activation on an already connected WebSocket to arm
+  the logical audio session in place instead of rebuilding the transport, so the
+  gateway capture window remains bound to the live connection. (#328)
+
 ## [0.14.0] - 2026-07-03
 
 ### Gateway
