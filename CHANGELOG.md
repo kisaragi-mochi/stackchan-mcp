@@ -36,6 +36,11 @@ documented-only.
   so emoji+text `say` calls keep the expression visible after lip-sync stops.
   (#296)
 
+### Firmware
+
+- Added a small on-screen listening indicator on the stack-chan LCD while STT
+  capture is active. (#332)
+
 ## [firmware-v1.13.1] - 2026-07-06
 
 ### Firmware

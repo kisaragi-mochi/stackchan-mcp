@@ -539,6 +539,10 @@ private:
     esp_timer_handle_t avatar_init_timer_ = nullptr;
     std::string current_avatar_face_ = "idle";
 
+    // Board-local listening cue shown above the full-screen avatar layer.
+    lv_obj_t* listening_indicator_ = nullptr;
+    std::atomic<bool> listening_indicator_visible_{false};
+
     // Dynamic avatar set loaded via the load_avatar_set MCP tool. Stays
     // unloaded by default — the index-based image lookups then fall back
     // to the static const tables in avatar_images.h (placeholder or local
@@ -2245,6 +2249,94 @@ private:
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
+    bool EnsureListeningIndicatorObjectLocked() {
+        if (listening_indicator_ != nullptr &&
+            lv_obj_is_valid(listening_indicator_)) {
+            return true;
+        }
+        listening_indicator_ = nullptr;
+
+        lv_obj_t* screen = lv_screen_active();
+        if (screen == nullptr) {
+            return false;
+        }
+
+        listening_indicator_ = lv_obj_create(screen);
+        if (listening_indicator_ == nullptr) {
+            return false;
+        }
+
+        lv_obj_set_size(listening_indicator_, 36, 30);
+        lv_obj_align(listening_indicator_, LV_ALIGN_TOP_RIGHT, -8, 8);
+        lv_obj_clear_flag(listening_indicator_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(listening_indicator_, 10, 0);
+        lv_obj_set_style_bg_color(listening_indicator_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(listening_indicator_, LV_OPA_70, 0);
+        lv_obj_set_style_border_width(listening_indicator_, 0, 0);
+        lv_obj_set_style_pad_all(listening_indicator_, 0, 0);
+
+        lv_obj_t* icon = lv_label_create(listening_indicator_);
+        if (icon == nullptr) {
+            lv_obj_del(listening_indicator_);
+            listening_indicator_ = nullptr;
+            return false;
+        }
+        lv_label_set_text(icon, LV_SYMBOL_AUDIO);
+        lv_obj_set_style_text_color(icon, lv_color_white(), 0);
+        lv_obj_center(icon);
+
+        lv_obj_add_flag(listening_indicator_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(listening_indicator_);
+        ESP_LOGI(TAG, "Listening indicator created on active screen");
+        return true;
+    }
+
+    void BringListeningIndicatorToFrontLocked() {
+        if (listening_indicator_ == nullptr) {
+            return;
+        }
+        if (!lv_obj_is_valid(listening_indicator_)) {
+            listening_indicator_ = nullptr;
+            listening_indicator_visible_.store(false, std::memory_order_release);
+            return;
+        }
+        lv_obj_move_foreground(listening_indicator_);
+    }
+
+    void SetListeningIndicatorVisibleLocked(bool visible) {
+        if (visible) {
+            if (!EnsureListeningIndicatorObjectLocked()) {
+                listening_indicator_visible_.store(false, std::memory_order_release);
+                return;
+            }
+            lv_obj_clear_flag(listening_indicator_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(listening_indicator_);
+            listening_indicator_visible_.store(true, std::memory_order_release);
+            return;
+        }
+
+        if (listening_indicator_ != nullptr) {
+            if (lv_obj_is_valid(listening_indicator_)) {
+                lv_obj_add_flag(listening_indicator_, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                listening_indicator_ = nullptr;
+            }
+        }
+        listening_indicator_visible_.store(false, std::memory_order_release);
+    }
+
+    void UpdateListeningIndicatorForState(bool is_listening) {
+        if (display_ == nullptr) {
+            return;
+        }
+        if (listening_indicator_visible_.load(std::memory_order_acquire) ==
+            is_listening) {
+            return;
+        }
+        DisplayLockGuard lock(display_);
+        SetListeningIndicatorVisibleLocked(is_listening);
+    }
+
     void PollTouchpad() {
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
@@ -2264,6 +2356,7 @@ private:
         // 無限持続するのを防ぐ。 StopListening 後は listening_started_ms を 0 に
         // 戻して再発火を抑止 (次に listening 突入したら再セット)。
         bool is_listening = (app.GetDeviceState() == kDeviceStateListening);
+        UpdateListeningIndicatorForState(is_listening);
         if (is_listening && !was_listening) {
             listening_started_ms = now_ms;
             ESP_LOGI(TAG, "Listening entered at %d ms (timeout in %d ms)",
@@ -4138,6 +4231,7 @@ private:
         if (!EnsureAvatarObject()) return false;
         lv_image_set_src(avatar_img_, dsc);
         lv_obj_move_foreground(avatar_img_);
+        BringListeningIndicatorToFrontLocked();
         return true;
     }
 
