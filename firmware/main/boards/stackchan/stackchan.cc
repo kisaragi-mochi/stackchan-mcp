@@ -61,10 +61,16 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 
 #define TAG "StackChanBoard"
 
-// Caption overlay text font — reuse the board's builtin puhui face
-// (BUILTIN_TEXT_FONT for stackchan in main/CMakeLists.txt) so the caption
-// adds zero flash cost. The basic subset covers everyday CJK.
-LV_FONT_DECLARE(font_puhui_basic_20_4);
+// Caption overlay text fonts — the caption register is English, so the
+// LVGL builtin Montserrat ASCII faces are used (10-20 KB per size, vs
+// ~450 KB for one CJK size). Three sizes are compiled in (see
+// LV_FONT_MONTSERRAT_* in boards/stackchan/config.json sdkconfig_append)
+// and selected per call via the font_size tool argument. CJK codepoints
+// have no glyphs in these faces and render blank; the chat channel
+// carries the full transcript.
+LV_FONT_DECLARE(lv_font_montserrat_14);
+LV_FONT_DECLARE(lv_font_montserrat_16);
+LV_FONT_DECLARE(lv_font_montserrat_20);
 
 class Pmic : public Axp2101 {
 public:
@@ -567,10 +573,22 @@ private:
     static constexpr int CAPTION_PAD_HOR_PX = 8;
     static constexpr int CAPTION_PAD_VER_PX = 3;
     static constexpr int CAPTION_FADE_MS = 300;
-    // Width budget for pre-truncation, measured in CJK glyph columns of the
-    // 20 px builtin text font: (320 - 2*8) / 20 = 15.2 -> 15 per line.
-    static constexpr int CAPTION_COLS_PER_LINE = 15;
     static constexpr int CAPTION_MAX_LINES = 2;
+
+    // Caption font sizes are snapped to the three compiled-in Montserrat
+    // faces. The per-line budgets for pre-truncation are conservative
+    // average-width ASCII character counts for the 304 px inner width
+    // (Montserrat is variable-width); CJK codepoints count double.
+    static const lv_font_t* CaptionFontForSize(int font_size) {
+        if (font_size <= 14) return &lv_font_montserrat_14;
+        if (font_size >= 20) return &lv_font_montserrat_20;
+        return &lv_font_montserrat_16;
+    }
+    static int CaptionPerLineBudget(int font_size) {
+        if (font_size <= 14) return 36;
+        if (font_size >= 20) return 26;
+        return 32;
+    }
 
     // Dynamic avatar set loaded via the load_avatar_set MCP tool. Stays
     // unloaded by default — the index-based image lookups then fall back
@@ -2479,17 +2497,17 @@ private:
 
     // ---- Bottom caption overlay (self.display.show_caption) -------------
 
-    // Pre-truncate UTF-8 text to the two-line width budget, counting
-    // half-column units: ASCII glyphs are half a CJK column in the puhui
-    // font, all other codepoints one column. Appends an ellipsis when
+    // Pre-truncate UTF-8 text to the two-line width budget. Units are
+    // average ASCII character widths for the active caption font: ASCII
+    // glyphs count 1, all other codepoints 2. Appends an ellipsis when
     // truncated. The MCP caller keeps the full transcript on the chat
     // channel, so clipping here is presentation-only.
     static std::string TruncateCaptionUtf8(const std::string& text,
+                                           int budget_units,
                                            bool* truncated) {
-        constexpr int kBudgetHalfCols =
-            CAPTION_COLS_PER_LINE * CAPTION_MAX_LINES * 2;
-        // Reserve one full column for the ellipsis when we have to cut.
-        constexpr int kCutHalfCols = kBudgetHalfCols - 2;
+        const int kBudgetHalfCols = budget_units;
+        // Reserve roughly one character for the ellipsis when we cut.
+        const int kCutHalfCols = kBudgetHalfCols - 2;
         int half_cols = 0;
         size_t i = 0;
         size_t cut_bytes = 0;
@@ -2567,7 +2585,7 @@ private:
         lv_obj_set_width(caption_label_,
                          DISPLAY_WIDTH - 2 * CAPTION_PAD_HOR_PX);
         lv_label_set_long_mode(caption_label_, LV_LABEL_LONG_WRAP);
-        lv_obj_set_style_text_font(caption_label_, &font_puhui_basic_20_4, 0);
+        lv_obj_set_style_text_font(caption_label_, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(caption_label_, lv_color_white(), 0);
         lv_obj_set_style_text_align(caption_label_, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(caption_label_, "");
@@ -2674,9 +2692,12 @@ private:
     }
 
     // Entry point used by the MCP tool. Empty text dismisses the current
-    // caption immediately (no fade).
-    bool ShowCaption(const std::string& text, int duration_ms,
-                     bool* truncated_out, std::string* shown_out) {
+    // caption immediately (no fade). font_size snaps to 14/16/20 and
+    // bg_opa_pct (0-100) sets the band translucency, so the caption look
+    // can be tuned live without reflashing.
+    bool ShowCaption(const std::string& text, int duration_ms, int font_size,
+                     int bg_opa_pct, bool* truncated_out,
+                     std::string* shown_out) {
         if (display_ == nullptr) {
             return false;
         }
@@ -2694,8 +2715,15 @@ private:
             return false;
         }
         bool truncated = false;
-        std::string shown = TruncateCaptionUtf8(text, &truncated);
+        std::string shown = TruncateCaptionUtf8(
+            text, CaptionPerLineBudget(font_size) * CAPTION_MAX_LINES,
+            &truncated);
         StopCaptionFadeLocked();
+        lv_obj_set_style_text_font(caption_label_,
+                                   CaptionFontForSize(font_size), 0);
+        lv_obj_set_style_bg_opa(
+            caption_band_,
+            static_cast<lv_opa_t>((bg_opa_pct * 255 + 50) / 100), 0);
         lv_label_set_text(caption_label_, shown.c_str());
         lv_obj_clear_flag(caption_band_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(caption_band_);
@@ -6384,17 +6412,26 @@ private:
             "The text is clipped to at most two lines (an ellipsis marks "
             "the cut) and fades out automatically after duration_ms. "
             "Calling again replaces the current caption and restarts the "
-            "timer. An empty text dismisses the caption immediately.",
+            "timer. An empty text dismisses the caption immediately. "
+            "font_size snaps to the nearest of 14, 16, or 20 px; bg_opa "
+            "is the band opacity in percent. English text expected: the "
+            "compiled fonts are ASCII-only and CJK renders blank.",
             PropertyList({Property("text", kPropertyTypeString),
                           Property("duration_ms", kPropertyTypeInteger,
-                                   5000, 1000, 15000)}),
+                                   5000, 1000, 15000),
+                          Property("font_size", kPropertyTypeInteger,
+                                   16, 14, 20),
+                          Property("bg_opa", kPropertyTypeInteger,
+                                   70, 0, 100)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 std::string text = properties["text"].value<std::string>();
                 int duration_ms = properties["duration_ms"].value<int>();
+                int font_size = properties["font_size"].value<int>();
+                int bg_opa = properties["bg_opa"].value<int>();
                 bool truncated = false;
                 std::string shown;
-                bool applied =
-                    ShowCaption(text, duration_ms, &truncated, &shown);
+                bool applied = ShowCaption(text, duration_ms, font_size,
+                                           bg_opa, &truncated, &shown);
                 cJSON* root = cJSON_CreateObject();
                 cJSON_AddBoolToObject(root, "ok", applied);
                 if (!applied) {

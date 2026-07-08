@@ -392,6 +392,8 @@ async def test_list_tools_includes_show_caption():
     schema = tool.inputSchema
     assert schema["properties"]["text"]["type"] == "string"
     assert schema["properties"]["duration_ms"]["type"] == "integer"
+    assert schema["properties"]["font_size"]["type"] == "integer"
+    assert schema["properties"]["bg_opa"]["type"] == "integer"
     assert schema["required"] == ["text"]
 
 
@@ -429,7 +431,12 @@ async def test_show_caption_relays_to_device(monkeypatch):
             method="tools/call",
             params={
                 "name": "show_caption",
-                "arguments": {"text": "今晚不出声，字幕在这。", "duration_ms": 4500},
+                "arguments": {
+                    "text": "Quiet mode tonight; captions on.",
+                    "duration_ms": 4500,
+                    "font_size": 14,
+                    "bg_opa": 55,
+                },
             },
         )
     )
@@ -437,7 +444,12 @@ async def test_show_caption_relays_to_device(monkeypatch):
     assert calls == [
         (
             "self.display.show_caption",
-            {"text": "今晚不出声，字幕在这。", "duration_ms": 4500},
+            {
+                "text": "Quiet mode tonight; captions on.",
+                "duration_ms": 4500,
+                "font_size": 14,
+                "bg_opa": 55,
+            },
         )
     ]
 

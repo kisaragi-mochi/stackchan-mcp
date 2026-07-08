@@ -1742,9 +1742,11 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "band out automatically after duration_ms. Calling "
                     "again replaces the current caption and restarts the "
                     "timer; an empty text dismisses it immediately. "
-                    "Intended for silent-mode operation where speech is "
-                    "shown instead of spoken while the chat channel "
-                    "carries the full transcript."
+                    "English text expected (the compiled caption fonts are "
+                    "ASCII-only; CJK renders blank). Intended for "
+                    "silent-mode operation where speech is shown instead "
+                    "of spoken while the chat channel carries the full "
+                    "transcript."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1752,8 +1754,8 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         "text": {
                             "type": "string",
                             "description": (
-                                "Utterance to display. Empty string "
-                                "dismisses the current caption."
+                                "Utterance to display (English). Empty "
+                                "string dismisses the current caption."
                             ),
                         },
                         "duration_ms": {
@@ -1762,6 +1764,20 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                                 "How long the caption stays before fading "
                                 "out, 1000-15000 ms (default 5000; the "
                                 "caption design targets 4000-6000)."
+                            ),
+                        },
+                        "font_size": {
+                            "type": "integer",
+                            "description": (
+                                "Caption text size in px; snaps to the "
+                                "nearest of 14, 16, or 20 (default 16)."
+                            ),
+                        },
+                        "bg_opa": {
+                            "type": "integer",
+                            "description": (
+                                "Band opacity in percent, 0-100 "
+                                "(default 70)."
                             ),
                         },
                     },
