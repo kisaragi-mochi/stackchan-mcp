@@ -61,6 +61,11 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 
 #define TAG "StackChanBoard"
 
+// Caption overlay text font — reuse the board's builtin puhui face
+// (BUILTIN_TEXT_FONT for stackchan in main/CMakeLists.txt) so the caption
+// adds zero flash cost. The basic subset covers everyday CJK.
+LV_FONT_DECLARE(font_puhui_basic_20_4);
+
 class Pmic : public Axp2101 {
 public:
     // Power Init
@@ -550,6 +555,22 @@ private:
     lv_obj_t* listening_indicator_dot_ = nullptr;
     std::atomic<bool> listening_indicator_visible_{false};
     static constexpr int LISTENING_INDICATOR_DOT_SIZE_PX = 14;
+
+    // Bottom caption overlay (self.display.show_caption): a translucent
+    // black band with small white text above the full-screen avatar layer.
+    // One utterance per call; auto-fades after caption_duration; at most
+    // two lines (longer text is pre-truncated with an ellipsis — the chat
+    // channel carries the full transcript).
+    lv_obj_t* caption_band_ = nullptr;
+    lv_obj_t* caption_label_ = nullptr;
+    esp_timer_handle_t caption_hide_timer_ = nullptr;
+    static constexpr int CAPTION_PAD_HOR_PX = 8;
+    static constexpr int CAPTION_PAD_VER_PX = 3;
+    static constexpr int CAPTION_FADE_MS = 300;
+    // Width budget for pre-truncation, measured in CJK glyph columns of the
+    // 20 px builtin text font: (320 - 2*8) / 20 = 15.2 -> 15 per line.
+    static constexpr int CAPTION_COLS_PER_LINE = 15;
+    static constexpr int CAPTION_MAX_LINES = 2;
 
     // Dynamic avatar set loaded via the load_avatar_set MCP tool. Stays
     // unloaded by default — the index-based image lookups then fall back
@@ -2456,6 +2477,236 @@ private:
         SetListeningIndicatorVisibleLocked(is_listening);
     }
 
+    // ---- Bottom caption overlay (self.display.show_caption) -------------
+
+    // Pre-truncate UTF-8 text to the two-line width budget, counting
+    // half-column units: ASCII glyphs are half a CJK column in the puhui
+    // font, all other codepoints one column. Appends an ellipsis when
+    // truncated. The MCP caller keeps the full transcript on the chat
+    // channel, so clipping here is presentation-only.
+    static std::string TruncateCaptionUtf8(const std::string& text,
+                                           bool* truncated) {
+        constexpr int kBudgetHalfCols =
+            CAPTION_COLS_PER_LINE * CAPTION_MAX_LINES * 2;
+        // Reserve one full column for the ellipsis when we have to cut.
+        constexpr int kCutHalfCols = kBudgetHalfCols - 2;
+        int half_cols = 0;
+        size_t i = 0;
+        size_t cut_bytes = 0;
+        bool needs_cut = false;
+        while (i < text.size()) {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            size_t seq_len = 1;
+            if ((c & 0x80) == 0x00) seq_len = 1;
+            else if ((c & 0xE0) == 0xC0) seq_len = 2;
+            else if ((c & 0xF0) == 0xE0) seq_len = 3;
+            else if ((c & 0xF8) == 0xF0) seq_len = 4;
+            if (i + seq_len > text.size()) break;  // malformed tail: stop
+            const int w = (seq_len == 1) ? 1 : 2;
+            if (half_cols + w > kBudgetHalfCols) {
+                needs_cut = true;
+                break;
+            }
+            if (half_cols + w <= kCutHalfCols) {
+                cut_bytes = i + seq_len;
+            }
+            half_cols += w;
+            i += seq_len;
+        }
+        if (truncated != nullptr) {
+            *truncated = needs_cut;
+        }
+        if (!needs_cut) {
+            return text.substr(0, i);  // also drops a malformed tail byte
+        }
+        return text.substr(0, cut_bytes) + "\xE2\x80\xA6";  // U+2026 …
+    }
+
+    bool EnsureCaptionObjectLocked() {
+        if (caption_band_ != nullptr) {
+            if (lv_obj_is_valid(caption_band_) && caption_label_ != nullptr &&
+                lv_obj_is_valid(caption_label_)) {
+                return true;
+            }
+            StopCaptionFadeLocked();
+            if (lv_obj_is_valid(caption_band_)) {
+                lv_obj_del(caption_band_);
+            }
+        }
+        caption_band_ = nullptr;
+        caption_label_ = nullptr;
+
+        lv_obj_t* screen = lv_screen_active();
+        if (screen == nullptr) {
+            return false;
+        }
+
+        caption_band_ = lv_obj_create(screen);
+        if (caption_band_ == nullptr) {
+            return false;
+        }
+        lv_obj_set_width(caption_band_, DISPLAY_WIDTH);
+        lv_obj_set_height(caption_band_, LV_SIZE_CONTENT);
+        lv_obj_align(caption_band_, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_clear_flag(caption_band_, LV_OBJ_FLAG_SCROLLABLE);
+        // Full-bleed band: no frame, no rounding (the band spans the whole
+        // screen width, per the surface-3 caption design).
+        lv_obj_set_style_radius(caption_band_, 0, 0);
+        lv_obj_set_style_bg_color(caption_band_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(caption_band_, LV_OPA_70, 0);
+        lv_obj_set_style_border_width(caption_band_, 0, 0);
+        lv_obj_set_style_pad_hor(caption_band_, CAPTION_PAD_HOR_PX, 0);
+        lv_obj_set_style_pad_ver(caption_band_, CAPTION_PAD_VER_PX, 0);
+
+        caption_label_ = lv_label_create(caption_band_);
+        if (caption_label_ == nullptr) {
+            lv_obj_del(caption_band_);
+            caption_band_ = nullptr;
+            return false;
+        }
+        lv_obj_set_width(caption_label_,
+                         DISPLAY_WIDTH - 2 * CAPTION_PAD_HOR_PX);
+        lv_label_set_long_mode(caption_label_, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_font(caption_label_, &font_puhui_basic_20_4, 0);
+        lv_obj_set_style_text_color(caption_label_, lv_color_white(), 0);
+        lv_obj_set_style_text_align(caption_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(caption_label_, "");
+
+        lv_obj_add_flag(caption_band_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(caption_band_);
+        ESP_LOGI(TAG, "Caption band created on active screen");
+        return true;
+    }
+
+    static void SetCaptionOpacity(void* obj, int32_t opa) {
+        auto* band = static_cast<lv_obj_t*>(obj);
+        if (band == nullptr || !lv_obj_is_valid(band)) {
+            return;
+        }
+        lv_obj_set_style_opa(band, static_cast<lv_opa_t>(opa), 0);
+    }
+
+    // Runs in the LVGL timer context when the fade-out completes.
+    static void CaptionFadeDone(lv_anim_t* anim) {
+        auto* band = static_cast<lv_obj_t*>(anim->var);
+        if (band == nullptr || !lv_obj_is_valid(band)) {
+            return;
+        }
+        lv_obj_add_flag(band, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_opa(band, LV_OPA_COVER, 0);
+    }
+
+    void StopCaptionFadeLocked() {
+        if (caption_band_ == nullptr) {
+            return;
+        }
+        lv_anim_delete(caption_band_, nullptr);
+        if (lv_obj_is_valid(caption_band_)) {
+            lv_obj_set_style_opa(caption_band_, LV_OPA_COVER, 0);
+        }
+    }
+
+    void HideCaptionLocked(bool fade) {
+        if (caption_band_ == nullptr || !lv_obj_is_valid(caption_band_)) {
+            return;
+        }
+        if (lv_obj_has_flag(caption_band_, LV_OBJ_FLAG_HIDDEN)) {
+            return;
+        }
+        if (!fade) {
+            StopCaptionFadeLocked();
+            lv_obj_add_flag(caption_band_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+        StopCaptionFadeLocked();
+        lv_anim_t anim;
+        lv_anim_init(&anim);
+        lv_anim_set_var(&anim, caption_band_);
+        lv_anim_set_values(&anim, LV_OPA_COVER, LV_OPA_TRANSP);
+        lv_anim_set_exec_cb(&anim, SetCaptionOpacity);
+        lv_anim_set_duration(&anim, CAPTION_FADE_MS);
+        lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+        lv_anim_set_completed_cb(&anim, CaptionFadeDone);
+        lv_anim_start(&anim);
+    }
+
+    void BringCaptionToFrontLocked() {
+        if (caption_band_ == nullptr) {
+            return;
+        }
+        if (!lv_obj_is_valid(caption_band_)) {
+            caption_band_ = nullptr;
+            caption_label_ = nullptr;
+            return;
+        }
+        lv_obj_move_foreground(caption_band_);
+    }
+
+    // One-shot timer: auto-fade the caption after its display duration.
+    // Fires on ESP_TIMER_TASK, so take the display lock like the other
+    // timer-driven LVGL writers on this board.
+    void EnsureCaptionHideTimer() {
+        if (caption_hide_timer_ != nullptr) {
+            return;
+        }
+        esp_timer_create_args_t timer_args = {
+            .callback = [](void* arg) {
+                auto* board = static_cast<StackChanBoard*>(arg);
+                if (board->display_ == nullptr) {
+                    return;
+                }
+                DisplayLockGuard lock(board->display_);
+                // A ShowCaption racing with this expiry re-arms the one-shot
+                // timer while holding the display lock; seeing it active here
+                // means a newer caption owns the band — leave it alone.
+                if (board->caption_hide_timer_ != nullptr &&
+                    esp_timer_is_active(board->caption_hide_timer_)) {
+                    return;
+                }
+                board->HideCaptionLocked(true);
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "caption_hide",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &caption_hide_timer_));
+    }
+
+    // Entry point used by the MCP tool. Empty text dismisses the current
+    // caption immediately (no fade).
+    bool ShowCaption(const std::string& text, int duration_ms,
+                     bool* truncated_out, std::string* shown_out) {
+        if (display_ == nullptr) {
+            return false;
+        }
+        EnsureCaptionHideTimer();
+        esp_timer_stop(caption_hide_timer_);  // no-op when not armed
+
+        DisplayLockGuard lock(display_);
+        if (text.empty()) {
+            HideCaptionLocked(false);
+            if (truncated_out != nullptr) *truncated_out = false;
+            if (shown_out != nullptr) shown_out->clear();
+            return true;
+        }
+        if (!EnsureCaptionObjectLocked()) {
+            return false;
+        }
+        bool truncated = false;
+        std::string shown = TruncateCaptionUtf8(text, &truncated);
+        StopCaptionFadeLocked();
+        lv_label_set_text(caption_label_, shown.c_str());
+        lv_obj_clear_flag(caption_band_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(caption_band_);
+        if (truncated_out != nullptr) *truncated_out = truncated;
+        if (shown_out != nullptr) *shown_out = std::move(shown);
+        ESP_ERROR_CHECK(esp_timer_start_once(
+            caption_hide_timer_,
+            static_cast<uint64_t>(duration_ms) * 1000ULL));
+        return true;
+    }
+
     void PollTouchpad() {
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
@@ -4351,6 +4602,7 @@ private:
         lv_image_set_src(avatar_img_, dsc);
         lv_obj_move_foreground(avatar_img_);
         BringListeningIndicatorToFrontLocked();
+        BringCaptionToFrontLocked();
         return true;
     }
 
@@ -6117,6 +6369,48 @@ private:
                          (int)enabled,
                          deferred_by_fetch ? 1 : 0,
                          deferred_by_mouth_seq ? 1 : 0);
+                return root;
+            });
+
+        // Surface-3 caption: one-line subtitle band at the bottom of the
+        // LCD, above the avatar. Intended for silent-mode operation where
+        // the utterance is shown on screen instead of spoken; the chat
+        // channel carries the full transcript, so on-screen text may be
+        // truncated to two lines.
+        mcp_server.AddTool(
+            "self.display.show_caption",
+            "Show one utterance as a subtitle at the bottom of the LCD: a "
+            "translucent black band with small white text over the avatar. "
+            "The text is clipped to at most two lines (an ellipsis marks "
+            "the cut) and fades out automatically after duration_ms. "
+            "Calling again replaces the current caption and restarts the "
+            "timer. An empty text dismisses the caption immediately.",
+            PropertyList({Property("text", kPropertyTypeString),
+                          Property("duration_ms", kPropertyTypeInteger,
+                                   5000, 1000, 15000)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string text = properties["text"].value<std::string>();
+                int duration_ms = properties["duration_ms"].value<int>();
+                bool truncated = false;
+                std::string shown;
+                bool applied =
+                    ShowCaption(text, duration_ms, &truncated, &shown);
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", applied);
+                if (!applied) {
+                    cJSON_AddStringToObject(root, "error",
+                        "Display not ready yet; retry after a moment.");
+                } else if (text.empty()) {
+                    cJSON_AddBoolToObject(root, "dismissed", true);
+                } else {
+                    cJSON_AddBoolToObject(root, "truncated", truncated);
+                    cJSON_AddNumberToObject(root, "duration_ms", duration_ms);
+                }
+                ESP_LOGI(TAG,
+                         "show_caption: len=%u truncated=%d duration=%d "
+                         "applied=%d",
+                         (unsigned)text.size(), truncated ? 1 : 0,
+                         duration_ms, applied ? 1 : 0);
                 return root;
             });
 
