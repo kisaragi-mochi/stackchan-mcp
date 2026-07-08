@@ -1077,6 +1077,10 @@ async def _dispatch_mcp_tool(
             "self.display.set_avatar",
             arguments,
         ),
+        "show_caption": (
+            "self.display.show_caption",
+            arguments,
+        ),
         "set_mouth": (
             "self.display.set_mouth",
             arguments,
@@ -1726,6 +1730,42 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                     },
                     "required": ["face"],
+                },
+            ),
+            Tool(
+                name="show_caption",
+                description=(
+                    "Show one utterance as a subtitle at the bottom of the "
+                    "LCD: a translucent black band with small white text "
+                    "over the avatar. The device clips the text to at most "
+                    "two lines (an ellipsis marks the cut) and fades the "
+                    "band out automatically after duration_ms. Calling "
+                    "again replaces the current caption and restarts the "
+                    "timer; an empty text dismisses it immediately. "
+                    "Intended for silent-mode operation where speech is "
+                    "shown instead of spoken while the chat channel "
+                    "carries the full transcript."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": (
+                                "Utterance to display. Empty string "
+                                "dismisses the current caption."
+                            ),
+                        },
+                        "duration_ms": {
+                            "type": "integer",
+                            "description": (
+                                "How long the caption stays before fading "
+                                "out, 1000-15000 ms (default 5000; the "
+                                "caption design targets 4000-6000)."
+                            ),
+                        },
+                    },
+                    "required": ["text"],
                 },
             ),
             Tool(
