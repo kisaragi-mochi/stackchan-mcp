@@ -30,11 +30,15 @@ documented-only.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-09
+
 ### Gateway
 
 - Re-dispatch the emoji-selected avatar face after successful speech playback,
   so emoji+text `say` calls keep the expression visible after lip-sync stops.
   (#296)
+
+## [firmware-v1.14.0] - 2026-07-09
 
 ### Firmware
 
@@ -1774,7 +1778,9 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.13.1...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.14.0...v0.15.0
+[firmware-v1.14.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.13.1...firmware-v1.14.0
 [firmware-v1.13.1]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.13.0...firmware-v1.13.1
 [0.14.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.12.0...v0.13.0
