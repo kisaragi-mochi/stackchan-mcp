@@ -44,15 +44,34 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <esp_lcd_ili9341.h>
 #include <esp_timer.h>
 #include <esp_random.h>
+#include <esp_rom_sys.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include "esp_video.h"
 #include <cJSON.h>
 #include <lvgl.h>
+
+// BMI270 IMU (built into the M5Stack CoreS3, internal I2C bus). The Bosch
+// core driver and its 8 KB config blob come from the espressif/bmi270_sensor
+// managed component (already a dependency for esp32s3 targets). This board
+// binds the driver to the existing i2c_master bus through its own thin
+// read/write/delay callbacks instead of the component's i2c_bus wrapper, so
+// the internal bus keeps a single owning driver. bmi2.h carries its own
+// extern "C" guard; the bmi270_* entry points live in the component's
+// prebuilt library but only bmi270_sensor_create-style wrappers are in its
+// public header, hence the local declarations (standard Bosch signatures).
+#include <bmi2.h>
+extern "C" {
+int8_t bmi270_init(struct bmi2_dev *dev);
+int8_t bmi270_sensor_enable(const uint8_t *sens_list, uint8_t n_sens, struct bmi2_dev *dev);
+int8_t bmi270_get_sensor_config(struct bmi2_sens_config *sens_cfg, uint8_t n_sens, struct bmi2_dev *dev);
+int8_t bmi270_set_sensor_config(struct bmi2_sens_config *sens_cfg, uint8_t n_sens, struct bmi2_dev *dev);
+}
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -501,6 +520,150 @@ private:
     }
 };
 
+// Thin accelerometer-only wrapper around the CoreS3's built-in BMI270.
+// Init uploads the Bosch config blob (~8 KB over I2C, one-time, a few
+// hundred ms at 400 kHz) and enables the accelerometer at 100 Hz / ±4 g.
+// ±4 g keeps headroom for transit jolts while 1 mg resolution stays well
+// below the sensor noise floor. Gyroscope, FIFO, and the interrupt engine
+// are left off — the board samples by polling (see ImuSamplerTask).
+class Bmi270Accel {
+public:
+    // CoreS3 wires the BMI270 SDO high -> address 0x69. 0x68 is probed as
+    // a fall-back for other wirings; the chip-id check keeps it from
+    // grabbing the Si12T touch controller that owns 0x68 on this board.
+    bool Init(i2c_master_bus_handle_t bus) {
+        for (uint8_t addr : {(uint8_t)0x69, (uint8_t)0x68}) {
+            if (TryInitAt(bus, addr)) {
+                return true;
+            }
+        }
+        ESP_LOGW("Bmi270", "no BMI270 found on internal I2C bus (IMU tools report unavailable)");
+        return false;
+    }
+
+    bool ok() const { return ok_; }
+
+    // Read one accelerometer sample converted to milli-g. Returns false on
+    // I2C/driver failure. Single caller by design (the sampler task), so no
+    // internal locking.
+    bool ReadMg(int16_t out_mg[3]) {
+        if (!ok_) {
+            return false;
+        }
+        struct bmi2_sens_data data = {};
+        if (bmi2_get_sensor_data(&data, &dev_) != BMI2_OK) {
+            return false;
+        }
+        // ±4 g range: 32768 LSB == 4000 mg.
+        out_mg[0] = (int16_t)(((int32_t)data.acc.x * 4000) / 32768);
+        out_mg[1] = (int16_t)(((int32_t)data.acc.y * 4000) / 32768);
+        out_mg[2] = (int16_t)(((int32_t)data.acc.z * 4000) / 32768);
+        return true;
+    }
+
+private:
+    // Bosch chunks multi-byte transfers by dev_.read_write_len; the write
+    // callback needs one extra byte for the register address.
+    static constexpr uint16_t kMaxChunk = 64;
+
+    bool TryInitAt(i2c_master_bus_handle_t bus, uint8_t addr) {
+        if (i2c_master_probe(bus, addr, pdMS_TO_TICKS(100)) != ESP_OK) {
+            return false;
+        }
+        i2c_device_config_t dev_cfg = {};
+        dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+        dev_cfg.device_address = addr;
+        dev_cfg.scl_speed_hz = 400000;  // M5 stock speed for the CoreS3 internal bus
+        i2c_master_dev_handle_t handle = nullptr;
+        if (i2c_master_bus_add_device(bus, &dev_cfg, &handle) != ESP_OK) {
+            return false;
+        }
+        uint8_t reg = BMI2_CHIP_ID_ADDR;
+        uint8_t chip_id = 0;
+        if (i2c_master_transmit_receive(handle, &reg, 1, &chip_id, 1, 100) != ESP_OK ||
+            chip_id != 0x24) {
+            // Not a BMI270 (0x68 hosts the Si12T on this board).
+            i2c_master_bus_rm_device(handle);
+            return false;
+        }
+
+        i2c_device_ = handle;
+        dev_ = {};
+        dev_.intf = BMI2_I2C_INTF;
+        dev_.intf_ptr = i2c_device_;
+        dev_.read = &Bmi270Accel::I2cRead;
+        dev_.write = &Bmi270Accel::I2cWrite;
+        dev_.delay_us = &Bmi270Accel::DelayUs;
+        dev_.read_write_len = kMaxChunk;
+        dev_.config_file_ptr = nullptr;  // default bmi270_config_file from the component
+
+        int8_t rslt = bmi270_init(&dev_);
+        if (rslt != BMI2_OK) {
+            ESP_LOGW("Bmi270", "bmi270_init failed at 0x%02X: %d", addr, rslt);
+            i2c_master_bus_rm_device(handle);
+            i2c_device_ = nullptr;
+            return false;
+        }
+
+        struct bmi2_sens_config sens_cfg = {};
+        sens_cfg.type = BMI2_ACCEL;
+        rslt = bmi270_get_sensor_config(&sens_cfg, 1, &dev_);
+        if (rslt == BMI2_OK) {
+            sens_cfg.cfg.acc.odr = BMI2_ACC_ODR_100HZ;
+            sens_cfg.cfg.acc.range = BMI2_ACC_RANGE_4G;
+            sens_cfg.cfg.acc.bwp = BMI2_ACC_NORMAL_AVG4;
+            sens_cfg.cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;
+            rslt = bmi270_set_sensor_config(&sens_cfg, 1, &dev_);
+        }
+        uint8_t sens_list = BMI2_ACCEL;
+        if (rslt == BMI2_OK) {
+            rslt = bmi270_sensor_enable(&sens_list, 1, &dev_);
+        }
+        if (rslt != BMI2_OK) {
+            ESP_LOGW("Bmi270", "accel config/enable failed at 0x%02X: %d", addr, rslt);
+            i2c_master_bus_rm_device(handle);
+            i2c_device_ = nullptr;
+            return false;
+        }
+
+        ok_ = true;
+        ESP_LOGI("Bmi270", "init OK at 0x%02X (accel 100 Hz, ±4 g)", addr);
+        return true;
+    }
+
+    static int8_t I2cRead(uint8_t reg, uint8_t* data, uint32_t len, void* intf_ptr) {
+        auto handle = static_cast<i2c_master_dev_handle_t>(intf_ptr);
+        esp_err_t err = i2c_master_transmit_receive(handle, &reg, 1, data, len, 100);
+        return err == ESP_OK ? BMI2_INTF_RET_SUCCESS : BMI2_E_COM_FAIL;
+    }
+
+    static int8_t I2cWrite(uint8_t reg, const uint8_t* data, uint32_t len, void* intf_ptr) {
+        if (len > kMaxChunk) {
+            return BMI2_E_COM_FAIL;
+        }
+        uint8_t buf[kMaxChunk + 1];
+        buf[0] = reg;
+        memcpy(buf + 1, data, len);
+        auto handle = static_cast<i2c_master_dev_handle_t>(intf_ptr);
+        esp_err_t err = i2c_master_transmit(handle, buf, len + 1, 100);
+        return err == ESP_OK ? BMI2_INTF_RET_SUCCESS : BMI2_E_COM_FAIL;
+    }
+
+    static void DelayUs(uint32_t period_us, void* /*intf_ptr*/) {
+        // Bosch init uses sub-millisecond settle delays (busy-wait) and a
+        // few multi-ms waits (yield to the scheduler).
+        if (period_us >= 2000) {
+            vTaskDelay(pdMS_TO_TICKS((period_us + 999) / 1000));
+        } else {
+            esp_rom_delay_us(period_us);
+        }
+    }
+
+    i2c_master_dev_handle_t i2c_device_ = nullptr;
+    struct bmi2_dev dev_ = {};
+    bool ok_ = false;
+};
+
 class StackChanBoard : public WifiBoard {
 private:
     // Internal I2C bus (shared by AXP2101 / AW9523 / FT6336 / PY32 / Si12T /
@@ -697,6 +860,31 @@ private:
     bool si12t_ok_ = false;
     esp_timer_handle_t touch_poll_timer_ = nullptr;
     esp_timer_handle_t touch_revert_timer_ = nullptr;
+
+    // ---- IMU (BMI270 accelerometer) sampling ----------------------------
+    // A dedicated low-priority task polls the accelerometer at
+    // IMU_SAMPLE_PERIOD_MS into a fixed ring so self.imu.read can answer
+    // instantly with both the latest sample and recent-window statistics
+    // (the variance is what a host uses to detect sustained shaking, e.g.
+    // riding a train). A task rather than an esp_timer callback keeps the
+    // 3x-register I2C read (worst case 3 x 100 ms bus timeout) off the
+    // shared ESP_TIMER task that drives blink/touch/caption timers.
+    // Ring access is guarded by a spinlock: writers hold it for one struct
+    // copy, the reader for one 384-byte snapshot.
+    struct ImuSample {
+        int16_t x_mg;
+        int16_t y_mg;
+        int16_t z_mg;
+    };
+    static constexpr int IMU_SAMPLE_PERIOD_MS = 50;  // 20 Hz
+    static constexpr int IMU_WINDOW_SAMPLES = 64;    // 3.2 s window
+    Bmi270Accel bmi270_;
+    TaskHandle_t imu_task_ = nullptr;
+    ImuSample imu_ring_[IMU_WINDOW_SAMPLES] = {};
+    int imu_ring_count_ = 0;  // valid samples in the ring (<= window size)
+    int imu_ring_next_ = 0;   // next write slot
+    portMUX_TYPE imu_ring_mux_ = portMUX_INITIALIZER_UNLOCKED;
+    std::atomic<uint32_t> imu_read_failures_{0};  // cumulative, diagnostics
 
     // Touch detection state (single-thread access from the touch_poll_timer_
     // callback, which runs on the ESP_TIMER_TASK).
@@ -5250,6 +5438,56 @@ private:
         }
     }
 
+    // ---- IMU (BMI270) init + sampler -------------------------------------
+    void InitializeImu() {
+        if (!bmi270_.Init(i2c_bus_)) {
+            return;  // self.imu.read reports available=false
+        }
+        BaseType_t ok = xTaskCreate(&StackChanBoard::ImuSamplerTaskTrampoline,
+                                    "imu_sampler", 3072, this,
+                                    tskIDLE_PRIORITY + 1,
+                                    &imu_task_);
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create imu_sampler task");
+            imu_task_ = nullptr;
+        } else {
+            ESP_LOGI(TAG, "IMU sampler ready (%d ms period, %d-sample window)",
+                     IMU_SAMPLE_PERIOD_MS, IMU_WINDOW_SAMPLES);
+        }
+    }
+
+    static void ImuSamplerTaskTrampoline(void* arg) {
+        static_cast<StackChanBoard*>(arg)->ImuSamplerTask();
+    }
+
+    void ImuSamplerTask() {
+        TickType_t last_wake = xTaskGetTickCount();
+        int consecutive_failures = 0;
+        while (true) {
+            vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_SAMPLE_PERIOD_MS));
+            int16_t mg[3] = {};
+            if (!bmi270_.ReadMg(mg)) {
+                imu_read_failures_.fetch_add(1, std::memory_order_relaxed);
+                if (++consecutive_failures >= 10) {
+                    // Bus trouble: back off so a wedged transaction cannot
+                    // hammer the shared internal bus at 20 Hz.
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    last_wake = xTaskGetTickCount();
+                }
+                continue;
+            }
+            consecutive_failures = 0;
+            ImuSample sample = {mg[0], mg[1], mg[2]};
+            portENTER_CRITICAL(&imu_ring_mux_);
+            imu_ring_[imu_ring_next_] = sample;
+            imu_ring_next_ = (imu_ring_next_ + 1) % IMU_WINDOW_SAMPLES;
+            if (imu_ring_count_ < IMU_WINDOW_SAMPLES) {
+                imu_ring_count_++;
+            }
+            portEXIT_CRITICAL(&imu_ring_mux_);
+        }
+    }
+
     static bool IsGatewayUrlForced() {
 #if defined(CONFIG_FORCE_DEFAULT_WEBSOCKET_URL) && defined(CONFIG_DEFAULT_WEBSOCKET_URL)
         return CONFIG_DEFAULT_WEBSOCKET_URL[0] != '\0';
@@ -6150,6 +6388,113 @@ private:
                     if (age_ms < 0) age_ms = 0;
                 }
                 cJSON_AddNumberToObject(root, "last_event_age_ms", (double)age_ms);
+                return root;
+            });
+
+        // Built-in BMI270 accelerometer. Returns the latest sample plus
+        // statistics over the sampler ring (see ImuSamplerTask) so a
+        // polling host can detect sustained shaking from the window
+        // variance without streaming. magnitude_variance_mg2 is the
+        // orientation-independent signal: gravity cancels out of the
+        // magnitude, so a device at rest reads near 0 in any pose while
+        // walking/transit vibration reads high.
+        mcp_server.AddTool(
+            "self.imu.read",
+            "Read the built-in 3-axis accelerometer (BMI270). Returns the "
+            "latest acceleration in milli-g (1000 = 1 g) and statistics over "
+            "the recent sampling window (mean, per-axis variance, and the "
+            "variance of the acceleration magnitude in mg^2). Use "
+            "window.magnitude_variance_mg2 to detect sustained shaking: "
+            "near 0 at rest regardless of orientation, high while carried "
+            "or shaken.",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", bmi270_.ok());
+                if (!bmi270_.ok()) {
+                    cJSON_AddStringToObject(root, "error",
+                                            "BMI270 not detected or init failed");
+                    return root;
+                }
+
+                ImuSample local[IMU_WINDOW_SAMPLES];
+                int n = 0;
+                portENTER_CRITICAL(&imu_ring_mux_);
+                n = imu_ring_count_;
+                for (int i = 0; i < n; i++) {
+                    // Chronological copy: local[0] = oldest, local[n-1] = newest.
+                    int idx = (imu_ring_next_ - n + i + IMU_WINDOW_SAMPLES) %
+                              IMU_WINDOW_SAMPLES;
+                    local[i] = imu_ring_[idx];
+                }
+                portEXIT_CRITICAL(&imu_ring_mux_);
+
+                if (n == 0) {
+                    cJSON_AddStringToObject(root, "error", "no samples yet");
+                    return root;
+                }
+
+                const ImuSample& latest = local[n - 1];
+                cJSON* accel = cJSON_CreateObject();
+                cJSON_AddNumberToObject(accel, "x", latest.x_mg);
+                cJSON_AddNumberToObject(accel, "y", latest.y_mg);
+                cJSON_AddNumberToObject(accel, "z", latest.z_mg);
+                cJSON_AddItemToObject(root, "accel_mg", accel);
+
+                // Integer statistics; int64 accumulators are ample
+                // (|axis| <= 4000 mg, n <= 64).
+                int64_t sum[3] = {0, 0, 0};
+                int64_t sum_sq[3] = {0, 0, 0};
+                int64_t mag_sum = 0;
+                int64_t mag_sum_sq = 0;
+                int32_t latest_mag = 0;
+                for (int i = 0; i < n; i++) {
+                    const int32_t v[3] = {local[i].x_mg, local[i].y_mg,
+                                          local[i].z_mg};
+                    int64_t sq_total = 0;
+                    for (int a = 0; a < 3; a++) {
+                        sum[a] += v[a];
+                        sum_sq[a] += (int64_t)v[a] * v[a];
+                        sq_total += (int64_t)v[a] * v[a];
+                    }
+                    int32_t mag = (int32_t)lroundf(sqrtf((float)sq_total));
+                    mag_sum += mag;
+                    mag_sum_sq += (int64_t)mag * mag;
+                    if (i == n - 1) {
+                        latest_mag = mag;
+                    }
+                }
+                cJSON_AddNumberToObject(root, "magnitude_mg", latest_mag);
+
+                cJSON* window = cJSON_CreateObject();
+                cJSON_AddNumberToObject(window, "samples", n);
+                cJSON_AddNumberToObject(window, "duration_ms",
+                                        n * IMU_SAMPLE_PERIOD_MS);
+                cJSON_AddNumberToObject(window, "sample_rate_hz",
+                                        1000 / IMU_SAMPLE_PERIOD_MS);
+                cJSON* mean = cJSON_CreateObject();
+                cJSON* variance = cJSON_CreateObject();
+                const char* axis_names[3] = {"x", "y", "z"};
+                for (int a = 0; a < 3; a++) {
+                    int64_t mean_a = sum[a] / n;
+                    // Population variance: E[v^2] - E[v]^2.
+                    int64_t var_a = sum_sq[a] / n - mean_a * mean_a;
+                    if (var_a < 0) var_a = 0;
+                    cJSON_AddNumberToObject(mean, axis_names[a], (double)mean_a);
+                    cJSON_AddNumberToObject(variance, axis_names[a],
+                                            (double)var_a);
+                }
+                cJSON_AddItemToObject(window, "mean_mg", mean);
+                cJSON_AddItemToObject(window, "variance_mg2", variance);
+                int64_t mag_mean = mag_sum / n;
+                int64_t mag_var = mag_sum_sq / n - mag_mean * mag_mean;
+                if (mag_var < 0) mag_var = 0;
+                cJSON_AddNumberToObject(window, "magnitude_variance_mg2",
+                                        (double)mag_var);
+                cJSON_AddItemToObject(root, "window", window);
+                cJSON_AddNumberToObject(
+                    root, "read_failures",
+                    (double)imu_read_failures_.load(std::memory_order_relaxed));
                 return root;
             });
 
@@ -7084,6 +7429,10 @@ public:
         InitializeServo();
         InitializeTouchSettings();
         InitializeSi12tTouch();
+        // BMI270 init uploads the Bosch config blob over I2C (~a few hundred
+        // ms one-time cost); failure is non-fatal, self.imu.read then
+        // reports available=false.
+        InitializeImu();
         I2cDetect();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
         // Avatar is shown on-demand via MCP set_avatar command.
