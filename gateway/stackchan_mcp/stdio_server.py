@@ -1216,7 +1216,13 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "maximum": 30,
                             "description": (
                                 "Maximum rate for kind='continuous' frames. "
-                                "kind='event' frames bypass this gate."
+                                "kind='event' frames bypass this gate. "
+                                "Practical guidance from on-device measurement: "
+                                "wire round-trip is ~40-50 ms per frame on a "
+                                "typical home WLAN, so ~20 fps is the effective "
+                                "ceiling — 20 is the recommended value for live "
+                                "use. Excess continuous frames are dropped; "
+                                "event frames are never dropped."
                             ),
                         },
                         "source_filter": {

@@ -483,6 +483,12 @@ source_filter = "stage"
 frame_filter = "calibrated"
 ```
 
+### Measured guidance (real device, home WLAN)
+
+- Wire round-trip per frame: ~40-50 ms median → effective dispatch rate ~20 fps
+- Recommended `max_fps: 20` — feeding more than the effective rate only increases continuous-frame drops (event frames are never dropped)
+- While the stream is active the gateway forces WiFi power save off (restored on stop); without it dispatch latency spikes to 300-1100 ms
+
 ### 4. Optional: TTS setup (VOICEVOX)
 
 To make the device speak, install the `[tts]` extra and run a
