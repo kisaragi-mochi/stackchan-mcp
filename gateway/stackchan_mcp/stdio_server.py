@@ -1101,6 +1101,10 @@ async def _dispatch_mcp_tool(
             "self.touch.get_touch_state",
             {},
         ),
+        "imu_read": (
+            "self.imu.read",
+            {},
+        ),
         "set_led": (
             "self.led.set_color",
             arguments,
@@ -1905,6 +1909,22 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "Read the head-touch (Si12T) sensor state and the most recent "
                     "gesture event (tap/stroke/idle). Returns per-zone booleans, "
                     "the raw output byte, and how long ago the last event fired."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="imu_read",
+                description=(
+                    "Read the built-in 3-axis accelerometer (BMI270). Returns the "
+                    "latest acceleration in milli-g (1000 = 1 g) plus recent-window "
+                    "statistics: per-axis mean and variance, and the variance of the "
+                    "acceleration magnitude (mg^2). window.magnitude_variance_mg2 is "
+                    "orientation-independent — near 0 at rest, high under sustained "
+                    "shaking (walking, transit) — so polling it detects motion "
+                    "without streaming."
                 ),
                 inputSchema={
                     "type": "object",

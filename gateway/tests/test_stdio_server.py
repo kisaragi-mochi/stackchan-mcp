@@ -1988,3 +1988,74 @@ async def test_follow_led_rejects_bad_color_order(monkeypatch):
     assert captured == []
     assert "Input validation error" in result.root.content[0].text
     assert "'bgr' is not one of ['grb', 'rgb']" in result.root.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_list_tools_includes_imu_read():
+    """imu_read is exposed to MCP clients with an empty input schema."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tool = next((t for t in result.root.tools if t.name == "imu_read"), None)
+    assert tool is not None, "imu_read tool should be registered"
+
+    schema = tool.inputSchema
+    assert schema["type"] == "object"
+    assert schema["properties"] == {}
+    assert "required" not in schema or not schema["required"]
+
+
+@pytest.mark.asyncio
+async def test_imu_read_relays_to_device(monkeypatch):
+    """imu_read forwards to self.imu.read with no arguments."""
+    calls = []
+    device_payload = {
+        "available": True,
+        "accel_mg": {"x": -12, "y": 3, "z": 1001},
+        "magnitude_mg": 1001,
+        "window": {
+            "samples": 64,
+            "duration_ms": 3200,
+            "sample_rate_hz": 20,
+            "mean_mg": {"x": -10, "y": 2, "z": 1000},
+            "variance_mg2": {"x": 9, "y": 4, "z": 16},
+            "magnitude_variance_mg2": 12,
+        },
+        "read_failures": 0,
+    }
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(device_payload),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "imu_read", "arguments": {}},
+        )
+    )
+
+    assert calls == [("self.imu.read", {})]
+    payload = json.loads(result.root.content[0].text)
+    assert payload == device_payload
