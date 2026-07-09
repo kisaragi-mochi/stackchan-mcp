@@ -356,7 +356,12 @@ class FollowLedStream:
         self._target_ready = True
         return True
 
-    async def _dispatch_colors(self, colors: list[list[int]]) -> bool:
+    async def _dispatch_colors(
+        self,
+        colors: list[list[int]],
+        *,
+        retry_port_b_reset: bool = True,
+    ) -> bool:
         if self._cfg.target == "base_ring":
             tool_name = "self.led.set_many"
         else:
@@ -384,9 +389,29 @@ class FollowLedStream:
         if failure is not None:
             self._last_error = failure
             if self._cfg.target == "port_b":
+                if self._result_is_unavailable(result):
+                    self._invalidate_device_state()
+                    if retry_port_b_reset:
+                        await self._maybe_reapply_wifi_ps()
+                        if not await self._ensure_target_ready():
+                            return False
+                        return await self._dispatch_colors(
+                            colors,
+                            retry_port_b_reset=False,
+                        )
+                    return False
                 self._target_ready = False
             return False
         return True
+
+    @classmethod
+    def _result_is_unavailable(cls, result: Any) -> bool:
+        if not isinstance(result, dict):
+            return False
+        payload = cls._decode_call_result_payload(result)
+        if payload is None:
+            payload = result
+        return isinstance(payload, dict) and payload.get("available") is False
 
     @classmethod
     def _result_failure_reason(cls, result: Any, operation: str) -> str | None:

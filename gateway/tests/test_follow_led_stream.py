@@ -429,6 +429,101 @@ async def test_device_disconnect_invalidates_then_reinitializes_port_b() -> None
 
 
 @pytest.mark.asyncio
+async def test_port_b_unavailable_dispatch_recovers_and_retries_same_frame() -> None:
+    gateway = _FakeGateway()
+    gateway.esp32.push_reply(
+        _PORT_B_SET_STRIP,
+        {
+            "available": False,
+            "ok": False,
+            "error": "strip not initialized",
+        },
+    )
+    gateway.esp32.push_reply(_PORT_B_SET_STRIP, {"ok": True})
+    follower = FollowLedStream(
+        gateway,
+        FollowLedStreamConfig(
+            url=_url("port-b-unavailable-recovery"),
+            target="port_b",
+            led_count=2,
+        ),
+    )
+    follower._target_ready = True
+    _mark_wifi_ok(follower)
+    colors = [[3, 0, 0], [0, 3, 0]]
+
+    await follower._consume(_FakeWebSocket([_frame(colors=colors)]))
+
+    assert gateway.esp32.calls == [
+        (_PORT_B_SET_STRIP, {"colors": json.dumps(colors)}),
+        (_WIFI_SET_POWER_SAVE, {"mode": "none"}),
+        (_PORT_B_INIT, {"led_count": 2}),
+        (_PORT_B_SET_STRIP, {"colors": json.dumps(colors)}),
+    ]
+    status = follower.status()
+    assert status["frames_sent"] == 1
+    assert status["frames_dropped"] == 0
+    assert status["wifi_ps_apply_result"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_port_b_unavailable_retry_failure_drops_frame_without_extra_retry() -> None:
+    gateway = _FakeGateway()
+    first_colors = [[4, 0, 0], [0, 4, 0]]
+    second_colors = [[0, 0, 4], [4, 4, 4]]
+    gateway.esp32.push_reply(
+        _PORT_B_SET_STRIP,
+        {
+            "available": False,
+            "ok": False,
+            "error": "strip not initialized",
+        },
+    )
+    gateway.esp32.push_reply(
+        _PORT_B_SET_STRIP,
+        {
+            "available": False,
+            "ok": False,
+            "error": "still unavailable",
+        },
+    )
+    gateway.esp32.push_reply(_PORT_B_SET_STRIP, {"ok": True})
+    follower = FollowLedStream(
+        gateway,
+        FollowLedStreamConfig(
+            url=_url("port-b-unavailable-retry-failure"),
+            target="port_b",
+            led_count=2,
+        ),
+    )
+    follower._target_ready = True
+    _mark_wifi_ok(follower)
+
+    await follower._consume(
+        _FakeWebSocket(
+            [
+                _frame(colors=first_colors),
+                _frame(ts=2, colors=second_colors),
+            ]
+        )
+    )
+
+    assert gateway.esp32.calls == [
+        (_PORT_B_SET_STRIP, {"colors": json.dumps(first_colors)}),
+        (_WIFI_SET_POWER_SAVE, {"mode": "none"}),
+        (_PORT_B_INIT, {"led_count": 2}),
+        (_PORT_B_SET_STRIP, {"colors": json.dumps(first_colors)}),
+        (_WIFI_SET_POWER_SAVE, {"mode": "none"}),
+        (_PORT_B_INIT, {"led_count": 2}),
+        (_PORT_B_SET_STRIP, {"colors": json.dumps(second_colors)}),
+    ]
+    status = follower.status()
+    assert status["frames_sent"] == 1
+    assert status["frames_dropped"] == 1
+    assert "still unavailable" in status["last_error"]
+
+
+@pytest.mark.asyncio
 async def test_source_and_frame_filters_skip_silently() -> None:
     gateway = _FakeGateway()
     follower = FollowLedStream(
