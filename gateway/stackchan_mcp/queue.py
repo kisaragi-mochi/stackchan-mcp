@@ -43,6 +43,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -161,13 +162,23 @@ class CommandDropped(Exception):
 class CommandQueue:
     """Asyncio-backed bounded FIFO queue for serialized command dispatch."""
 
-    def __init__(self, capacity: int | None = None) -> None:
+    def __init__(
+        self,
+        capacity: int | None = None,
+        *,
+        event_log_path: Path | None = None,
+    ) -> None:
         self._capacity = capacity if capacity is not None else _capacity_from_env()
         if self._capacity < 1:
             raise ValueError("command queue capacity must be at least 1")
         self._queue: asyncio.Queue[QueueItem] = asyncio.Queue(
             maxsize=self._capacity
         )
+        # Where watchdog events are appended. None falls back to the
+        # event log's own resolution (STACKCHAN_EVENTS_PATH env / default);
+        # the HTTP daemon passes the notify.yml JSONL path so queue events
+        # land in the same file as device events.
+        self._event_log_path = event_log_path
 
     @property
     def capacity(self) -> int:
@@ -322,6 +333,7 @@ class CommandQueue:
                 ts=0,
                 session_id=QUEUE_EVENT_SESSION_ID,
                 action=tool_name,
+                path=self._event_log_path,
             )
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.warning("queue event log persistence failed: %s", exc)

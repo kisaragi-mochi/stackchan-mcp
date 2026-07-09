@@ -230,6 +230,24 @@ async def test_backpressure_drops_incoming_droppable_when_nothing_evictable(
 
 
 @pytest.mark.asyncio
+async def test_queue_events_honor_explicit_event_log_path(tmp_path: Path) -> None:
+    # The HTTP daemon passes the notify.yml JSONL path so queue events land
+    # in the same file as device events; env/default resolution is only the
+    # fallback.
+    events_path = tmp_path / "notify-configured.jsonl"
+    queue = CommandQueue(capacity=2, event_log_path=events_path)
+    queue.enqueue(_make_item("say", request_id=1))
+    queue.enqueue(_make_item("move_head", request_id=2))
+
+    with pytest.raises(CommandDropped):
+        queue.enqueue_with_backpressure(_make_item("set_all_leds", request_id=3))
+
+    events = _read_queue_events(events_path)
+    assert len(events) == 1
+    assert events[0]["subtype"] == "drop_incoming"
+
+
+@pytest.mark.asyncio
 async def test_backpressure_keeps_queue_full_for_non_droppable() -> None:
     queue = CommandQueue(capacity=2)
     queue.enqueue(_make_item("say", request_id=1))
