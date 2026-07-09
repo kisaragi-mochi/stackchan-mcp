@@ -185,6 +185,15 @@ class Gateway:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("follow_pose_stream shutdown failed: %s", exc)
 
+        # Likewise cancel any active LED-stream follower so its WiFi
+        # power-save lease is released before services close.
+        try:
+            from .follow_led_stream import stop_follow as stop_led_follow
+
+            await stop_led_follow()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("follow_led_stream shutdown failed: %s", exc)
+
         self._running = False
         if self._mdns_advertiser:
             try:

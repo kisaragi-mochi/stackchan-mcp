@@ -1414,7 +1414,7 @@ async def test_follow_pose_explicit_smoothing_window_wins_over_user_default(
     monkeypatch.setattr(
         user_defaults.platformdirs,
         "user_config_path",
-        lambda appname: config_dir,
+        lambda appname, **kwargs: config_dir,
     )
     user_defaults._clear_user_defaults_cache_for_tests()
 
@@ -1478,3 +1478,130 @@ async def test_follow_pose_smoothing_window_non_integer_rejected(monkeypatch):
         keyword in response_text
         for keyword in ("error", "invalid", "type", "integer")
     ), f"Expected an error signal in {result.root.content[0].text!r}"
+
+
+def _make_follow_led_fake_gateway(monkeypatch):
+    captured: list = []
+
+    class FakeGateway:
+        pass
+
+    async def fake_start_follow(gateway, cfg):
+        captured.append(cfg)
+        return {
+            "running": True,
+            "target": cfg.target,
+            "max_fps": cfg.max_fps,
+        }
+
+    import stackchan_mcp.follow_led_stream as follow_led_stream
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(follow_led_stream, "start_follow", fake_start_follow)
+    return captured
+
+
+def _follow_led_request(**arguments):
+    arguments.setdefault("action", "start")
+    arguments.setdefault("url", "ws://example.test/led")
+    return CallToolRequest(
+        method="tools/call",
+        params={"name": "stackchan_follow_led_stream", "arguments": arguments},
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_tools_includes_follow_led_stream_schema():
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools = {tool.name: tool for tool in result.root.tools}
+    tool = tools["stackchan_follow_led_stream"]
+    schema = tool.inputSchema
+    assert schema["properties"]["target"]["enum"] == ["base_ring", "port_b"]
+    assert schema["properties"]["led_count"]["maximum"] == 256
+    assert schema["properties"]["max_fps"]["maximum"] == 30
+    assert "kind='event'" in tool.description
+
+
+@pytest.mark.asyncio
+async def test_follow_led_port_b_arguments_propagate(monkeypatch):
+    captured = _make_follow_led_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_led_request(
+            target="port_b",
+            led_count=18,
+            max_fps=24,
+            source_filter="stage",
+            frame_filter="calibrated",
+            reconnect_initial_backoff_s=0.25,
+            reconnect_max_backoff_s=2.0,
+        )
+    )
+
+    assert len(captured) == 1, result.root.content[0].text
+    cfg = captured[0]
+    assert cfg.target == "port_b"
+    assert cfg.led_count == 18
+    assert cfg.max_fps == 24
+    assert cfg.source_filter == "stage"
+    assert cfg.frame_filter == "calibrated"
+    assert cfg.reconnect_initial_backoff_s == 0.25
+    assert cfg.reconnect_max_backoff_s == 2.0
+
+
+@pytest.mark.asyncio
+async def test_follow_led_reads_user_defaults(monkeypatch, tmp_path):
+    import stackchan_mcp.user_defaults as user_defaults
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "user-defaults.toml").write_text(
+        "[tool.stackchan_follow_led_stream]\n"
+        'target = "port_b"\n'
+        "led_count = 7\n"
+        "max_fps = 12\n"
+        'source_filter = "stage"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        user_defaults.platformdirs,
+        "user_config_path",
+        lambda appname, **kwargs: config_dir,
+    )
+    user_defaults._clear_user_defaults_cache_for_tests()
+
+    try:
+        captured = _make_follow_led_fake_gateway(monkeypatch)
+        server = create_server()
+        result = await server.request_handlers[CallToolRequest](
+            _follow_led_request()
+        )
+    finally:
+        user_defaults._clear_user_defaults_cache_for_tests()
+
+    assert len(captured) == 1, result.root.content[0].text
+    assert captured[0].target == "port_b"
+    assert captured[0].led_count == 7
+    assert captured[0].max_fps == 12
+    assert captured[0].source_filter == "stage"
+
+
+@pytest.mark.asyncio
+async def test_follow_led_rejects_bad_target_led_count(monkeypatch):
+    captured = _make_follow_led_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_led_request(target="base_ring", led_count=13)
+    )
+
+    assert captured == []
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is False
+    assert "base_ring" in payload["error"]

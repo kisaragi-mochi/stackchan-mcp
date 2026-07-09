@@ -11,11 +11,18 @@ from typing import Any, Optional
 
 import websockets
 
+from .wifi_power_save import (
+    WIFI_PS_IDLE_MODE as WIFI_PS_IDLE_MODE,
+    WIFI_PS_STREAM_MODE as WIFI_PS_STREAM_MODE,
+    acquire_wifi_power_save,
+    extract_wifi_power_save_result,
+    reapply_wifi_power_save,
+    release_wifi_power_save,
+)
+
 SERVO_YAW_MIN, SERVO_YAW_MAX = -90, 90
 SERVO_PITCH_MIN, SERVO_PITCH_MAX = 5, 85
 SERVO_MAX_SPEED_DPS = 240
-WIFI_PS_STREAM_MODE = "none"
-WIFI_PS_IDLE_MODE = "min_modem"
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -160,11 +167,10 @@ class FollowPoseStream:
         self._stop_event.clear()
         self._connect_state = "init"
         self._wifi_ps_previous = None
-        self._wifi_ps_apply_result = await self._apply_wifi_ps(WIFI_PS_STREAM_MODE)
-        if isinstance(self._wifi_ps_apply_result, dict):
-            previous = self._wifi_ps_apply_result.get("previous")
-            if isinstance(previous, str) and previous and previous != "unknown":
-                self._wifi_ps_previous = previous
+        self._wifi_ps_apply_result = await acquire_wifi_power_save(
+            self._gateway.esp32
+        )
+        self._record_wifi_ps_previous(self._wifi_ps_apply_result)
         self._task = asyncio.create_task(
             self._run(),
             name="stackchan-follow-pose-stream",
@@ -184,14 +190,17 @@ class FollowPoseStream:
                 except Exception as exc:  # pragma: no cover - defensive
                     self._last_error = str(exc)
         finally:
-            restore_mode = (
-                self._wifi_ps_previous
-                if self._wifi_ps_previous
-                and self._wifi_ps_previous != "unknown"
-                else WIFI_PS_IDLE_MODE
+            self._wifi_ps_restore_result = await release_wifi_power_save(
+                self._gateway.esp32
             )
-            self._wifi_ps_restore_result = await self._apply_wifi_ps(restore_mode)
             self._connect_state = "stopped"
+
+    def _record_wifi_ps_previous(self, result: Any) -> None:
+        if not isinstance(result, dict):
+            return
+        previous = result.get("previous")
+        if isinstance(previous, str) and previous and previous != "unknown":
+            self._wifi_ps_previous = previous
 
     def _invalidate_device_state(self) -> None:
         """F6: forget cached device state after a transport / connect
@@ -239,47 +248,14 @@ class FollowPoseStream:
             and self._wifi_ps_apply_result.get("ok")
         ):
             return
-        self._wifi_ps_apply_result = await self._apply_wifi_ps(
-            WIFI_PS_STREAM_MODE
+        self._wifi_ps_apply_result = await reapply_wifi_power_save(
+            self._gateway.esp32
         )
-        if isinstance(self._wifi_ps_apply_result, dict):
-            previous = self._wifi_ps_apply_result.get("previous")
-            if (
-                isinstance(previous, str)
-                and previous
-                and previous != "unknown"
-            ):
-                self._wifi_ps_previous = previous
-
-    async def _apply_wifi_ps(self, mode: str) -> dict[str, Any]:
-        """Best-effort WiFi PS toggle. Never raises."""
-        try:
-            result, error = await self._gateway.esp32.call_tool(
-                "self.wifi.set_power_save", {"mode": mode}
-            )
-        except Exception as exc:
-            return {"ok": False, "error": f"call_raised: {exc}"}
-        if error:
-            return {"ok": False, "error": str(error)}
-        return self._extract_wifi_ps_result(result)
+        self._record_wifi_ps_previous(self._wifi_ps_apply_result)
 
     @staticmethod
     def _extract_wifi_ps_result(result: Any) -> dict[str, Any]:
-        if isinstance(result, dict):
-            if "ok" in result:
-                return {
-                    "ok": bool(result.get("ok")),
-                    "previous": result.get("previous"),
-                    "current": result.get("current"),
-                }
-            payload = FollowPoseStream._decode_call_result_payload(result)
-            if isinstance(payload, dict):
-                return {
-                    "ok": bool(payload.get("ok")),
-                    "previous": payload.get("previous"),
-                    "current": payload.get("current"),
-                }
-        return {"ok": False, "error": "unrecognised result shape"}
+        return extract_wifi_power_save_result(result)
 
     async def _run(self) -> None:
         backoff = self._cfg.reconnect_initial_backoff_s

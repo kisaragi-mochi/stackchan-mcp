@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _CONFIG_APP_NAME = "stackchan-mcp"
 _CONFIG_FILENAME = "user-defaults.toml"
 _FOLLOW_POSE_TOOL = "stackchan_follow_pose_stream"
+_FOLLOW_LED_TOOL = "stackchan_follow_led_stream"
 _SCHEMA_DEFAULTS: dict[str, dict[str, Any]] = {
     _FOLLOW_POSE_TOOL: {
         "smoothing_window": 5,
@@ -29,6 +30,15 @@ _SCHEMA_DEFAULTS: dict[str, dict[str, Any]] = {
         "flip_yaw": 1,
         "flip_pitch": 1,
         "pitch_center_deg": 45,
+    },
+    _FOLLOW_LED_TOOL: {
+        "target": "",
+        "led_count": 12,
+        "max_fps": 30.0,
+        "source_filter": "",
+        "frame_filter": "",
+        "reconnect_initial_backoff_s": 1.5,
+        "reconnect_max_backoff_s": 30.0,
     }
 }
 _USER_DEFAULTS_CACHE: dict[str, dict[str, Any]] | None = None
@@ -71,6 +81,18 @@ def _is_supported_value(tool_name: str, arg_name: str, value: Any) -> bool:
     schema_default = _SCHEMA_DEFAULTS[tool_name][arg_name]
     if not _is_type_compatible(value, schema_default):
         return False
+    if tool_name == _FOLLOW_LED_TOOL:
+        if arg_name == "target":
+            return value in {"base_ring", "port_b"}
+        if arg_name == "led_count":
+            return 1 <= value <= 256
+        if arg_name == "max_fps":
+            return 0 < float(value) <= 30
+        if arg_name in {"source_filter", "frame_filter"}:
+            return value != ""
+        if arg_name in {"reconnect_initial_backoff_s", "reconnect_max_backoff_s"}:
+            return float(value) > 0
+        return True
     if arg_name in {"flip_yaw", "flip_pitch"}:
         return value in (-1, 1)
     if arg_name == "pitch_center_deg":
@@ -206,6 +228,8 @@ def resolve_default(tool_name: str, arg_name: str, schema_default: Any) -> Any:
         return schema_default
 
     value = tool_defaults[arg_name]
+    if schema_default is None:
+        return value
     if not _is_type_compatible(value, schema_default):
         return schema_default
     return value

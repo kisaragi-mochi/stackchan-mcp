@@ -67,6 +67,7 @@ This repository is a monorepo.
 | `say(text, voice?, speaker_id?, reference_audio?)` | Speak text on the device speaker via gateway-side TTS. A supported expression emoji in the text can switch the avatar face in the same call. Default engine: **VOICEVOX** (runs as a separate HTTP service — see [TTS setup](#optional-tts-setup-voicevox)). Requires the `[tts]` extra. | ✅ |
 | `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | Capture a short utterance from the device microphone and transcribe it via gateway-side STT. Default engine: **faster-whisper** (local, MIT) — see [STT setup](#optional-stt-setup-faster-whisper). Optional `motion` feedback can show the `thinking` face or tilt the head up during capture. Requires the `[stt-faster-whisper]` (or `[stt-openai]`) extra and a firmware update with the inbound `listen` wire type. | ✅ |
 | `stackchan_follow_pose_stream(action, url, ...)` | Subscribe to an arbitrary external WebSocket pose-stream and drive the head to follow incoming `yaw` / `pitch` frames 1:1 within the SCS0009 working range. `action` switches between `start` / `stop` / `status`. Includes per-axis flip, pitch-center offset, downsample rate cap, angular-velocity clamp, and reconnect with exponential backoff; the initial pose is seeded from the device so the angular-velocity clamp is anchored at the real servo position from the first frame. The upstream server's protocol (zero-offset commands, source dispatching, transport) is intentionally outside this gateway's scope. | ✅ |
+| `stackchan_follow_led_stream(action, url, target, ...)` | Subscribe to an arbitrary external WebSocket LED-frame stream and forward validated `colors` frames to either the built-in 12-LED base ring or a Port B WS2812 strip. `event` frames bypass the rate gate; `continuous` frames are capped by `max_fps`. | ✅ |
 
 See `gateway/README.md` for full schemas.
 
@@ -435,6 +436,51 @@ Minimal example:
 smoothing_window = 1
 downsample_hz = 20
 max_step_deg = 30
+
+[tool.stackchan_follow_led_stream]
+target = "base_ring"
+max_fps = 30
+source_filter = "stage"
+```
+
+### follow_led_stream WebSocket LED frames
+
+`stackchan_follow_led_stream(action="start", url=..., target=...)` connects
+from the gateway to an external WebSocket URL as a client. It validates incoming
+LED frames and forwards them to one of two targets:
+
+- `target="base_ring"` writes the built-in 12-LED base ring through `set_leds`.
+  Omit `led_count`, or pass `12`.
+- `target="port_b"` writes a WS2812 strip on Port B through
+  `port_b_ws2812_set_strip`. `led_count` is required (`1..256`), and the
+  gateway sends `port_b_ws2812_init` on stream start and after device reconnect.
+
+Frame schema:
+
+```json
+{"ts": 1751234567890, "kind": "event", "colors": [[255, 0, 0], [0, 0, 255]]}
+```
+
+`ts` must be numeric. `kind` is either `event` or `continuous`. `continuous`
+frames are downsampled to `max_fps` (default `30`), while `event` frames bypass
+that gate so beat flashes are not silently dropped. `colors` must be a non-empty
+array of `[r,g,b]` integer triples (`0..255`) and must fit the target capacity.
+Optional string fields `source` and `frame` can be matched with `source_filter`
+and `frame_filter`.
+
+Manual fallback does not need a switching step: when the stream is stopped or
+the upstream WebSocket is disconnected, plain `set_leds` and
+`port_b_ws2812_*` calls still work normally.
+
+TOML overlay example:
+
+```toml
+[tool.stackchan_follow_led_stream]
+target = "port_b"
+led_count = 24
+max_fps = 30
+source_filter = "stage"
+frame_filter = "calibrated"
 ```
 
 ### 4. Optional: TTS setup (VOICEVOX)

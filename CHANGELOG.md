@@ -30,6 +30,12 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Added `stackchan_follow_led_stream`, a gateway-side WebSocket LED-frame
+  subscriber for driving the base ring or a Port B WS2812 strip from external
+  `event` / `continuous` color frames. (#335)
+
 ## [0.15.0] - 2026-07-09
 
 ### Gateway

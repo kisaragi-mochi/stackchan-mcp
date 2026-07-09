@@ -25,3 +25,10 @@
 # flip_yaw = 1            # schema default: 1
 # flip_pitch = 1          # schema default: 1
 # pitch_center_deg = 45   # schema default: 45
+
+[tool.stackchan_follow_led_stream]
+# target = "base_ring"    # "base_ring" or "port_b"; required unless passed per call
+# led_count = 24          # required for target="port_b"; base_ring must be 12
+# max_fps = 30            # schema default: 30
+# source_filter = "stage"
+# frame_filter = "calibrated"

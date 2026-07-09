@@ -340,6 +340,10 @@ def _follow_pose_error(message: str) -> list[TextContent]:
     return _follow_pose_text({"ok": False, "error": message})
 
 
+def _follow_led_error(message: str) -> list[TextContent]:
+    return _follow_pose_text({"ok": False, "error": message})
+
+
 def _is_int_arg(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -353,6 +357,23 @@ def _optional_non_empty_string(
     name: str,
 ) -> tuple[str | None, str | None]:
     value = arguments.get(name)
+    if value is None:
+        return None, None
+    if not isinstance(value, str) or value == "":
+        return None, f"{name} must be a non-empty string or null"
+    return value, None
+
+
+def _resolve_optional_non_empty_string(
+    arguments: dict[str, Any],
+    tool_name: str,
+    name: str,
+) -> tuple[str | None, str | None]:
+    value = (
+        arguments[name]
+        if name in arguments
+        else resolve_default(tool_name, name, None)
+    )
     if value is None:
         return None, None
     if not isinstance(value, str) or value == "":
@@ -473,6 +494,123 @@ async def _handle_follow_pose_stream(
     return _follow_pose_text({"ok": True, **status})
 
 
+async def _handle_follow_led_stream(
+    gateway: Any,
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    from .follow_led_stream import (
+        FollowLedStreamConfig,
+        get_follow_status,
+        start_follow,
+        stop_follow,
+    )
+
+    action = arguments.get("action", "start")
+    if action not in {"start", "stop", "status"}:
+        return _follow_led_error("action must be one of: start, stop, status")
+
+    if action == "status":
+        return _follow_pose_text({"ok": True, **get_follow_status()})
+
+    if action == "stop":
+        status = await stop_follow()
+        return _follow_pose_text({"ok": True, **status})
+
+    url_value = arguments.get("url")
+    if not isinstance(url_value, str) or url_value.strip() == "":
+        return _follow_led_error("url is required when action=start")
+    url = url_value.strip()
+    if not (url.startswith("ws://") or url.startswith("wss://")):
+        return _follow_led_error("url must start with ws:// or wss://")
+
+    tool_name = "stackchan_follow_led_stream"
+
+    target = (
+        arguments["target"]
+        if "target" in arguments
+        else resolve_default(tool_name, "target", None)
+    )
+    if target not in {"base_ring", "port_b"}:
+        return _follow_led_error("target must be 'base_ring' or 'port_b'")
+
+    led_count = (
+        arguments["led_count"]
+        if "led_count" in arguments
+        else resolve_default(tool_name, "led_count", None)
+    )
+    if target == "port_b":
+        if not _is_int_arg(led_count) or not 1 <= led_count <= 256:
+            return _follow_led_error(
+                "led_count is required for port_b and must be an integer in 1..256"
+            )
+    elif led_count is not None:
+        if not _is_int_arg(led_count) or led_count != 12:
+            return _follow_led_error(
+                "led_count for base_ring must be 12 when provided"
+            )
+
+    max_fps = (
+        arguments["max_fps"]
+        if "max_fps" in arguments
+        else resolve_default(tool_name, "max_fps", 30.0)
+    )
+    if not _is_number_arg(max_fps) or not 0 < float(max_fps) <= 30:
+        return _follow_led_error("max_fps must be a number in (0, 30]")
+
+    reconnect_initial_backoff_s = (
+        arguments["reconnect_initial_backoff_s"]
+        if "reconnect_initial_backoff_s" in arguments
+        else resolve_default(tool_name, "reconnect_initial_backoff_s", 1.5)
+    )
+    if (
+        not _is_number_arg(reconnect_initial_backoff_s)
+        or float(reconnect_initial_backoff_s) <= 0
+    ):
+        return _follow_led_error("reconnect_initial_backoff_s must be > 0")
+
+    reconnect_max_backoff_s = (
+        arguments["reconnect_max_backoff_s"]
+        if "reconnect_max_backoff_s" in arguments
+        else resolve_default(tool_name, "reconnect_max_backoff_s", 30.0)
+    )
+    if (
+        not _is_number_arg(reconnect_max_backoff_s)
+        or float(reconnect_max_backoff_s) <= 0
+    ):
+        return _follow_led_error("reconnect_max_backoff_s must be > 0")
+
+    source_filter, error = _resolve_optional_non_empty_string(
+        arguments,
+        tool_name,
+        "source_filter",
+    )
+    if error:
+        return _follow_led_error(error)
+    frame_filter, error = _resolve_optional_non_empty_string(
+        arguments,
+        tool_name,
+        "frame_filter",
+    )
+    if error:
+        return _follow_led_error(error)
+
+    try:
+        cfg = FollowLedStreamConfig(
+            url=url,
+            target=target,
+            led_count=led_count,
+            max_fps=float(max_fps),
+            source_filter=source_filter,
+            frame_filter=frame_filter,
+            reconnect_initial_backoff_s=float(reconnect_initial_backoff_s),
+            reconnect_max_backoff_s=float(reconnect_max_backoff_s),
+        )
+        status = await start_follow(gateway, cfg)
+    except (ValueError, RuntimeError) as exc:
+        return _follow_led_error(str(exc))
+    return _follow_pose_text({"ok": True, **status})
+
+
 async def _dispatch_mcp_tool(
     name: str,
     arguments: dict[str, Any],
@@ -535,6 +673,9 @@ async def _dispatch_mcp_tool(
 
     if name == "stackchan_follow_pose_stream":
         return await _handle_follow_pose_stream(gateway, arguments)
+
+    if name == "stackchan_follow_led_stream":
+        return await _handle_follow_led_stream(gateway, arguments)
 
     if not gateway.esp32.device_connected:
         return [
@@ -1018,6 +1159,91 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                                 "command. Capped at the SCS0009 datasheet "
                                 "working speed (240)."
                             ),
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="stackchan_follow_led_stream",
+                description=(
+                    "Subscribes to an arbitrary upstream WebSocket LED-frame "
+                    "stream using action=start, stop, or status, then forwards "
+                    "validated color frames to either the 12-LED base ring or "
+                    "a Port B WS2812 strip. Frames contain ts, kind, and colors; "
+                    "kind='continuous' is capped by max_fps while kind='event' "
+                    "bypasses the rate gate for beat flashes. Only one LED "
+                    "subscription is active at a time; a new start cancels the "
+                    "previous task. Connections reconnect with exponential "
+                    "backoff and are stopped cleanly when the gateway shuts down."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["start", "stop", "status"],
+                            "default": "start",
+                            "description": "Lifecycle control. Default is 'start'.",
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": (
+                                "WebSocket URL (ws:// or wss://) to subscribe to. "
+                                "Required when action=start."
+                            ),
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["base_ring", "port_b"],
+                            "description": (
+                                "LED target. base_ring uses the built-in 12 LEDs; "
+                                "port_b uses a WS2812 strip on Port B."
+                            ),
+                        },
+                        "led_count": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 256,
+                            "description": (
+                                "Required for target=port_b. For base_ring, omit "
+                                "or pass 12."
+                            ),
+                        },
+                        "max_fps": {
+                            "type": "number",
+                            "default": 30,
+                            "exclusiveMinimum": 0,
+                            "maximum": 30,
+                            "description": (
+                                "Maximum rate for kind='continuous' frames. "
+                                "kind='event' frames bypass this gate."
+                            ),
+                        },
+                        "source_filter": {
+                            "type": "string",
+                            "description": (
+                                "Optional: ignore frames whose top-level 'source' "
+                                "field does not equal this string."
+                            ),
+                        },
+                        "frame_filter": {
+                            "type": "string",
+                            "description": (
+                                "Optional: ignore frames whose top-level 'frame' "
+                                "field does not equal this string."
+                            ),
+                        },
+                        "reconnect_initial_backoff_s": {
+                            "type": "number",
+                            "default": 1.5,
+                            "exclusiveMinimum": 0,
+                            "description": "Initial reconnect backoff in seconds.",
+                        },
+                        "reconnect_max_backoff_s": {
+                            "type": "number",
+                            "default": 30,
+                            "exclusiveMinimum": 0,
+                            "description": "Maximum reconnect backoff in seconds.",
                         },
                     },
                 },
