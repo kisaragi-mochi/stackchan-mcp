@@ -32,6 +32,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include "avatar_images.h"
 #include "avatar_set.h"
 #include "avatar_set_fetcher.h"
+#include "stackchan_imu.h"
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
@@ -529,6 +530,7 @@ private:
     PowerSaveTimer* power_save_timer_;
     ScsBus scs_bus_;
     std::unique_ptr<Py32IoExpander> io_expander_;
+    std::unique_ptr<StackChanImu> imu_;
 
     // Avatar overlay state. avatar_img_ is created lazily on the active LVGL
     // screen because the screen tree (container_, emoji_label_, ...) is built
@@ -2151,6 +2153,15 @@ private:
             },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
+    }
+
+    void InitializeImu() {
+        imu_ = std::make_unique<StackChanImu>(i2c_bus_);
+        esp_err_t err = imu_->Initialize();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "IMU startup initialization failed; self.imu.read will retry: %s",
+                     imu_->last_error().c_str());
+        }
     }
 
     void InitializePortAI2c() {
@@ -5407,6 +5418,87 @@ private:
             });
 
         mcp_server.AddTool(
+            "self.imu.read",
+            "Read one 9-axis IMU snapshot from the on-board BMI270 accelerometer/gyroscope "
+            "and its BMM150 auxiliary magnetometer. Returns physical units (g, degrees per "
+            "second, microtesla), signed raw samples, data-ready flags, monotonic sample time, "
+            "and magnetometer availability. This dedicated read-only tool does not expose the "
+            "shared internal I2C bus.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                if (!imu_) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "IMU driver unavailable");
+                    return root;
+                }
+
+                StackChanImuSnapshot sample;
+                esp_err_t err = imu_->Read(&sample);
+                if (err != ESP_OK) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", imu_->last_error().c_str());
+                    cJSON_AddNumberToObject(root, "error_code", static_cast<int>(err));
+                    ESP_LOGW(TAG, "self.imu.read failed: %s", imu_->last_error().c_str());
+                    return root;
+                }
+
+                auto add_float_axis = [](cJSON* parent, const char* key,
+                                         const StackChanImuAxisFloat& axis) {
+                    cJSON* value = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(value, "x", axis.x);
+                    cJSON_AddNumberToObject(value, "y", axis.y);
+                    cJSON_AddNumberToObject(value, "z", axis.z);
+                    cJSON_AddItemToObject(parent, key, value);
+                };
+                auto add_raw_axis = [](cJSON* parent, const char* key,
+                                       const StackChanImuAxisRaw& axis) {
+                    cJSON* value = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(value, "x", axis.x);
+                    cJSON_AddNumberToObject(value, "y", axis.y);
+                    cJSON_AddNumberToObject(value, "z", axis.z);
+                    cJSON_AddItemToObject(parent, key, value);
+                };
+
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddStringToObject(root, "sensor", "BMI270+BMM150");
+                cJSON_AddNumberToObject(root, "bmi270_i2c_address", sample.bmi270_i2c_address);
+                cJSON_AddNumberToObject(root, "sample_time_us", sample.sample_time_us);
+                cJSON_AddBoolToObject(root, "mag_available", sample.mag_available);
+                add_float_axis(root, "accel_g", sample.accel_g);
+                add_float_axis(root, "gyro_dps", sample.gyro_dps);
+                if (sample.mag_available) {
+                    add_float_axis(root, "mag_ut", sample.mag_ut);
+                } else {
+                    cJSON_AddNullToObject(root, "mag_ut");
+                }
+
+                cJSON* raw = cJSON_CreateObject();
+                add_raw_axis(raw, "accel", sample.accel_raw);
+                add_raw_axis(raw, "gyro", sample.gyro_raw);
+                if (sample.mag_available) {
+                    add_raw_axis(raw, "mag", sample.mag_raw);
+                } else {
+                    cJSON_AddNullToObject(raw, "mag");
+                }
+                cJSON_AddItemToObject(root, "raw", raw);
+
+                cJSON* ready = cJSON_CreateObject();
+                cJSON_AddBoolToObject(ready, "accel", sample.accel_data_ready);
+                cJSON_AddBoolToObject(ready, "gyro", sample.gyro_data_ready);
+                cJSON_AddBoolToObject(ready, "mag", sample.mag_data_ready);
+                cJSON_AddItemToObject(root, "data_ready", ready);
+
+                ESP_LOGD(TAG,
+                         "self.imu.read accel=(%.3f,%.3f,%.3f)g gyro=(%.2f,%.2f,%.2f)dps "
+                         "mag_available=%d",
+                         sample.accel_g.x, sample.accel_g.y, sample.accel_g.z,
+                         sample.gyro_dps.x, sample.gyro_dps.y, sample.gyro_dps.z,
+                         sample.mag_available ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
             "self.robot.set_touch_sensor_enabled",
             "Update the NVS-backed head-touch sensor enable flag. Disabling "
             "takes effect immediately and persists across reboot; subsequent "
@@ -6778,6 +6870,7 @@ public:
         InitializeTouchSettings();
         InitializeSi12tTouch();
         I2cDetect();
+        InitializeImu();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
         // Avatar is shown on-demand via MCP set_avatar command.
         // InitializeAvatar();

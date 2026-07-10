@@ -52,6 +52,7 @@
 | `set_volume(volume)` | スピーカー音量 (0-100) | ✅ |
 | `set_brightness(brightness)` | 画面明るさ (0-100) | ✅ |
 | `move_head(yaw, pitch, speed?)` | 首を動かす (サーボ)。`pitch` は M5Stack 推奨運用レンジ `5..85` に制限される。ファームウェア側のハードクランプ (`0..88`) を使いたい場合は、firmware-side の `set_head_angles` デバイスツールを利用する | ✅ |
+| `read_imu` | 内蔵 BMI270 + BMM150 の 9 軸スナップショットを 1 回取得（加速度 g、角速度 degree/s、磁場 µT、raw 値、data-ready）。磁気センサは近くのサーボ磁石の影響を受ける | ✅ |
 | `get_touch_state` | タッチセンサ状態 (press/release/stroke 等) | ✅ |
 | `get_touch_sensor_enabled` | 頭部タッチ検出が有効かどうかを取得。NVS に保存され、再起動後も維持される | ✅ |
 | `set_touch_sensor_enabled(enabled)` | 頭部タッチ検出を有効/無効化。無効時は firmware 側のローカル動作反応と MCP `stackchan/event` 送信の両方を止め、設定は再起動後も維持される | ✅ |

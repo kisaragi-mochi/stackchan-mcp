@@ -767,6 +767,10 @@ async def _dispatch_mcp_tool(
             "self.robot.get_head_angles",
             {},
         ),
+        "read_imu": (
+            "self.imu.read",
+            {},
+        ),
         "gpio_test": (
             "self.robot.gpio_test",
             {},
@@ -1261,6 +1265,19 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "type": "object",
                     "properties": {},
                 },
+            ),
+            Tool(
+                name="read_imu",
+                description=(
+                    "Read one 9-axis snapshot from the robot's on-board BMI270 "
+                    "accelerometer/gyroscope and BMM150 magnetometer. Returns "
+                    "acceleration in g, angular velocity in degrees per second, "
+                    "magnetic field in microtesla, signed raw values, data-ready "
+                    "flags, and a monotonic sample timestamp. The magnetometer can "
+                    "be distorted by the nearby servos and is best used as an "
+                    "availability/change signal unless calibrated in place."
+                ),
+                inputSchema={"type": "object", "properties": {}},
             ),
             Tool(
                 name="gpio_test",
