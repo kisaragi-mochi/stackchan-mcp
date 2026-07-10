@@ -37,6 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f firmware/build/merged-binary.bin
+          test -f firmware/build/xiaozhi.bin
           test -f firmware/releases/v2.2.6_stackchan.zip
 
       - name: Upload firmware artifacts
@@ -46,6 +47,7 @@ jobs:
           retention-days: 7
           path: |
             firmware/build/merged-binary.bin
+            firmware/build/xiaozhi.bin
             firmware/releases/v2.2.6_stackchan.zip
 
   firmware-host-test:
