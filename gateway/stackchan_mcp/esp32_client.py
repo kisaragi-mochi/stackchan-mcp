@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 # Timeout for waiting for ESP32 responses
 RESPONSE_TIMEOUT = 10.0
+WEBSOCKET_PING_INTERVAL_S = 20
+WEBSOCKET_PING_TIMEOUT_S = 20
 
 ToolCall = tuple[str, dict[str, Any]]
 ToolCallResult = tuple[Any, dict[str, Any] | None]
@@ -72,6 +74,25 @@ def _retrieve_future_exception(future: asyncio.Future[Any]) -> None:
     """Mark a completed Future exception as observed, if it has one."""
     if future.done() and not future.cancelled():
         future.exception()
+
+
+def _close_frame_fields(close_frame: Any | None) -> tuple[int | None, str | None]:
+    """Return log-friendly code/reason fields for a WebSocket close frame."""
+    if close_frame is None:
+        return None, None
+    return getattr(close_frame, "code", None), getattr(close_frame, "reason", None)
+
+
+def _format_elapsed_s(started_at: float | None, now: float) -> str:
+    """Format elapsed monotonic seconds for stable, compact log output."""
+    if started_at is None:
+        return "None"
+    return f"{now - started_at:.3f}"
+
+
+def _monotonic() -> float:
+    """Return monotonic time for connection observability."""
+    return time.monotonic()
 
 
 class ESP32Connection:
@@ -509,12 +530,21 @@ class ESP32Manager:
                 "Device-driven listen capture enabled (audio hook %s)",
                 audio_hook_url,
             )
-        logger.info("ESP32 WebSocket server starting on ws://%s:%d", host, port)
+        logger.info(
+            "ESP32 WebSocket server starting on ws://%s:%d "
+            "ping_interval=%s ping_timeout=%s",
+            host,
+            port,
+            WEBSOCKET_PING_INTERVAL_S,
+            WEBSOCKET_PING_TIMEOUT_S,
+        )
         self._server = await websockets.serve(
             self._handler,
             host,
             port,
             process_request=self._check_auth,
+            ping_interval=WEBSOCKET_PING_INTERVAL_S,
+            ping_timeout=WEBSOCKET_PING_TIMEOUT_S,
         )
 
     async def stop(self) -> None:
@@ -565,9 +595,12 @@ class ESP32Manager:
 
         connection = ESP32Connection(ws, session_id)
         connection.device_id = device_id
+        connected_at = _monotonic()
+        last_frame_received_at: float | None = None
 
         try:
             async for message in ws:
+                last_frame_received_at = _monotonic()
                 if isinstance(message, bytes):
                     # Binary = audio frame. Forward to the audio_stream
                     # module which buffers it for STT capture (Issue
@@ -719,8 +752,23 @@ class ESP32Manager:
                 else:
                     logger.debug("ESP32 message type=%s (ignored)", msg_type)
 
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("ESP32 disconnected: device=%s", device_id)
+        except websockets.exceptions.ConnectionClosed as exc:
+            disconnected_at = _monotonic()
+            rcvd_code, rcvd_reason = _close_frame_fields(exc.rcvd)
+            sent_code, sent_reason = _close_frame_fields(exc.sent)
+            logger.info(
+                "ESP32 disconnected: device=%s close_class=%s "
+                "rcvd_code=%s rcvd_reason=%r sent_code=%s sent_reason=%r "
+                "last_frame_age_s=%s lifetime_s=%s",
+                device_id,
+                exc.__class__.__name__,
+                rcvd_code,
+                rcvd_reason,
+                sent_code,
+                sent_reason,
+                _format_elapsed_s(last_frame_received_at, disconnected_at),
+                _format_elapsed_s(connected_at, disconnected_at),
+            )
         finally:
             # If the device disconnected mid-capture, drop any partial
             # buffer rather than letting it leak into the next
