@@ -72,6 +72,24 @@ def test_resolve_default_uses_valid_tool_overlay(user_defaults_path):
     )
 
 
+def test_resolve_default_accepts_follow_led_color_order(user_defaults_path):
+    user_defaults_path.parent.mkdir(parents=True)
+    user_defaults_path.write_text(
+        "[tool.stackchan_follow_led_stream]\n"
+        'color_order = "rgb"\n',
+        encoding="utf-8",
+    )
+
+    assert (
+        user_defaults.resolve_default(
+            "stackchan_follow_led_stream",
+            "color_order",
+            "grb",
+        )
+        == "rgb"
+    )
+
+
 def test_resolve_default_warns_and_falls_back_for_invalid_value(
     user_defaults_path,
     caplog,
@@ -97,3 +115,29 @@ def test_resolve_default_warns_and_falls_back_for_invalid_value(
         in caplog.text
     )
     assert "falling back to schema default (5)" in caplog.text
+
+
+def test_resolve_default_rejects_invalid_follow_led_color_order(
+    user_defaults_path,
+    caplog,
+):
+    user_defaults_path.parent.mkdir(parents=True)
+    user_defaults_path.write_text(
+        "[tool.stackchan_follow_led_stream]\n"
+        'color_order = "bgr"\n',
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="stackchan_mcp.user_defaults")
+
+    assert (
+        user_defaults.resolve_default(
+            "stackchan_follow_led_stream",
+            "color_order",
+            "grb",
+        )
+        == "grb"
+    )
+    assert (
+        "invalid value for tool.stackchan_follow_led_stream.color_order"
+        in caplog.text
+    )

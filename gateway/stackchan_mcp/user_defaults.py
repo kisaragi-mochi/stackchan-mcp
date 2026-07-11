@@ -35,6 +35,7 @@ _SCHEMA_DEFAULTS: dict[str, dict[str, Any]] = {
         "target": "",
         "led_count": 12,
         "max_fps": 30.0,
+        "color_order": "grb",
         "source_filter": "",
         "frame_filter": "",
         "reconnect_initial_backoff_s": 1.5,
@@ -88,6 +89,8 @@ def _is_supported_value(tool_name: str, arg_name: str, value: Any) -> bool:
             return 1 <= value <= 256
         if arg_name == "max_fps":
             return 0 < float(value) <= 30
+        if arg_name == "color_order":
+            return value in {"grb", "rgb"}
         if arg_name in {"source_filter", "frame_filter"}:
             return value != ""
         if arg_name in {"reconnect_initial_backoff_s", "reconnect_max_backoff_s"}:

@@ -32,6 +32,9 @@ documented-only.
 
 ### Gateway
 
+- Added a `color_order` option (`grb` default, `rgb`) for Port B/C WS2812
+  gateway tools and `stackchan_follow_led_stream`, allowing RGB-wired LEDs to
+  render correct colors by swapping R/G in the gateway before relay. (#343)
 - Added `stackchan_follow_led_stream`, a gateway-side WebSocket LED-frame
   subscriber for driving the base ring or a Port B WS2812 strip from external
   `event` / `continuous` color frames. (#335)

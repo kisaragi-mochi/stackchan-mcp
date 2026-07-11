@@ -34,6 +34,14 @@ _SUPPORTED_EVENT_METHODS = {STACKCHAN_EVENT_METHOD, CHANNEL_NOTIFICATION_METHOD}
 FOLLOW_LED_TARGETS = {"base_ring", "port_b", "port_c"}
 FOLLOW_LED_WS2812_TARGETS = {"port_b", "port_c"}
 FOLLOW_LED_TARGET_ERROR = "target must be 'base_ring', 'port_b', or 'port_c'"
+WS2812_COLOR_ORDERS = {"grb", "rgb"}
+WS2812_COLOR_ORDER_ERROR = "color_order must be 'grb' or 'rgb'"
+# Process-local init state. Re-running a Port B/C WS2812 init call updates the
+# selected order for that port; no persistence is needed across gateway restarts.
+_WS2812_COLOR_ORDER_BY_PORT = {
+    "port_b": "grb",
+    "port_c": "grb",
+}
 STACKCHAN_EVENT_INSTRUCTIONS = (
     "Stack-chan physical events arrive as server-initiated "
     "notifications with method='stackchan/event'. Params include "
@@ -69,6 +77,74 @@ SPEED_DESCRIPTION = """speed (optional): How fast to move the head.
 
 _active_session: Any | None = None
 _active_sessions: dict[int, Any] = {}
+
+
+def _reset_ws2812_color_orders_for_tests() -> None:
+    _WS2812_COLOR_ORDER_BY_PORT.update({"port_b": "grb", "port_c": "grb"})
+
+
+def _set_ws2812_color_order(port: str, color_order: str) -> None:
+    if port not in _WS2812_COLOR_ORDER_BY_PORT:
+        raise ValueError(f"unsupported WS2812 port: {port}")
+    if color_order not in WS2812_COLOR_ORDERS:
+        raise ValueError(WS2812_COLOR_ORDER_ERROR)
+    _WS2812_COLOR_ORDER_BY_PORT[port] = color_order
+
+
+def _get_ws2812_color_order(port: str) -> str:
+    return _WS2812_COLOR_ORDER_BY_PORT.get(port, "grb")
+
+
+def _remap_ws2812_pixel_args_for_color_order(
+    color_order: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    if color_order != "rgb":
+        return arguments
+    if "r" not in arguments or "g" not in arguments:
+        return arguments
+    return {
+        **arguments,
+        "r": arguments["g"],
+        "g": arguments["r"],
+    }
+
+
+def _remap_ws2812_pixel_args_for_device(
+    port: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    return _remap_ws2812_pixel_args_for_color_order(
+        _get_ws2812_color_order(port),
+        arguments,
+    )
+
+
+def _remap_ws2812_colors_for_color_order(
+    color_order: str,
+    colors: Any,
+) -> Any:
+    if color_order != "rgb":
+        return colors
+    if not isinstance(colors, list):
+        return colors
+    remapped: list[Any] = []
+    for color in colors:
+        if isinstance(color, list) and len(color) == 3:
+            remapped.append([color[1], color[0], color[2]])
+        else:
+            remapped.append(color)
+    return remapped
+
+
+def _remap_ws2812_colors_for_device(
+    port: str,
+    colors: Any,
+) -> Any:
+    return _remap_ws2812_colors_for_color_order(
+        _get_ws2812_color_order(port),
+        colors,
+    )
 
 
 class StackChanEventNotification(
@@ -553,6 +629,18 @@ async def _handle_follow_led_stream(
                 "led_count for base_ring must be 12 when provided"
             )
 
+    color_order = (
+        arguments["color_order"]
+        if "color_order" in arguments
+        else resolve_default(tool_name, "color_order", "grb")
+    )
+    if color_order not in WS2812_COLOR_ORDERS:
+        return _follow_led_error(WS2812_COLOR_ORDER_ERROR)
+    if target == "base_ring" and color_order != "grb":
+        return _follow_led_error(
+            "color_order is only supported for target=port_b or target=port_c"
+        )
+
     max_fps = (
         arguments["max_fps"]
         if "max_fps" in arguments
@@ -604,6 +692,7 @@ async def _handle_follow_led_stream(
             target=target,
             led_count=led_count,
             max_fps=float(max_fps),
+            color_order=color_order,
             source_filter=source_filter,
             frame_filter=frame_filter,
             reconnect_initial_backoff_s=float(reconnect_initial_backoff_s),
@@ -745,6 +834,44 @@ async def _dispatch_mcp_tool(
         arguments = {"yaw": yaw_val, "pitch": pitch_val}
         if speed_dps is not None:
             arguments["speed_dps"] = speed_dps
+
+    ws2812_port_by_init_tool = {
+        "port_b_ws2812_init": "port_b",
+        "port_c_ws2812_init": "port_c",
+    }
+    ws2812_port_by_set_pixel_tool = {
+        "port_b_ws2812_set_pixel": "port_b",
+        "port_c_ws2812_set_pixel": "port_c",
+    }
+    ws2812_port_by_set_strip_tool = {
+        "port_b_ws2812_set_strip": "port_b",
+        "port_c_ws2812_set_strip": "port_c",
+    }
+    if name in ws2812_port_by_init_tool:
+        color_order = arguments.get("color_order", "grb")
+        if color_order not in WS2812_COLOR_ORDERS:
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"error": WS2812_COLOR_ORDER_ERROR}),
+                )
+            ]
+        _set_ws2812_color_order(ws2812_port_by_init_tool[name], color_order)
+        arguments = {"led_count": arguments.get("led_count")}
+    elif name in ws2812_port_by_set_pixel_tool:
+        arguments = _remap_ws2812_pixel_args_for_device(
+            ws2812_port_by_set_pixel_tool[name],
+            arguments,
+        )
+    elif name in ws2812_port_by_set_strip_tool:
+        port = ws2812_port_by_set_strip_tool[name]
+        arguments = {
+            **arguments,
+            "colors": _remap_ws2812_colors_for_device(
+                port,
+                arguments.get("colors", []),
+            ),
+        }
 
     tool_map: dict[str, tuple[str, dict[str, Any]]] = {
         "get_device_info": (
@@ -1235,6 +1362,17 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                                 "For base_ring, omit or pass 12."
                             ),
                         },
+                        "color_order": {
+                            "type": "string",
+                            "enum": ["grb", "rgb"],
+                            "default": "grb",
+                            "description": (
+                                "WS2812 strip color order for target=port_b or "
+                                "target=port_c. Use rgb for RGB-wired LEDs; the "
+                                "gateway swaps R/G before forwarding to the "
+                                "firmware. base_ring only supports grb."
+                            ),
+                        },
                         "max_fps": {
                             "type": "number",
                             "default": 30,
@@ -1714,6 +1852,17 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "minimum": 1,
                             "maximum": 256,
                         },
+                        "color_order": {
+                            "type": "string",
+                            "enum": ["grb", "rgb"],
+                            "default": "grb",
+                            "description": (
+                                "Logical LED color order. Use grb for standard "
+                                "WS2812/NeoPixel strips, or rgb for RGB-wired "
+                                "LEDs; the gateway swaps R/G before forwarding "
+                                "colors to the firmware."
+                            ),
+                        },
                     },
                     "required": ["led_count"],
                 },
@@ -1846,6 +1995,17 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "description": "Number of LEDs in the strip (1..256).",
                             "minimum": 1,
                             "maximum": 256,
+                        },
+                        "color_order": {
+                            "type": "string",
+                            "enum": ["grb", "rgb"],
+                            "default": "grb",
+                            "description": (
+                                "Logical LED color order. Use grb for standard "
+                                "WS2812/NeoPixel strips, or rgb for RGB-wired "
+                                "LEDs; the gateway swaps R/G before forwarding "
+                                "colors to the firmware."
+                            ),
                         },
                     },
                     "required": ["led_count"],

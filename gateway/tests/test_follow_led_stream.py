@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 
 from stackchan_mcp import follow_led_stream as fls
+from stackchan_mcp import stdio_server
 from stackchan_mcp import wifi_power_save
 from stackchan_mcp.follow_led_stream import (
     FollowLedStream,
@@ -33,6 +34,8 @@ _PORT_WS2812_SET_STRIP = {
 
 
 class _FakeESP32:
+    device_connected = True
+
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._replies: dict[str, list[tuple[Any, Any]]] = {}
@@ -151,9 +154,11 @@ def _mark_wifi_ok(follower: FollowLedStream) -> None:
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_singleton() -> Any:
     await fls.stop_follow()
+    stdio_server._reset_ws2812_color_orders_for_tests()
     wifi_power_save._clear_for_tests()
     yield
     await fls.stop_follow()
+    stdio_server._reset_ws2812_color_orders_for_tests()
     wifi_power_save._clear_for_tests()
 
 
@@ -174,6 +179,15 @@ def test_config_validation_accepts_expected_target_led_count_pairs() -> None:
         .capacity
         == 18
     )
+    assert (
+        FollowLedStreamConfig(
+            url=_url("port-b-rgb"),
+            target="port_b",
+            led_count=18,
+            color_order="rgb",
+        ).color_order
+        == "rgb"
+    )
 
 
 @pytest.mark.parametrize(
@@ -188,6 +202,17 @@ def test_config_validation_accepts_expected_target_led_count_pairs() -> None:
         {"url": _url("port-c-zero"), "target": "port_c", "led_count": 0},
         {"url": _url("port-too-many"), "target": "port_b", "led_count": 257},
         {"url": _url("port-c-too-many"), "target": "port_c", "led_count": 257},
+        {
+            "url": _url("base-rgb"),
+            "target": "base_ring",
+            "color_order": "rgb",
+        },
+        {
+            "url": _url("bad-color-order"),
+            "target": "port_b",
+            "led_count": 1,
+            "color_order": "bgr",
+        },
         {"url": _url("fps-zero"), "target": "base_ring", "max_fps": 0},
         {"url": _url("fps-too-high"), "target": "base_ring", "max_fps": 31},
     ],
@@ -195,6 +220,15 @@ def test_config_validation_accepts_expected_target_led_count_pairs() -> None:
 def test_config_validation_rejects_invalid_values(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         FollowLedStreamConfig(**kwargs)
+
+
+def test_config_validation_rejects_base_ring_color_order_with_clear_error() -> None:
+    with pytest.raises(ValueError, match="color_order is only supported"):
+        FollowLedStreamConfig(
+            url=_url("base-rgb-clear"),
+            target="base_ring",
+            color_order="rgb",
+        )
 
 
 @pytest.mark.asyncio
@@ -309,6 +343,76 @@ async def test_ws2812_dispatch_uses_json_encoded_set_strip_payload(
         (_PORT_WS2812_SET_STRIP[target], {"colors": json.dumps(colors)})
     ]
     assert follower.status()["frames_sent"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["port_b", "port_c"])
+async def test_ws2812_dispatch_rgb_color_order_swaps_channels(
+    target: str,
+) -> None:
+    gateway = _FakeGateway()
+    follower = FollowLedStream(
+        gateway,
+        FollowLedStreamConfig(
+            url=_url(f"{target}-rgb-dispatch"),
+            target=target,
+            led_count=3,
+            color_order="rgb",
+        ),
+    )
+    _mark_wifi_ok(follower)
+    colors = [[255, 0, 64], [0, 16, 32]]
+
+    await follower._consume(_FakeWebSocket([_frame(colors=colors)]))
+
+    assert gateway.esp32.calls == [
+        (_PORT_WS2812_INIT[target], {"led_count": 3}),
+        (
+            _PORT_WS2812_SET_STRIP[target],
+            {"colors": json.dumps([[0, 255, 64], [16, 0, 32]])},
+        ),
+    ]
+    assert stdio_server._get_ws2812_color_order(target) == "rgb"
+    assert follower.status()["frames_sent"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["port_b", "port_c"])
+async def test_ws2812_stream_then_tool_map_uses_single_rgb_swap(
+    target: str,
+) -> None:
+    gateway = _FakeGateway()
+    follower = FollowLedStream(
+        gateway,
+        FollowLedStreamConfig(
+            url=_url(f"{target}-rgb-single-swap"),
+            target=target,
+            led_count=1,
+            color_order="rgb",
+        ),
+    )
+    _mark_wifi_ok(follower)
+
+    await follower._consume(
+        _FakeWebSocket([_frame(colors=[[255, 0, 64]])])
+    )
+    await stdio_server._dispatch_mcp_tool(
+        f"{target}_ws2812_set_pixel",
+        {"index": 0, "r": 255, "g": 0, "b": 64},
+        gateway,
+    )
+
+    assert gateway.esp32.calls == [
+        (_PORT_WS2812_INIT[target], {"led_count": 1}),
+        (
+            _PORT_WS2812_SET_STRIP[target],
+            {"colors": json.dumps([[0, 255, 64]])},
+        ),
+        (
+            f"self.{target}.ws2812.set_pixel",
+            {"index": 0, "r": 0, "g": 255, "b": 64},
+        ),
+    ]
 
 
 @pytest.mark.asyncio
