@@ -243,6 +243,7 @@ async def test_auth_rejection(manager):
         ("self.robot.set_head_angles", "servo"),
         ("self.led.set_many", "led"),
         ("self.port_b.ws2812.set_strip", "port_b"),
+        ("self.port_c.ws2812.set_strip", "port_c"),
         ("self.display.set_avatar", "avatar"),
         ("self.screen.set_brightness", "display"),
         ("self.audio_speaker.set_volume", "audio"),

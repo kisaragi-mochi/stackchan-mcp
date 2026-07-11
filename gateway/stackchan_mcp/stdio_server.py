@@ -31,6 +31,9 @@ STACKCHAN_EVENT_METHOD = "stackchan/event"
 CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel"
 CHANNEL_CAPABILITY = "claude/channel"
 _SUPPORTED_EVENT_METHODS = {STACKCHAN_EVENT_METHOD, CHANNEL_NOTIFICATION_METHOD}
+FOLLOW_LED_TARGETS = {"base_ring", "port_b", "port_c"}
+FOLLOW_LED_WS2812_TARGETS = {"port_b", "port_c"}
+FOLLOW_LED_TARGET_ERROR = "target must be 'base_ring', 'port_b', or 'port_c'"
 STACKCHAN_EVENT_INSTRUCTIONS = (
     "Stack-chan physical events arrive as server-initiated "
     "notifications with method='stackchan/event'. Params include "
@@ -530,18 +533,19 @@ async def _handle_follow_led_stream(
         if "target" in arguments
         else resolve_default(tool_name, "target", None)
     )
-    if target not in {"base_ring", "port_b"}:
-        return _follow_led_error("target must be 'base_ring' or 'port_b'")
+    if target not in FOLLOW_LED_TARGETS:
+        return _follow_led_error(FOLLOW_LED_TARGET_ERROR)
 
     led_count = (
         arguments["led_count"]
         if "led_count" in arguments
         else resolve_default(tool_name, "led_count", None)
     )
-    if target == "port_b":
+    if target in FOLLOW_LED_WS2812_TARGETS:
         if not _is_int_arg(led_count) or not 1 <= led_count <= 256:
             return _follow_led_error(
-                "led_count is required for port_b and must be an integer in 1..256"
+                "led_count is required for port_b/port_c and must be an "
+                "integer in 1..256"
             )
     elif led_count is not None:
         if not _is_int_arg(led_count) or led_count != 12:
@@ -859,6 +863,26 @@ async def _dispatch_mcp_tool(
             "self.port_b.ws2812.clear",
             {},
         ),
+        "port_c_ws2812_init": (
+            "self.port_c.ws2812.init",
+            arguments,
+        ),
+        "port_c_ws2812_set_pixel": (
+            "self.port_c.ws2812.set_pixel",
+            arguments,
+        ),
+        "port_c_ws2812_set_strip": (
+            "self.port_c.ws2812.set_strip",
+            {"colors": json.dumps(arguments.get("colors", []))},
+        ),
+        "port_c_ws2812_refresh": (
+            "self.port_c.ws2812.refresh",
+            {},
+        ),
+        "port_c_ws2812_clear": (
+            "self.port_c.ws2812.clear",
+            {},
+        ),
         "i2c_scan": (
             "self.i2c.scan",
             {},
@@ -1169,7 +1193,8 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "Subscribes to an arbitrary upstream WebSocket LED-frame "
                     "stream using action=start, stop, or status, then forwards "
                     "validated color frames to either the 12-LED base ring or "
-                    "a Port B WS2812 strip. Frames contain ts, kind, and colors; "
+                    "a Port B or Port C WS2812 strip. Frames contain ts, kind, "
+                    "and colors; "
                     "kind='continuous' is capped by max_fps while kind='event' "
                     "bypasses the rate gate for beat flashes. Only one LED "
                     "subscription is active at a time; a new start cancels the "
@@ -1194,10 +1219,11 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                         "target": {
                             "type": "string",
-                            "enum": ["base_ring", "port_b"],
+                            "enum": ["base_ring", "port_b", "port_c"],
                             "description": (
                                 "LED target. base_ring uses the built-in 12 LEDs; "
-                                "port_b uses a WS2812 strip on Port B."
+                                "port_b uses a WS2812 strip on Port B; port_c "
+                                "uses a WS2812 strip on Port C."
                             ),
                         },
                         "led_count": {
@@ -1205,8 +1231,8 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "minimum": 1,
                             "maximum": 256,
                             "description": (
-                                "Required for target=port_b. For base_ring, omit "
-                                "or pass 12."
+                                "Required for target=port_b or target=port_c. "
+                                "For base_ring, omit or pass 12."
                             ),
                         },
                         "max_fps": {
@@ -1796,6 +1822,139 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "refresh immediately on CoreS3 HY2.0-4P digital OUTPUT "
                     "GPIO 9. Call port_b_ws2812_init first. This clears the "
                     "driver's per-pixel buffer. Port B outputs 3.3 V CMOS "
+                    "data; older strict 5 V WS2812 variants may require a "
+                    "level shifter."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="port_c_ws2812_init",
+                description=(
+                    "Initialize a WS2812-compatible LED strip connected to "
+                    "Port C (CoreS3 HY2.0-4P digital OUTPUT, GPIO 17). "
+                    "led_count is the number of LEDs in the strip (1..256). "
+                    "Repeated calls with the same led_count are no-ops; a "
+                    "different led_count rebuilds the strip handle. Port C "
+                    "outputs 3.3 V CMOS data on GPIO 17; older strict 5 V "
+                    "WS2812 variants may require a level shifter."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "led_count": {
+                            "type": "integer",
+                            "description": "Number of LEDs in the strip (1..256).",
+                            "minimum": 1,
+                            "maximum": 256,
+                        },
+                    },
+                    "required": ["led_count"],
+                },
+            ),
+            Tool(
+                name="port_c_ws2812_set_pixel",
+                description=(
+                    "Set one LED in the Port C WS2812 strip buffer. Call "
+                    "port_c_ws2812_init first. index is 0..255, with the "
+                    "effective range bounded by led_count. r, g, and b are "
+                    "0..255. By default the color is buffered only; pass "
+                    "refresh=true to latch it immediately, or call "
+                    "port_c_ws2812_refresh after several buffered updates. "
+                    "Port C outputs 3.3 V CMOS data on GPIO 17; older strict "
+                    "5 V WS2812 variants may require a level shifter."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "index": {
+                            "type": "integer",
+                            "description": "LED index (0..255).",
+                            "minimum": 0,
+                            "maximum": 255,
+                        },
+                        "r": {
+                            "type": "integer",
+                            "description": "Red 0..255.",
+                            "minimum": 0,
+                            "maximum": 255,
+                        },
+                        "g": {
+                            "type": "integer",
+                            "description": "Green 0..255.",
+                            "minimum": 0,
+                            "maximum": 255,
+                        },
+                        "b": {
+                            "type": "integer",
+                            "description": "Blue 0..255.",
+                            "minimum": 0,
+                            "maximum": 255,
+                        },
+                        "refresh": {
+                            "type": "boolean",
+                            "description": "True to latch the update immediately.",
+                            "default": False,
+                        },
+                    },
+                    "required": ["index", "r", "g", "b"],
+                },
+            ),
+            Tool(
+                name="port_c_ws2812_set_strip",
+                description=(
+                    "Set multiple LEDs in the Port C WS2812 strip and refresh "
+                    "immediately. Call port_c_ws2812_init first. colors is an "
+                    "array of [r,g,b] integer triples applied from LED index 0; "
+                    "up to led_count entries are written, extras are ignored, "
+                    "and missing trailing entries preserve the previous buffer. "
+                    "The firmware validates the full payload before writing. "
+                    "Port C outputs 3.3 V CMOS data on GPIO 17; older strict "
+                    "5 V WS2812 variants may require a level shifter."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "colors": {
+                            "type": "array",
+                            "description": (
+                                "Array of [r,g,b] triples, each integer 0..255."
+                            ),
+                            "items": {
+                                "type": "array",
+                                "items": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 255,
+                                },
+                                "minItems": 3,
+                                "maxItems": 3,
+                            },
+                            "minItems": 1,
+                            "maxItems": 256,
+                        },
+                    },
+                    "required": ["colors"],
+                },
+            ),
+            Tool(
+                name="port_c_ws2812_refresh",
+                description=(
+                    "Refresh the Port C WS2812 strip, latching the current "
+                    "buffered colors out on CoreS3 HY2.0-4P digital OUTPUT "
+                    "GPIO 17. Call port_c_ws2812_init first. Use this after "
+                    "one or more port_c_ws2812_set_pixel calls made with "
+                    "refresh=false. Port C outputs 3.3 V CMOS data; older "
+                    "strict 5 V WS2812 variants may require a level shifter."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="port_c_ws2812_clear",
+                description=(
+                    "Turn off every LED in the Port C WS2812 strip and "
+                    "refresh immediately on CoreS3 HY2.0-4P digital OUTPUT "
+                    "GPIO 17. Call port_c_ws2812_init first. This clears the "
+                    "driver's per-pixel buffer. Port C outputs 3.3 V CMOS "
                     "data; older strict 5 V WS2812 variants may require a "
                     "level shifter."
                 ),

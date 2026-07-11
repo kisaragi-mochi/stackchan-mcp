@@ -17,9 +17,15 @@ from .wifi_power_save import (
 )
 
 BASE_RING_LED_COUNT = 12
-PORT_B_MIN_LED_COUNT = 1
-PORT_B_MAX_LED_COUNT = 256
+WS2812_MIN_LED_COUNT = 1
+WS2812_MAX_LED_COUNT = 256
 LED_STREAM_MAX_FPS = 30.0
+WS2812_TARGET_TOOL_PREFIXES = {
+    "port_b": "self.port_b.ws2812",
+    "port_c": "self.port_c.ws2812",
+}
+LED_TARGETS = {"base_ring", *WS2812_TARGET_TOOL_PREFIXES}
+LED_TARGET_ERROR = "target must be 'base_ring', 'port_b', or 'port_c'"
 
 
 def _is_finite_number(value: Any) -> bool:
@@ -49,8 +55,8 @@ class FollowLedStreamConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.url, str) or self.url.strip() == "":
             raise ValueError("url is required")
-        if self.target not in {"base_ring", "port_b"}:
-            raise ValueError("target must be 'base_ring' or 'port_b'")
+        if self.target not in LED_TARGETS:
+            raise ValueError(LED_TARGET_ERROR)
         if not _is_finite_number(self.max_fps) or not 0 < self.max_fps <= 30:
             raise ValueError("max_fps must be a number in (0, 30]")
         if self.target == "base_ring":
@@ -60,9 +66,11 @@ class FollowLedStreamConfig:
             if (
                 not isinstance(self.led_count, int)
                 or isinstance(self.led_count, bool)
-                or not PORT_B_MIN_LED_COUNT <= self.led_count <= PORT_B_MAX_LED_COUNT
+                or not WS2812_MIN_LED_COUNT <= self.led_count <= WS2812_MAX_LED_COUNT
             ):
-                raise ValueError("led_count is required for port_b and must be in 1..256")
+                raise ValueError(
+                    "led_count is required for port_b/port_c and must be in 1..256"
+                )
         if self.reconnect_initial_backoff_s <= 0:
             raise ValueError("reconnect_initial_backoff_s must be > 0")
         if self.reconnect_max_backoff_s <= 0:
@@ -131,9 +139,12 @@ class FollowLedStream:
         )
         self._record_wifi_ps_previous(self._wifi_ps_apply_result)
         try:
-            if self._cfg.target == "port_b":
+            if self._is_ws2812_target():
                 if not await self._ensure_target_ready():
-                    raise RuntimeError(self._last_error or "port_b WS2812 init failed")
+                    raise RuntimeError(
+                        self._last_error
+                        or f"{self._cfg.target} WS2812 init failed"
+                    )
             self._task = asyncio.create_task(
                 self._run(),
                 name="stackchan-follow-led-stream",
@@ -163,6 +174,12 @@ class FollowLedStream:
             )
             self._connect_state = "stopped"
 
+    def _is_ws2812_target(self) -> bool:
+        return self._cfg.target in WS2812_TARGET_TOOL_PREFIXES
+
+    def _ws2812_tool_name(self, command: str) -> str:
+        return f"{WS2812_TARGET_TOOL_PREFIXES[self._cfg.target]}.{command}"
+
     def _record_wifi_ps_previous(self, result: Any) -> None:
         if not isinstance(result, dict):
             return
@@ -171,7 +188,7 @@ class FollowLedStream:
             self._wifi_ps_previous = previous
 
     def _invalidate_device_state(self) -> None:
-        if self._cfg.target == "port_b":
+        if self._is_ws2812_target():
             self._target_ready = False
         if isinstance(self._wifi_ps_apply_result, dict):
             self._wifi_ps_apply_result = {
@@ -326,16 +343,17 @@ class FollowLedStream:
         return colors
 
     async def _ensure_target_ready(self) -> bool:
-        if self._cfg.target != "port_b" or self._target_ready:
+        if not self._is_ws2812_target() or self._target_ready:
             return True
         assert self._cfg.led_count is not None
+        operation = f"{self._cfg.target} WS2812 init"
         try:
             result, error = await self._gateway.esp32.call_tool(
-                "self.port_b.ws2812.init",
+                self._ws2812_tool_name("init"),
                 {"led_count": self._cfg.led_count},
             )
         except Exception as exc:
-            self._last_error = f"port_b WS2812 init failed: {exc}"
+            self._last_error = f"{operation} failed: {exc}"
             self._invalidate_device_state()
             return False
         if error:
@@ -347,7 +365,7 @@ class FollowLedStream:
                 self._last_error = str(error)
             return False
 
-        failure = self._result_failure_reason(result, "port_b WS2812 init")
+        failure = self._result_failure_reason(result, operation)
         if failure is not None:
             self._last_error = failure
             self._target_ready = False
@@ -360,12 +378,12 @@ class FollowLedStream:
         self,
         colors: list[list[int]],
         *,
-        retry_port_b_reset: bool = True,
+        retry_ws2812_reset: bool = True,
     ) -> bool:
         if self._cfg.target == "base_ring":
             tool_name = "self.led.set_many"
         else:
-            tool_name = "self.port_b.ws2812.set_strip"
+            tool_name = self._ws2812_tool_name("set_strip")
         try:
             result, error = await self._gateway.esp32.call_tool(
                 tool_name,
@@ -388,16 +406,16 @@ class FollowLedStream:
         failure = self._result_failure_reason(result, tool_name)
         if failure is not None:
             self._last_error = failure
-            if self._cfg.target == "port_b":
+            if self._is_ws2812_target():
                 if self._result_is_unavailable(result):
                     self._invalidate_device_state()
-                    if retry_port_b_reset:
+                    if retry_ws2812_reset:
                         await self._maybe_reapply_wifi_ps()
                         if not await self._ensure_target_ready():
                             return False
                         return await self._dispatch_colors(
                             colors,
-                            retry_port_b_reset=False,
+                            retry_ws2812_reset=False,
                         )
                     return False
                 self._target_ready = False

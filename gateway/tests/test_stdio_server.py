@@ -655,18 +655,30 @@ async def test_set_mouth_sequence_relays_steps_as_json_string(monkeypatch):
     assert json.loads(arguments["steps_json"]) == steps
 
 
-_PORT_B_WS2812_TOOL_NAMES = (
-    "port_b_ws2812_init",
-    "port_b_ws2812_set_pixel",
-    "port_b_ws2812_set_strip",
-    "port_b_ws2812_refresh",
-    "port_b_ws2812_clear",
+_WS2812_PORTS = (
+    ("port_b", "Port B", "GPIO 9"),
+    ("port_c", "Port C", "GPIO 17"),
 )
 
 
+def _ws2812_tool_names(port: str) -> tuple[str, ...]:
+    return (
+        f"{port}_ws2812_init",
+        f"{port}_ws2812_set_pixel",
+        f"{port}_ws2812_set_strip",
+        f"{port}_ws2812_refresh",
+        f"{port}_ws2812_clear",
+    )
+
+
 @pytest.mark.asyncio
-async def test_list_tools_includes_port_b_ws2812_tools_with_schemas():
-    """Port B WS2812 wrappers are exposed with LLM-facing schemas."""
+@pytest.mark.parametrize(("port", "port_label", "gpio_label"), _WS2812_PORTS)
+async def test_list_tools_includes_ws2812_tools_with_schemas(
+    port,
+    port_label,
+    gpio_label,
+):
+    """Port B/C WS2812 wrappers are exposed with LLM-facing schemas."""
     server = create_server()
 
     result = await server.request_handlers[ListToolsRequest](
@@ -674,15 +686,15 @@ async def test_list_tools_includes_port_b_ws2812_tools_with_schemas():
     )
 
     tools_by_name = {tool.name: tool for tool in result.root.tools}
-    for tool_name in _PORT_B_WS2812_TOOL_NAMES:
+    for tool_name in _ws2812_tool_names(port):
         assert tool_name in tools_by_name, f"{tool_name} tool should be registered"
         description = tools_by_name[tool_name].description
-        assert "Port B" in description
-        assert "GPIO 9" in description
+        assert port_label in description
+        assert gpio_label in description
         assert "3.3 V CMOS data" in description
         assert "level shifter" in description
 
-    init_schema = tools_by_name["port_b_ws2812_init"].inputSchema
+    init_schema = tools_by_name[f"{port}_ws2812_init"].inputSchema
     assert init_schema["properties"]["led_count"] == {
         "type": "integer",
         "description": "Number of LEDs in the strip (1..256).",
@@ -691,7 +703,7 @@ async def test_list_tools_includes_port_b_ws2812_tools_with_schemas():
     }
     assert init_schema["required"] == ["led_count"]
 
-    pixel_schema = tools_by_name["port_b_ws2812_set_pixel"].inputSchema
+    pixel_schema = tools_by_name[f"{port}_ws2812_set_pixel"].inputSchema
     assert pixel_schema["properties"]["index"]["minimum"] == 0
     assert pixel_schema["properties"]["index"]["maximum"] == 255
     for channel in ("r", "g", "b"):
@@ -704,7 +716,7 @@ async def test_list_tools_includes_port_b_ws2812_tools_with_schemas():
     }
     assert pixel_schema["required"] == ["index", "r", "g", "b"]
 
-    strip_schema = tools_by_name["port_b_ws2812_set_strip"].inputSchema
+    strip_schema = tools_by_name[f"{port}_ws2812_set_strip"].inputSchema
     colors_schema = strip_schema["properties"]["colors"]
     assert colors_schema["type"] == "array"
     assert colors_schema["minItems"] == 1
@@ -719,7 +731,7 @@ async def test_list_tools_includes_port_b_ws2812_tools_with_schemas():
     }
     assert strip_schema["required"] == ["colors"]
 
-    for tool_name in ("port_b_ws2812_refresh", "port_b_ws2812_clear"):
+    for tool_name in (f"{port}_ws2812_refresh", f"{port}_ws2812_clear"):
         assert tools_by_name[tool_name].inputSchema == {
             "type": "object",
             "properties": {},
@@ -802,7 +814,7 @@ async def test_i2c_read_relays_scl_speed_hz_to_firmware(monkeypatch):
     assert json.loads(result.root.content[0].text) == {"ok": True, "bytes": [1, 2]}
 
 
-def _make_port_b_ws2812_fake_gateway(monkeypatch):
+def _make_ws2812_fake_gateway(monkeypatch):
     calls: list[tuple[str, dict]] = []
 
     class FakeESP32:
@@ -856,16 +868,40 @@ def _make_port_b_ws2812_fake_gateway(monkeypatch):
             "self.port_b.ws2812.clear",
             {},
         ),
+        (
+            "port_c_ws2812_init",
+            {"led_count": 18},
+            "self.port_c.ws2812.init",
+            {"led_count": 18},
+        ),
+        (
+            "port_c_ws2812_set_pixel",
+            {"index": 2, "r": 10, "g": 20, "b": 30, "refresh": True},
+            "self.port_c.ws2812.set_pixel",
+            {"index": 2, "r": 10, "g": 20, "b": 30, "refresh": True},
+        ),
+        (
+            "port_c_ws2812_refresh",
+            {},
+            "self.port_c.ws2812.refresh",
+            {},
+        ),
+        (
+            "port_c_ws2812_clear",
+            {},
+            "self.port_c.ws2812.clear",
+            {},
+        ),
     ],
 )
-async def test_port_b_ws2812_tools_relay_to_firmware(
+async def test_ws2812_tools_relay_to_firmware(
     monkeypatch,
     gateway_name,
     request_args,
     firmware_name,
     firmware_args,
 ):
-    calls = _make_port_b_ws2812_fake_gateway(monkeypatch)
+    calls = _make_ws2812_fake_gateway(monkeypatch)
     server = create_server()
 
     result = await server.request_handlers[CallToolRequest](
@@ -880,8 +916,9 @@ async def test_port_b_ws2812_tools_relay_to_firmware(
 
 
 @pytest.mark.asyncio
-async def test_port_b_ws2812_set_strip_relays_colors_as_json_string(monkeypatch):
-    calls = _make_port_b_ws2812_fake_gateway(monkeypatch)
+@pytest.mark.parametrize("port", ["port_b", "port_c"])
+async def test_ws2812_set_strip_relays_colors_as_json_string(monkeypatch, port):
+    calls = _make_ws2812_fake_gateway(monkeypatch)
     server = create_server()
     colors = [[32, 0, 0], [0, 32, 0], [0, 0, 32]]
 
@@ -889,7 +926,7 @@ async def test_port_b_ws2812_set_strip_relays_colors_as_json_string(monkeypatch)
         CallToolRequest(
             method="tools/call",
             params={
-                "name": "port_b_ws2812_set_strip",
+                "name": f"{port}_ws2812_set_strip",
                 "arguments": {"colors": colors},
             },
         )
@@ -897,7 +934,7 @@ async def test_port_b_ws2812_set_strip_relays_colors_as_json_string(monkeypatch)
 
     assert len(calls) == 1
     name, arguments = calls[0]
-    assert name == "self.port_b.ws2812.set_strip"
+    assert name == f"self.{port}.ws2812.set_strip"
     assert set(arguments.keys()) == {"colors"}
     assert json.loads(arguments["colors"]) == colors
     assert json.loads(result.root.content[0].text) == {"ok": True}
@@ -1521,20 +1558,25 @@ async def test_list_tools_includes_follow_led_stream_schema():
     tools = {tool.name: tool for tool in result.root.tools}
     tool = tools["stackchan_follow_led_stream"]
     schema = tool.inputSchema
-    assert schema["properties"]["target"]["enum"] == ["base_ring", "port_b"]
+    assert schema["properties"]["target"]["enum"] == [
+        "base_ring",
+        "port_b",
+        "port_c",
+    ]
     assert schema["properties"]["led_count"]["maximum"] == 256
     assert schema["properties"]["max_fps"]["maximum"] == 30
     assert "kind='event'" in tool.description
 
 
 @pytest.mark.asyncio
-async def test_follow_led_port_b_arguments_propagate(monkeypatch):
+@pytest.mark.parametrize("target", ["port_b", "port_c"])
+async def test_follow_led_ws2812_target_arguments_propagate(monkeypatch, target):
     captured = _make_follow_led_fake_gateway(monkeypatch)
     server = create_server()
 
     result = await server.request_handlers[CallToolRequest](
         _follow_led_request(
-            target="port_b",
+            target=target,
             led_count=18,
             max_fps=24,
             source_filter="stage",
@@ -1546,7 +1588,7 @@ async def test_follow_led_port_b_arguments_propagate(monkeypatch):
 
     assert len(captured) == 1, result.root.content[0].text
     cfg = captured[0]
-    assert cfg.target == "port_b"
+    assert cfg.target == target
     assert cfg.led_count == 18
     assert cfg.max_fps == 24
     assert cfg.source_filter == "stage"
@@ -1563,7 +1605,7 @@ async def test_follow_led_reads_user_defaults(monkeypatch, tmp_path):
     config_dir.mkdir()
     (config_dir / "user-defaults.toml").write_text(
         "[tool.stackchan_follow_led_stream]\n"
-        'target = "port_b"\n'
+        'target = "port_c"\n'
         "led_count = 7\n"
         "max_fps = 12\n"
         'source_filter = "stage"\n',
@@ -1586,7 +1628,7 @@ async def test_follow_led_reads_user_defaults(monkeypatch, tmp_path):
         user_defaults._clear_user_defaults_cache_for_tests()
 
     assert len(captured) == 1, result.root.content[0].text
-    assert captured[0].target == "port_b"
+    assert captured[0].target == "port_c"
     assert captured[0].led_count == 7
     assert captured[0].max_fps == 12
     assert captured[0].source_filter == "stage"

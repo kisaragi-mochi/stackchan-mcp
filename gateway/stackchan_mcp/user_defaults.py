@@ -83,7 +83,7 @@ def _is_supported_value(tool_name: str, arg_name: str, value: Any) -> bool:
         return False
     if tool_name == _FOLLOW_LED_TOOL:
         if arg_name == "target":
-            return value in {"base_ring", "port_b"}
+            return value in {"base_ring", "port_b", "port_c"}
         if arg_name == "led_count":
             return 1 <= value <= 256
         if arg_name == "max_fps":
