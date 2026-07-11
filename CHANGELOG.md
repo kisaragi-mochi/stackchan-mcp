@@ -35,6 +35,8 @@ documented-only.
 - Added `stackchan_follow_led_stream`, a gateway-side WebSocket LED-frame
   subscriber for driving the base ring or a Port B WS2812 strip from external
   `event` / `continuous` color frames. (#335)
+- Exposed the Port C WS2812 device tools and added `port_c` as a
+  `stackchan_follow_led_stream` target. (#340)
 
 ### Firmware
 

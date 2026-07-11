@@ -22,8 +22,14 @@ def _url(path: str = "led") -> str:
 
 _WIFI_SET_POWER_SAVE = "self.wifi.set_power_save"
 _BASE_SET_MANY = "self.led.set_many"
-_PORT_B_INIT = "self.port_b.ws2812.init"
-_PORT_B_SET_STRIP = "self.port_b.ws2812.set_strip"
+_PORT_WS2812_INIT = {
+    "port_b": "self.port_b.ws2812.init",
+    "port_c": "self.port_c.ws2812.init",
+}
+_PORT_WS2812_SET_STRIP = {
+    "port_b": "self.port_b.ws2812.set_strip",
+    "port_c": "self.port_c.ws2812.set_strip",
+}
 
 
 class _FakeESP32:
@@ -55,7 +61,7 @@ class _FakeESP32:
                 "previous": previous,
                 "current": args.get("mode"),
             }, None
-        if method == _PORT_B_INIT:
+        if method in _PORT_WS2812_INIT.values():
             return {
                 "available": True,
                 "ok": True,
@@ -163,6 +169,11 @@ def test_config_validation_accepts_expected_target_led_count_pairs() -> None:
         .capacity
         == 18
     )
+    assert (
+        FollowLedStreamConfig(url=_url("port-c"), target="port_c", led_count=18)
+        .capacity
+        == 18
+    )
 
 
 @pytest.mark.parametrize(
@@ -172,8 +183,11 @@ def test_config_validation_accepts_expected_target_led_count_pairs() -> None:
         {"url": _url("bad-target"), "target": "unknown"},
         {"url": _url("base-bad-count"), "target": "base_ring", "led_count": 11},
         {"url": _url("port-missing-count"), "target": "port_b"},
+        {"url": _url("port-c-missing-count"), "target": "port_c"},
         {"url": _url("port-zero"), "target": "port_b", "led_count": 0},
+        {"url": _url("port-c-zero"), "target": "port_c", "led_count": 0},
         {"url": _url("port-too-many"), "target": "port_b", "led_count": 257},
+        {"url": _url("port-c-too-many"), "target": "port_c", "led_count": 257},
         {"url": _url("fps-zero"), "target": "base_ring", "max_fps": 0},
         {"url": _url("fps-too-high"), "target": "base_ring", "max_fps": 31},
     ],
@@ -272,13 +286,16 @@ async def test_base_ring_dispatch_uses_json_encoded_set_many_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_port_b_dispatch_uses_json_encoded_set_strip_payload() -> None:
+@pytest.mark.parametrize("target", ["port_b", "port_c"])
+async def test_ws2812_dispatch_uses_json_encoded_set_strip_payload(
+    target: str,
+) -> None:
     gateway = _FakeGateway()
     follower = FollowLedStream(
         gateway,
         FollowLedStreamConfig(
-            url=_url("port-b-dispatch"),
-            target="port_b",
+            url=_url(f"{target}-dispatch"),
+            target=target,
             led_count=3,
         ),
     )
@@ -289,18 +306,22 @@ async def test_port_b_dispatch_uses_json_encoded_set_strip_payload() -> None:
     await follower._consume(_FakeWebSocket([_frame(colors=colors)]))
 
     assert gateway.esp32.calls == [
-        (_PORT_B_SET_STRIP, {"colors": json.dumps(colors)})
+        (_PORT_WS2812_SET_STRIP[target], {"colors": json.dumps(colors)})
     ]
     assert follower.status()["frames_sent"] == 1
 
 
 @pytest.mark.asyncio
-async def test_port_b_start_initializes_strip(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("target", ["port_b", "port_c"])
+async def test_ws2812_start_initializes_strip(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
     monkeypatch.setattr(fls.websockets, "connect", _refusing_connect)
     gateway = _FakeGateway()
     cfg = FollowLedStreamConfig(
-        url=_url("port-b-init"),
-        target="port_b",
+        url=_url(f"{target}-init"),
+        target=target,
         led_count=5,
         reconnect_initial_backoff_s=0.01,
         reconnect_max_backoff_s=0.01,
@@ -311,24 +332,26 @@ async def test_port_b_start_initializes_strip(monkeypatch: pytest.MonkeyPatch) -
     assert status["running"] is True
     assert gateway.esp32.calls[:2] == [
         (_WIFI_SET_POWER_SAVE, {"mode": "none"}),
-        (_PORT_B_INIT, {"led_count": 5}),
+        (_PORT_WS2812_INIT[target], {"led_count": 5}),
     ]
     await fls.stop_follow()
 
 
 @pytest.mark.asyncio
-async def test_port_b_init_failure_makes_start_fail(
+@pytest.mark.parametrize("target", ["port_b", "port_c"])
+async def test_ws2812_init_failure_makes_start_fail(
     monkeypatch: pytest.MonkeyPatch,
+    target: str,
 ) -> None:
     monkeypatch.setattr(fls.websockets, "connect", _refusing_connect)
     gateway = _FakeGateway()
     gateway.esp32.push_reply(
-        _PORT_B_INIT,
+        _PORT_WS2812_INIT[target],
         {"available": False, "ok": False, "error": "strip unavailable"},
     )
     cfg = FollowLedStreamConfig(
-        url=_url("port-b-init-fail"),
-        target="port_b",
+        url=_url(f"{target}-init-fail"),
+        target=target,
         led_count=5,
     )
 
@@ -336,7 +359,7 @@ async def test_port_b_init_failure_makes_start_fail(
         await fls.start_follow(gateway, cfg)
 
     assert fls.get_follow_status() == {"running": False}
-    assert (_PORT_B_INIT, {"led_count": 5}) in gateway.esp32.calls
+    assert (_PORT_WS2812_INIT[target], {"led_count": 5}) in gateway.esp32.calls
     assert (_WIFI_SET_POWER_SAVE, {"mode": "max_modem"}) in gateway.esp32.calls
 
 
@@ -388,19 +411,22 @@ async def test_status_when_not_running() -> None:
 
 
 @pytest.mark.asyncio
-async def test_device_disconnect_invalidates_then_reinitializes_port_b() -> None:
+@pytest.mark.parametrize("target", ["port_b", "port_c"])
+async def test_device_disconnect_invalidates_then_reinitializes_ws2812(
+    target: str,
+) -> None:
     gateway = _FakeGateway()
     gateway.esp32.push_reply(
-        _PORT_B_SET_STRIP,
+        _PORT_WS2812_SET_STRIP[target],
         None,
         {"code": -32000, "message": "ESP32 not connected"},
     )
-    gateway.esp32.push_reply(_PORT_B_SET_STRIP, {"ok": True})
+    gateway.esp32.push_reply(_PORT_WS2812_SET_STRIP[target], {"ok": True})
     follower = FollowLedStream(
         gateway,
         FollowLedStreamConfig(
             url=_url("recovery"),
-            target="port_b",
+            target=target,
             led_count=2,
         ),
     )
@@ -417,10 +443,16 @@ async def test_device_disconnect_invalidates_then_reinitializes_port_b() -> None
     )
 
     assert gateway.esp32.calls == [
-        (_PORT_B_SET_STRIP, {"colors": json.dumps([[1, 0, 0], [0, 1, 0]])}),
+        (
+            _PORT_WS2812_SET_STRIP[target],
+            {"colors": json.dumps([[1, 0, 0], [0, 1, 0]])},
+        ),
         (_WIFI_SET_POWER_SAVE, {"mode": "none"}),
-        (_PORT_B_INIT, {"led_count": 2}),
-        (_PORT_B_SET_STRIP, {"colors": json.dumps([[0, 0, 1], [2, 2, 2]])}),
+        (_PORT_WS2812_INIT[target], {"led_count": 2}),
+        (
+            _PORT_WS2812_SET_STRIP[target],
+            {"colors": json.dumps([[0, 0, 1], [2, 2, 2]])},
+        ),
     ]
     status = follower.status()
     assert status["frames_sent"] == 1
@@ -429,22 +461,25 @@ async def test_device_disconnect_invalidates_then_reinitializes_port_b() -> None
 
 
 @pytest.mark.asyncio
-async def test_port_b_unavailable_dispatch_recovers_and_retries_same_frame() -> None:
+@pytest.mark.parametrize("target", ["port_b", "port_c"])
+async def test_ws2812_unavailable_dispatch_recovers_and_retries_same_frame(
+    target: str,
+) -> None:
     gateway = _FakeGateway()
     gateway.esp32.push_reply(
-        _PORT_B_SET_STRIP,
+        _PORT_WS2812_SET_STRIP[target],
         {
             "available": False,
             "ok": False,
             "error": "strip not initialized",
         },
     )
-    gateway.esp32.push_reply(_PORT_B_SET_STRIP, {"ok": True})
+    gateway.esp32.push_reply(_PORT_WS2812_SET_STRIP[target], {"ok": True})
     follower = FollowLedStream(
         gateway,
         FollowLedStreamConfig(
-            url=_url("port-b-unavailable-recovery"),
-            target="port_b",
+            url=_url(f"{target}-unavailable-recovery"),
+            target=target,
             led_count=2,
         ),
     )
@@ -455,10 +490,10 @@ async def test_port_b_unavailable_dispatch_recovers_and_retries_same_frame() -> 
     await follower._consume(_FakeWebSocket([_frame(colors=colors)]))
 
     assert gateway.esp32.calls == [
-        (_PORT_B_SET_STRIP, {"colors": json.dumps(colors)}),
+        (_PORT_WS2812_SET_STRIP[target], {"colors": json.dumps(colors)}),
         (_WIFI_SET_POWER_SAVE, {"mode": "none"}),
-        (_PORT_B_INIT, {"led_count": 2}),
-        (_PORT_B_SET_STRIP, {"colors": json.dumps(colors)}),
+        (_PORT_WS2812_INIT[target], {"led_count": 2}),
+        (_PORT_WS2812_SET_STRIP[target], {"colors": json.dumps(colors)}),
     ]
     status = follower.status()
     assert status["frames_sent"] == 1
@@ -467,12 +502,15 @@ async def test_port_b_unavailable_dispatch_recovers_and_retries_same_frame() -> 
 
 
 @pytest.mark.asyncio
-async def test_port_b_unavailable_retry_failure_drops_frame_without_extra_retry() -> None:
+@pytest.mark.parametrize("target", ["port_b", "port_c"])
+async def test_ws2812_unavailable_retry_failure_drops_frame_without_extra_retry(
+    target: str,
+) -> None:
     gateway = _FakeGateway()
     first_colors = [[4, 0, 0], [0, 4, 0]]
     second_colors = [[0, 0, 4], [4, 4, 4]]
     gateway.esp32.push_reply(
-        _PORT_B_SET_STRIP,
+        _PORT_WS2812_SET_STRIP[target],
         {
             "available": False,
             "ok": False,
@@ -480,19 +518,19 @@ async def test_port_b_unavailable_retry_failure_drops_frame_without_extra_retry(
         },
     )
     gateway.esp32.push_reply(
-        _PORT_B_SET_STRIP,
+        _PORT_WS2812_SET_STRIP[target],
         {
             "available": False,
             "ok": False,
             "error": "still unavailable",
         },
     )
-    gateway.esp32.push_reply(_PORT_B_SET_STRIP, {"ok": True})
+    gateway.esp32.push_reply(_PORT_WS2812_SET_STRIP[target], {"ok": True})
     follower = FollowLedStream(
         gateway,
         FollowLedStreamConfig(
-            url=_url("port-b-unavailable-retry-failure"),
-            target="port_b",
+            url=_url(f"{target}-unavailable-retry-failure"),
+            target=target,
             led_count=2,
         ),
     )
@@ -509,13 +547,13 @@ async def test_port_b_unavailable_retry_failure_drops_frame_without_extra_retry(
     )
 
     assert gateway.esp32.calls == [
-        (_PORT_B_SET_STRIP, {"colors": json.dumps(first_colors)}),
+        (_PORT_WS2812_SET_STRIP[target], {"colors": json.dumps(first_colors)}),
         (_WIFI_SET_POWER_SAVE, {"mode": "none"}),
-        (_PORT_B_INIT, {"led_count": 2}),
-        (_PORT_B_SET_STRIP, {"colors": json.dumps(first_colors)}),
+        (_PORT_WS2812_INIT[target], {"led_count": 2}),
+        (_PORT_WS2812_SET_STRIP[target], {"colors": json.dumps(first_colors)}),
         (_WIFI_SET_POWER_SAVE, {"mode": "none"}),
-        (_PORT_B_INIT, {"led_count": 2}),
-        (_PORT_B_SET_STRIP, {"colors": json.dumps(second_colors)}),
+        (_PORT_WS2812_INIT[target], {"led_count": 2}),
+        (_PORT_WS2812_SET_STRIP[target], {"colors": json.dumps(second_colors)}),
     ]
     status = follower.status()
     assert status["frames_sent"] == 1
