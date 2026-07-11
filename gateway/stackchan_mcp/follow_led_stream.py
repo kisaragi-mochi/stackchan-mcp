@@ -26,6 +26,8 @@ WS2812_TARGET_TOOL_PREFIXES = {
 }
 LED_TARGETS = {"base_ring", *WS2812_TARGET_TOOL_PREFIXES}
 LED_TARGET_ERROR = "target must be 'base_ring', 'port_b', or 'port_c'"
+WS2812_COLOR_ORDERS = {"grb", "rgb"}
+WS2812_COLOR_ORDER_ERROR = "color_order must be 'grb' or 'rgb'"
 
 
 def _is_finite_number(value: Any) -> bool:
@@ -47,6 +49,7 @@ class FollowLedStreamConfig:
     target: str
     led_count: int | None = None
     max_fps: float = LED_STREAM_MAX_FPS
+    color_order: str = "grb"
     source_filter: Optional[str] = None
     frame_filter: Optional[str] = None
     reconnect_initial_backoff_s: float = 1.5
@@ -57,9 +60,15 @@ class FollowLedStreamConfig:
             raise ValueError("url is required")
         if self.target not in LED_TARGETS:
             raise ValueError(LED_TARGET_ERROR)
+        if self.color_order not in WS2812_COLOR_ORDERS:
+            raise ValueError(WS2812_COLOR_ORDER_ERROR)
         if not _is_finite_number(self.max_fps) or not 0 < self.max_fps <= 30:
             raise ValueError("max_fps must be a number in (0, 30]")
         if self.target == "base_ring":
+            if self.color_order != "grb":
+                raise ValueError(
+                    "color_order is only supported for target=port_b or target=port_c"
+                )
             if self.led_count is not None and self.led_count != BASE_RING_LED_COUNT:
                 raise ValueError("led_count for base_ring must be 12 when provided")
         else:
@@ -114,6 +123,7 @@ class FollowLedStream:
             "target": self._cfg.target,
             "led_count": self._cfg.capacity,
             "max_fps": self._cfg.max_fps,
+            "color_order": self._cfg.color_order,
             "source_filter": self._cfg.source_filter,
             "frame_filter": self._cfg.frame_filter,
             "connected": self._connect_state == "connected",
@@ -347,6 +357,9 @@ class FollowLedStream:
             return True
         assert self._cfg.led_count is not None
         operation = f"{self._cfg.target} WS2812 init"
+        from .stdio_server import _set_ws2812_color_order
+
+        _set_ws2812_color_order(self._cfg.target, self._cfg.color_order)
         try:
             result, error = await self._gateway.esp32.call_tool(
                 self._ws2812_tool_name("init"),
@@ -382,12 +395,19 @@ class FollowLedStream:
     ) -> bool:
         if self._cfg.target == "base_ring":
             tool_name = "self.led.set_many"
+            colors_for_device = colors
         else:
             tool_name = self._ws2812_tool_name("set_strip")
+            from .stdio_server import _remap_ws2812_colors_for_color_order
+
+            colors_for_device = _remap_ws2812_colors_for_color_order(
+                self._cfg.color_order,
+                colors,
+            )
         try:
             result, error = await self._gateway.esp32.call_tool(
                 tool_name,
-                {"colors": json.dumps(colors)},
+                {"colors": json.dumps(colors_for_device)},
             )
         except Exception as exc:
             self._last_error = str(exc)
