@@ -38,6 +38,9 @@ documented-only.
 - Added `stackchan_follow_led_stream`, a gateway-side WebSocket LED-frame
   subscriber for driving the base ring or a Port B WS2812 strip from external
   `event` / `continuous` color frames. (#335)
+- Log ESP32 WebSocket disconnect close codes, reasons, close class, last-frame
+  age, and connection lifetime, and make the gateway keepalive policy explicit.
+  (#338)
 - Exposed the Port C WS2812 device tools and added `port_c` as a
   `stackchan_follow_led_stream` target. (#340)
 

@@ -4,11 +4,14 @@ import asyncio
 import gc
 import json
 import logging
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
 import websockets
+from websockets.frames import Close
 
+from stackchan_mcp import esp32_client
 from stackchan_mcp.esp32_client import ESP32Connection, ESP32Manager, _hardware_lane
 
 
@@ -27,6 +30,78 @@ async def manager():
     await mgr.stop()
 
 
+class _FakeServeServer:
+    def __init__(self) -> None:
+        self.closed = False
+        self.waited = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        self.waited = True
+
+
+class _ClosingHandlerWebSocket:
+    """Fake server-side WebSocket that raises a close exception from iteration."""
+
+    def __init__(
+        self,
+        messages: list[str | bytes],
+        close_exc: websockets.exceptions.ConnectionClosed,
+    ) -> None:
+        self._messages = messages
+        self._close_exc = close_exc
+        self.request = SimpleNamespace(headers={"Device-Id": "device-test"})
+        self.sent: list[str | bytes] = []
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._messages:
+            return self._messages.pop(0)
+        raise self._close_exc
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _GracefulCloseHandlerWebSocket:
+    """Fake server-side WebSocket whose iterator exits after a graceful close."""
+
+    def __init__(
+        self,
+        messages: list[str | bytes],
+        close_code: int | None,
+        close_reason: str | None,
+    ) -> None:
+        self._messages = messages
+        self.close_code = close_code
+        self.close_reason = close_reason
+        self.request = SimpleNamespace(headers={"Device-Id": "device-test"})
+        self.sent: list[str | bytes] = []
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._messages:
+            return self._messages.pop(0)
+        raise StopAsyncIteration
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 @pytest.mark.asyncio
 async def test_manager_starts_and_stops():
     """Manager can start and stop cleanly."""
@@ -35,6 +110,40 @@ async def test_manager_starts_and_stops():
     assert mgr._server is not None
     await mgr.stop()
     assert mgr._server is None
+
+
+@pytest.mark.asyncio
+async def test_manager_start_sets_explicit_websocket_keepalive(monkeypatch, caplog):
+    """The gateway keeps websockets defaults explicit and visible in logs."""
+    captured: dict[str, object] = {}
+    fake_server = _FakeServeServer()
+
+    async def fake_serve(handler, host, port, **kwargs):
+        captured.update(
+            {
+                "handler": handler,
+                "host": host,
+                "port": port,
+                "kwargs": kwargs,
+            }
+        )
+        return fake_server
+
+    monkeypatch.setattr(websockets, "serve", fake_serve)
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    mgr = ESP32Manager()
+
+    await mgr.start("127.0.0.1", 8765)
+    await mgr.stop()
+
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 8765
+    kwargs = captured["kwargs"]
+    assert kwargs["ping_interval"] == 20
+    assert kwargs["ping_timeout"] == 20
+    assert fake_server.closed is True
+    assert fake_server.waited is True
+    assert "ping_interval=20 ping_timeout=20" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -210,6 +319,84 @@ async def test_esp32_disconnect_handling(manager):
     # Connection closed
     await asyncio.sleep(0.2)
     assert manager.device_connected is False
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_graceful_close_details_once(monkeypatch, caplog):
+    """Normal async-for completion still logs enriched close details once."""
+    ticks = iter([100.0, 103.25, 105.5])
+    monkeypatch.setattr(esp32_client, "_monotonic", lambda: next(ticks))
+    ws = _GracefulCloseHandlerWebSocket(
+        [json.dumps({"type": "noop"})],
+        close_code=1000,
+        close_reason="normal",
+    )
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+
+    await ESP32Manager()._handler(ws)  # type: ignore[arg-type]
+
+    disconnect_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("ESP32 disconnected:")
+    ]
+    assert disconnect_logs == [
+        "ESP32 disconnected: device=device-test close_class=GracefulClose "
+        "rcvd_code=1000 rcvd_reason='normal' sent_code=None sent_reason=None "
+        "last_frame_age_s=2.250 lifetime_s=5.500"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_close_details_with_last_frame_elapsed(monkeypatch, caplog):
+    """Disconnect logs include close class, close frames, and timing fields."""
+    ticks = iter([100.0, 103.25, 105.5])
+    monkeypatch.setattr(esp32_client, "_monotonic", lambda: next(ticks))
+    close_exc = websockets.exceptions.ConnectionClosedOK(
+        Close(1000, "normal"),
+        Close(1000, "ack"),
+        True,
+    )
+    ws = _ClosingHandlerWebSocket(
+        [json.dumps({"type": "noop"})],
+        close_exc,
+    )
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+
+    await ESP32Manager()._handler(ws)  # type: ignore[arg-type]
+
+    assert "ESP32 disconnected: device=device-test" in caplog.text
+    assert "close_class=ConnectionClosedOK" in caplog.text
+    assert "rcvd_code=1000 rcvd_reason='normal'" in caplog.text
+    assert "sent_code=1000 sent_reason='ack'" in caplog.text
+    assert "last_frame_age_s=2.250" in caplog.text
+    assert "lifetime_s=5.500" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_close_details_when_fields_are_missing(
+    monkeypatch,
+    caplog,
+):
+    """Missing close fields and missing inbound frames are logged safely."""
+    ticks = iter([200.0, 204.75])
+    monkeypatch.setattr(esp32_client, "_monotonic", lambda: next(ticks))
+    close_exc = websockets.exceptions.ConnectionClosedError(
+        Close(1006, "abnormal"),
+        None,
+        None,
+    )
+    ws = _ClosingHandlerWebSocket([], close_exc)
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+
+    await ESP32Manager()._handler(ws)  # type: ignore[arg-type]
+
+    assert "ESP32 disconnected: device=device-test" in caplog.text
+    assert "close_class=ConnectionClosedError" in caplog.text
+    assert "rcvd_code=1006 rcvd_reason='abnormal'" in caplog.text
+    assert "sent_code=None sent_reason=None" in caplog.text
+    assert "last_frame_age_s=None" in caplog.text
+    assert "lifetime_s=4.750" in caplog.text
 
 
 @pytest.mark.asyncio
