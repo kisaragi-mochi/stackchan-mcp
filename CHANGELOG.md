@@ -36,6 +36,11 @@ documented-only.
   subscriber for driving the base ring or a Port B WS2812 strip from external
   `event` / `continuous` color frames. (#335)
 
+### Firmware
+
+- Added `self.port_c.ws2812.{init,set_pixel,set_strip,refresh,clear}` for a
+  WS2812-compatible strip on Grove Port C signal 1 (GPIO 17). (#340)
+
 ## [0.15.0] - 2026-07-09
 
 ### Gateway
