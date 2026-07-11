@@ -38,6 +38,11 @@ documented-only.
 - Exposed the Port C WS2812 device tools and added `port_c` as a
   `stackchan_follow_led_stream` target. (#340)
 
+### Firmware
+
+- Added `self.port_c.ws2812.{init,set_pixel,set_strip,refresh,clear}` for a
+  WS2812-compatible strip on Grove Port C signal 1 (GPIO 17). (#340)
+
 ## [0.15.0] - 2026-07-09
 
 ### Gateway
