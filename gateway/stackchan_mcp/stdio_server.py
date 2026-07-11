@@ -1301,11 +1301,12 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
             Tool(
                 name="scan_nfc",
                 description=(
-                    "Scan once for one ISO 14443A NFC tag with the robot's "
-                    "body-mounted ST25R3916 reader. Returns a detected UID, "
-                    "ATQA, SAK, or a collision indication. It never reads or "
-                    "writes tag memory, authenticates, emulates a card, or "
-                    "keeps the RF field enabled after the scan."
+                    "Scan once for one ISO 14443A or NFC-F (FeliCa) tag with "
+                    "the robot's body-mounted ST25R3916 reader. Returns UID, "
+                    "ATQA, and SAK for ISO 14443A, or IDm and PMm for NFC-F. "
+                    "It never reads or writes tag memory, authenticates, "
+                    "emulates a card, or keeps the RF field enabled after "
+                    "the scan."
                 ),
                 inputSchema={"type": "object", "properties": {}},
             ),

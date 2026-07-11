@@ -5583,10 +5583,11 @@ private:
 
         mcp_server.AddTool(
             "self.nfc.scan",
-            "Scan once for a single ISO 14443A NFC tag with the body-mounted ST25R3916. "
-            "Returns UID, ATQA, and SAK only; it does not read or write tag memory, authenticate, "
-            "emulate a card, or leave the RF field enabled after the call. If multiple tags collide, "
-            "reports the collision without choosing a tag.",
+            "Scan once for a single ISO 14443A or NFC-F (FeliCa) tag with the body-mounted "
+            "ST25R3916. Returns UID/ATQA/SAK for ISO 14443A or IDm/PMm for NFC-F only; it does "
+            "not read or write tag memory, authenticate, emulate a card, or leave the RF field "
+            "enabled after the call. If multiple ISO 14443A tags collide, reports the collision "
+            "without choosing a tag.",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
                 cJSON* root = cJSON_CreateObject();
@@ -5618,14 +5619,21 @@ private:
                 cJSON* tag = cJSON_CreateObject();
                 cJSON_AddBoolToObject(tag, "present", sample.tag_present);
                 cJSON_AddBoolToObject(tag, "collision_detected", sample.collision_detected);
-                if (sample.atqa != 0) {
+                if (sample.protocol == StackChanNfcProtocol::kIso14443A) {
+                    cJSON_AddStringToObject(tag, "protocol", "ISO14443A");
+                } else if (sample.protocol == StackChanNfcProtocol::kNfcF) {
+                    cJSON_AddStringToObject(tag, "protocol", "NFC-F");
+                } else {
+                    cJSON_AddNullToObject(tag, "protocol");
+                }
+                if (sample.protocol == StackChanNfcProtocol::kIso14443A) {
                     char atqa_hex[7];
                     std::snprintf(atqa_hex, sizeof(atqa_hex), "0x%04X", sample.atqa);
                     cJSON_AddStringToObject(tag, "atqa", atqa_hex);
                 } else {
                     cJSON_AddNullToObject(tag, "atqa");
                 }
-                if (sample.tag_present) {
+                if (sample.protocol == StackChanNfcProtocol::kIso14443A) {
                     char uid_hex[sizeof(sample.uid) * 2 + 1] = {};
                     for (size_t i = 0; i < sample.uid_length; ++i) {
                         std::snprintf(uid_hex + i * 2, sizeof(uid_hex) - i * 2,
@@ -5639,12 +5647,29 @@ private:
                     cJSON_AddNullToObject(tag, "uid_length");
                     cJSON_AddNullToObject(tag, "sak");
                 }
+                if (sample.protocol == StackChanNfcProtocol::kNfcF) {
+                    char idm_hex[sizeof(sample.idm) * 2 + 1] = {};
+                    char pmm_hex[sizeof(sample.pmm) * 2 + 1] = {};
+                    for (size_t i = 0; i < sizeof(sample.idm); ++i) {
+                        std::snprintf(idm_hex + i * 2, sizeof(idm_hex) - i * 2,
+                                      "%02X", sample.idm[i]);
+                        std::snprintf(pmm_hex + i * 2, sizeof(pmm_hex) - i * 2,
+                                      "%02X", sample.pmm[i]);
+                    }
+                    cJSON_AddStringToObject(tag, "idm", idm_hex);
+                    cJSON_AddStringToObject(tag, "pmm", pmm_hex);
+                } else {
+                    cJSON_AddNullToObject(tag, "idm");
+                    cJSON_AddNullToObject(tag, "pmm");
+                }
                 cJSON_AddItemToObject(root, "tag", tag);
 
-                // A UID can be a stable personal identifier. Keep it in the
-                // explicit tool response only; logs record no UID bytes.
-                ESP_LOGD(TAG, "self.nfc.scan present=%d collision=%d uid_length=%u",
+                // A UID or NFC-F IDm can be a stable personal identifier.
+                // Keep it in the explicit tool response only; logs record no
+                // identifier bytes.
+                ESP_LOGD(TAG, "self.nfc.scan present=%d collision=%d protocol=%d uid_length=%u",
                          sample.tag_present ? 1 : 0, sample.collision_detected ? 1 : 0,
+                         static_cast<int>(sample.protocol),
                          static_cast<unsigned>(sample.uid_length));
                 return root;
             });

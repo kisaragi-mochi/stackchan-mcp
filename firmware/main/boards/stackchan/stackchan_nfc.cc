@@ -31,6 +31,8 @@ constexpr uint8_t kRegReceiverConfiguration1 = 0x0B;
 constexpr uint8_t kRegReceiverConfiguration2 = 0x0C;
 constexpr uint8_t kRegReceiverConfiguration3 = 0x0D;
 constexpr uint8_t kRegReceiverConfiguration4 = 0x0E;
+constexpr uint8_t kRegNoResponseTimer1 = 0x10;
+constexpr uint8_t kRegTimerAndEmvControl = 0x12;
 constexpr uint8_t kRegMaskMainInterrupt = 0x16;
 constexpr uint8_t kRegMainInterrupt = 0x1A;
 constexpr uint8_t kRegErrorAndWakeupInterrupt = 0x1C;
@@ -52,6 +54,7 @@ constexpr uint8_t kCommandInitialFieldOn = 0xC8;
 constexpr uint8_t kCommandResetReceiverGain = 0xD5;
 constexpr uint8_t kCommandAdjustRegulators = 0xD6;
 constexpr uint8_t kCommandClearFifo = 0xDB;
+constexpr uint8_t kCommandRegisterSpaceBAccess = 0xFB;
 constexpr uint8_t kCommandTestAccess = 0xFC;
 
 constexpr uint8_t kOpReadRegister = 0x40;
@@ -63,12 +66,14 @@ constexpr uint8_t kOperationEnableReceive = 0x40;
 constexpr uint8_t kOperationEnableTransmit = 0x08;
 constexpr uint8_t kAuxiliaryNoCrcReceive = 0x80;
 constexpr uint8_t kMainIrqReceiveEnd = 0x10;
+constexpr uint8_t kMainIrqTransmitEnd = 0x08;
 constexpr uint8_t kMainIrqCollision = 0x04;
 constexpr uint8_t kAuxiliaryOscillatorReady = 0x10;
 
 constexpr int kI2cTimeoutMs = 100;
 constexpr uint32_t kRequestTimeoutMs = 15;
 constexpr uint32_t kCascadeTimeoutMs = 20;
+constexpr uint32_t kNfcFPollTimeoutMs = 15;
 constexpr size_t kMaxFifoDepth = 512;
 
 }  // namespace
@@ -146,6 +151,18 @@ esp_err_t StackChanNfc::WriteRegister16(uint8_t reg, uint16_t value) {
     return WriteCommand(reg & 0x3F, data, sizeof(data));
 }
 
+esp_err_t StackChanNfc::WriteSpaceBRegister(uint8_t reg, uint8_t value) {
+    // ST25R3916 requires the Register Space-B access direct command before
+    // the normal register-write opcode. This is a single I2C frame:
+    // [0xFB, register, value].
+    const uint8_t buffer[] = {
+        kCommandRegisterSpaceBAccess,
+        static_cast<uint8_t>(reg & 0x3F),
+        value,
+    };
+    return i2c_master_transmit(nfc_, buffer, sizeof(buffer), kI2cTimeoutMs);
+}
+
 esp_err_t StackChanNfc::ModifyRegister(uint8_t reg, uint8_t set_mask, uint8_t clear_mask) {
     uint8_t value = 0;
     esp_err_t err = ReadRegister(reg, &value);
@@ -154,6 +171,26 @@ esp_err_t StackChanNfc::ModifyRegister(uint8_t reg, uint8_t set_mask, uint8_t cl
     }
     const uint8_t updated = static_cast<uint8_t>((value & ~clear_mask) | set_mask);
     return updated == value ? ESP_OK : WriteRegister(reg, updated);
+}
+
+esp_err_t StackChanNfc::SetNoResponseTimerMs(uint32_t timeout_ms) {
+    uint8_t timer_control = 0;
+    esp_err_t err = ReadRegister(kRegTimerAndEmvControl, &timer_control);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const uint32_t step_cycles = (timer_control & 0x01) != 0 ? 4096 : 64;
+    const uint64_t numerator = static_cast<uint64_t>(timeout_ms) * 1000u * 13560000u;
+    const uint64_t denominator = static_cast<uint64_t>(step_cycles) * 1000000u;
+    uint64_t nrt = (numerator + denominator - 1) / denominator;
+    if (nrt == 0) {
+        nrt = 1;
+    }
+    if (nrt > 0xFFFFu) {
+        nrt = 0xFFFFu;
+    }
+    return WriteRegister16(kRegNoResponseTimer1, static_cast<uint16_t>(nrt));
 }
 
 esp_err_t StackChanNfc::ClearInterrupts() {
@@ -252,6 +289,44 @@ esp_err_t StackChanNfc::StopField() {
     return err;
 }
 
+esp_err_t StackChanNfc::ConfigureIso14443A() {
+    // Mirrors UnitST25R3916::configure_nfc_a().  0x09 is initiator
+    // ISO14443A with automatic 106 kbps rate selection; 0x01 alone only
+    // carries the automatic-rate bit and leaves the protocol mode unset.
+    esp_err_t err = WriteRegister(kRegModeDefinition, 0x09);
+    if (err == ESP_OK) err = WriteRegister(kRegBitrateDefinition, 0x00);
+    if (err == ESP_OK) err = WriteRegister(kRegIso14443aSettings, 0x00);
+    if (err == ESP_OK) err = WriteRegister(kRegIoConfig1, 0x10);
+    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration1, 0x08);
+    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration2, 0x2D);
+    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration3, 0xD8);
+    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration4, 0x22);
+    if (err == ESP_OK) err = WriteRegister(kRegMaskMainInterrupt, 0x00);
+    if (err == ESP_OK) err = ClearInterrupts();
+    if (err == ESP_OK) err = WriteCommand(kCommandResetReceiverGain, nullptr, 0);
+    return err;
+}
+
+esp_err_t StackChanNfc::ConfigureNfcF() {
+    // Mirrors M5UnitUnified's ST25R3916 NFC-F (FeliCa) profile.  This
+    // supports SENSF polling only; it does not issue service, read, write,
+    // authentication, or emulation commands.
+    esp_err_t err = WriteRegister(kRegModeDefinition, 0x1C);  // FeliCa initiator, TR_AM
+    if (err == ESP_OK) err = WriteRegister(kRegBitrateDefinition, 0x11);  // 212 kbps TX/RX
+    if (err == ESP_OK) err = ModifyRegister(kRegOperationControl, 0x03, 0x00);
+    if (err == ESP_OK) err = WriteRegister(kRegIoConfig1, 0x07);
+    if (err == ESP_OK) err = WriteRegister(kRegAuxiliaryDefinition, 0x00);
+    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration1, 0x13);
+    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration2, 0x3D);
+    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration3, 0x00);
+    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration4, 0x00);
+    if (err == ESP_OK) err = WriteSpaceBRegister(0x0C, 0x54);  // correlator 1
+    if (err == ESP_OK) err = WriteSpaceBRegister(0x0D, 0x00);  // correlator 2
+    if (err == ESP_OK) err = WriteRegister(kRegMaskMainInterrupt, 0x00);
+    if (err == ESP_OK) err = ClearInterrupts();
+    return err;
+}
+
 esp_err_t StackChanNfc::InitializeLocked() {
     Detach();
     i2c_device_config_t config = {
@@ -313,14 +388,7 @@ esp_err_t StackChanNfc::InitializeLocked() {
     }
     if (err == ESP_OK) err = WriteCommand(kCommandAdjustRegulators, nullptr, 0);
     if (err == ESP_OK) vTaskDelay(pdMS_TO_TICKS(5));
-    if (err == ESP_OK) err = WriteRegister(kRegModeDefinition, 0x01);       // ISO 14443A initiator
-    if (err == ESP_OK) err = WriteRegister(kRegBitrateDefinition, 0x00);    // 106 kbps TX/RX
-    if (err == ESP_OK) err = WriteRegister(kRegIso14443aSettings, 0x00);
-    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration1, 0x08);
-    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration2, 0x2D);
-    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration3, 0xD8);
-    if (err == ESP_OK) err = WriteRegister(kRegReceiverConfiguration4, 0x22);
-    if (err == ESP_OK) err = WriteCommand(kCommandResetReceiverGain, nullptr, 0);
+    if (err == ESP_OK) err = ConfigureIso14443A();
     if (err != ESP_OK) {
         Detach();
         return Fail("configure ST25R3916", err);
@@ -376,6 +444,49 @@ esp_err_t StackChanNfc::RequestA(uint16_t* atqa, bool* collision_detected) {
         return err == ESP_OK ? ESP_ERR_INVALID_RESPONSE : err;
     }
     *atqa = static_cast<uint16_t>(response[1]) << 8 | response[0];
+    return ESP_OK;
+}
+
+esp_err_t StackChanNfc::PollNfcF(StackChanNfcSnapshot* snapshot) {
+    if (snapshot == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // SENSF_REQ: polling command, wildcard system code, no extra request
+    // data, one response slot. The ST25R3916 calculates the NFC-F frame
+    // length from NUMBER_OF_TRANSMITTED_BYTES, so the command byte is first.
+    const uint8_t polling_frame[] = {0x00, 0xFF, 0xFF, 0x00, 0x00};
+    esp_err_t err = SetNoResponseTimerMs(kNfcFPollTimeoutMs);
+    if (err == ESP_OK) err = Transmit(polling_frame, sizeof(polling_frame), 0, true);
+
+    uint8_t irq = 0;
+    if (err == ESP_OK) {
+        err = WaitForMainInterrupt(kMainIrqTransmitEnd, kNfcFPollTimeoutMs, &irq);
+    }
+    if (err == ESP_OK) {
+        err = WaitForMainInterrupt(kMainIrqReceiveEnd, kNfcFPollTimeoutMs, &irq);
+    }
+    if (err == ESP_ERR_TIMEOUT) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint8_t response[18] = {};
+    size_t actual = 0;
+    err = ReadFifo(response, sizeof(response), &actual);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (actual != sizeof(response) || response[0] < sizeof(response) || response[1] != 0x01) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    std::memcpy(snapshot->idm, response + 2, sizeof(snapshot->idm));
+    std::memcpy(snapshot->pmm, response + 10, sizeof(snapshot->pmm));
+    snapshot->protocol = StackChanNfcProtocol::kNfcF;
+    snapshot->tag_present = true;
     return ESP_OK;
 }
 
@@ -454,7 +565,12 @@ esp_err_t StackChanNfc::Scan(StackChanNfcSnapshot* snapshot) {
 
     *snapshot = {};
     esp_err_t err = initialized_ ? ESP_OK : InitializeLocked();
-    if (err == ESP_OK) err = StartField();
+    bool field_started = false;
+    if (err == ESP_OK) err = ConfigureIso14443A();
+    if (err == ESP_OK) {
+        err = StartField();
+        field_started = err == ESP_OK;
+    }
     if (err == ESP_OK) {
         err = RequestA(&snapshot->atqa, &snapshot->collision_detected);
         if (err == ESP_ERR_NOT_FOUND) {
@@ -478,6 +594,7 @@ esp_err_t StackChanNfc::Scan(StackChanNfcSnapshot* snapshot) {
             more_cascade_levels = (snapshot->sak & 0x04) != 0;
             if (!more_cascade_levels) {
                 snapshot->tag_present = true;
+                snapshot->protocol = StackChanNfcProtocol::kIso14443A;
             }
         }
         if (err == ESP_OK && !snapshot->collision_detected && !snapshot->tag_present) {
@@ -485,9 +602,34 @@ esp_err_t StackChanNfc::Scan(StackChanNfcSnapshot* snapshot) {
         }
     }
 
-    const esp_err_t stop_err = StopField();
-    if (err == ESP_OK && stop_err != ESP_OK) {
-        err = stop_err;
+    // Suica and other FeliCa cards are NFC-F, not ISO 14443A. When no A tag
+    // answered, switch profiles and perform one SENSF wildcard poll.
+    if (err == ESP_OK && !snapshot->collision_detected && snapshot->atqa == 0) {
+        if (field_started) {
+            const esp_err_t stop_err = StopField();
+            field_started = false;
+            if (stop_err != ESP_OK) {
+                err = stop_err;
+            }
+        }
+        if (err == ESP_OK) err = ConfigureNfcF();
+        if (err == ESP_OK) {
+            err = StartField();
+            field_started = err == ESP_OK;
+        }
+        if (err == ESP_OK) {
+            err = PollNfcF(snapshot);
+            if (err == ESP_ERR_NOT_FOUND) {
+                err = ESP_OK;
+            }
+        }
+    }
+
+    if (field_started) {
+        const esp_err_t stop_err = StopField();
+        if (err == ESP_OK && stop_err != ESP_OK) {
+            err = stop_err;
+        }
     }
     if (err == ESP_OK) {
         snapshot->chip_type = chip_type_;

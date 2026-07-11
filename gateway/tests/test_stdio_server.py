@@ -203,12 +203,12 @@ async def test_read_environment_is_exposed_and_relays_to_esp32(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_scan_nfc_is_exposed_and_relays_to_esp32(monkeypatch):
-    """scan_nfc is parameterless and maps to the safe NFC firmware tool."""
+    """scan_nfc relays NFC-F identifier metadata without transforming it."""
     calls = []
     payload = {
         "ok": True,
         "sensor": "ST25R3916",
-        "tag": {"present": True, "uid": "04A1B2C3", "sak": 0},
+        "tag": {"present": True, "protocol": "NFC-F", "idm": "0123456789ABCDEF", "pmm": "0011223344556677"},
     }
 
     class FakeESP32:
@@ -236,6 +236,7 @@ async def test_scan_nfc_is_exposed_and_relays_to_esp32(monkeypatch):
     )
     tools = {tool.name: tool for tool in listed.root.tools}
     assert tools["scan_nfc"].inputSchema == {"type": "object", "properties": {}}
+    assert "FeliCa" in tools["scan_nfc"].description
 
     result = await server.request_handlers[CallToolRequest](
         CallToolRequest(

@@ -6,7 +6,6 @@
 
 #include "stackchan_imu.h"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -48,8 +47,9 @@ constexpr uint8_t kBmm150DataRegister = 0x42;
 constexpr uint8_t kBmm150PowerRegister = 0x4B;
 constexpr uint8_t kBmm150ModeRegister = 0x4C;
 
-constexpr size_t kConfigChunkSize = 32;
+constexpr size_t kMaxRegisterWriteSize = 32;
 constexpr int kI2cTimeoutMs = 100;
+constexpr int kConfigUploadTimeoutMs = 500;
 
 int16_t ReadInt16(const uint8_t* data) {
     return static_cast<int16_t>(static_cast<uint16_t>(data[0]) |
@@ -132,8 +132,8 @@ esp_err_t StackChanImu::WriteRegisters(uint8_t reg, const uint8_t* data, size_t 
     if (bmi270_ == nullptr || data == nullptr || length == 0) {
         return ESP_ERR_INVALID_STATE;
     }
-    uint8_t buffer[kConfigChunkSize + 1];
-    if (length > kConfigChunkSize) {
+    uint8_t buffer[kMaxRegisterWriteSize + 1];
+    if (length > kMaxRegisterWriteSize) {
         return ESP_ERR_INVALID_SIZE;
     }
     buffer[0] = reg;
@@ -142,29 +142,34 @@ esp_err_t StackChanImu::WriteRegisters(uint8_t reg, const uint8_t* data, size_t 
 }
 
 esp_err_t StackChanImu::UploadBmi270Config() {
-    esp_err_t err = WriteRegister(kRegInitCtrl, 0x00);
+    // BMI270's feature configuration is an uninterrupted byte stream.  The
+    // M5Unified CoreS3 driver writes the complete Bosch configuration file in
+    // one I2C transaction after setting INIT_ADDR to zero; splitting it into
+    // register writes can leave the sensor's internal loader incomplete.
+    const uint8_t init_address[] = {0x00, 0x00};
+    esp_err_t err = WriteRegisters(kRegInitAddr, init_address, sizeof(init_address));
     if (err != ESP_OK) {
+        ESP_LOGE(kTag, "BMI270 config: set INIT_ADDR failed: %s", esp_err_to_name(err));
         return err;
     }
 
-    for (size_t offset = 0; offset < BMI270_CONFIG_FILE_SIZE; offset += kConfigChunkSize) {
-        uint8_t init_address[2] = {
-            static_cast<uint8_t>((offset >> 1) & 0x0F),
-            static_cast<uint8_t>(offset >> 5),
-        };
-        err = WriteRegisters(kRegInitAddr, init_address, sizeof(init_address));
-        if (err != ESP_OK) {
-            return err;
-        }
-        const size_t chunk = std::min(kConfigChunkSize, BMI270_CONFIG_FILE_SIZE - offset);
-        err = WriteRegisters(kRegInitData, bmi270_config_file + offset, chunk);
-        if (err != ESP_OK) {
-            return err;
-        }
+    const uint8_t config_register = kRegInitData;
+    i2c_master_transmit_multi_buffer_info_t config_buffers[] = {
+        {.write_buffer = &config_register, .buffer_size = sizeof(config_register)},
+        {.write_buffer = bmi270_config_file, .buffer_size = BMI270_CONFIG_FILE_SIZE},
+    };
+    err = i2c_master_multi_buffer_transmit(bmi270_, config_buffers,
+                                           sizeof(config_buffers) / sizeof(config_buffers[0]),
+                                           kConfigUploadTimeoutMs);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "BMI270 config: upload %u bytes failed: %s",
+                 static_cast<unsigned>(BMI270_CONFIG_FILE_SIZE), esp_err_to_name(err));
+        return err;
     }
 
     err = WriteRegister(kRegInitCtrl, 0x01);
     if (err != ESP_OK) {
+        ESP_LOGE(kTag, "BMI270 config: start feature engine failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -175,7 +180,12 @@ esp_err_t StackChanImu::UploadBmi270Config() {
         if (err == ESP_OK && (status & 0x0F) == 0x01) {
             return ESP_OK;
         }
+        if (err != ESP_OK) {
+            ESP_LOGE(kTag, "BMI270 config: read internal status failed: %s", esp_err_to_name(err));
+            return err;
+        }
     }
+    ESP_LOGE(kTag, "BMI270 config: feature engine did not become ready");
     return ESP_ERR_INVALID_RESPONSE;
 }
 
@@ -274,24 +284,56 @@ esp_err_t StackChanImu::InitializeBmm150() {
 esp_err_t StackChanImu::InitializeBmi270() {
     esp_err_t err = WriteRegister(kRegCommand, kBmi270SoftReset);
     if (err != ESP_OK) {
+        ESP_LOGE(kTag, "BMI270 reset command failed: %s", esp_err_to_name(err));
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(3));
+
+    // The sensor NACKs feature-register writes while its reset state machine
+    // is active.  Wait for PWR_CONF to leave its reset value, matching the
+    // vendor's CoreS3 BMI270 driver.
+    uint8_t power_conf = 0;
+    bool reset_complete = false;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+        err = ReadRegisters(kRegPowerConf, &power_conf, 1);
+        if (err != ESP_OK) {
+            ESP_LOGE(kTag, "BMI270 reset: read PWR_CONF failed: %s", esp_err_to_name(err));
+            return err;
+        }
+        if (power_conf != 0) {
+            reset_complete = true;
+            break;
+        }
+    }
+    if (!reset_complete) {
+        ESP_LOGE(kTag, "BMI270 reset: PWR_CONF did not leave reset state");
+        return ESP_ERR_TIMEOUT;
+    }
 
     uint8_t chip_id = 0;
     err = ReadRegisters(kRegChipId, &chip_id, 1);
     if (err != ESP_OK || chip_id != kBmi270ChipId) {
+        if (err != ESP_OK) {
+            ESP_LOGE(kTag, "BMI270 reset: re-read chip ID failed: %s", esp_err_to_name(err));
+        }
         return err == ESP_OK ? ESP_ERR_NOT_FOUND : err;
     }
 
     err = WriteRegister(kRegPowerConf, 0x00);
     if (err != ESP_OK) {
+        ESP_LOGE(kTag, "BMI270 disable power save failed: %s", esp_err_to_name(err));
         return err;
     }
     vTaskDelay(pdMS_TO_TICKS(1));
 
     err = UploadBmi270Config();
     if (err != ESP_OK) {
+        return err;
+    }
+
+    err = WriteRegister(kRegIntMapData, 0xFF);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "BMI270 map data interrupts failed: %s", esp_err_to_name(err));
         return err;
     }
 
