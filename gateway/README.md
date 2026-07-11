@@ -178,6 +178,7 @@ Same shape, under `mcpServers`.
 | `move_head(yaw, pitch, speed?)` | Drive yaw + pitch servos |
 | `get_head_angles` | Read current yaw + pitch servo angles |
 | `read_imu` | Read one on-board BMI270 + BMM150 9-axis snapshot in g / degrees per second / microtesla, with raw samples and data-ready flags |
+| `read_environment` | Read one on-board LTR-553ALS-WA ambient-light/proximity snapshot in raw ADC counts, with data-ready/valid/saturation flags |
 | `get_touch_state` | Touch sensor state (press/release/stroke) |
 | `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`), or `off` to hide the avatar and disable blink so the underlying xiaozhi-esp32 screens (WiFi config UI, OTA, settings) are visible. A subsequent `set_avatar(<other face>)` brings it back and restores blink. |
 | `set_blink(state)` | Blink animation on/off |

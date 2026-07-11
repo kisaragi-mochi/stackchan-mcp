@@ -771,6 +771,10 @@ async def _dispatch_mcp_tool(
             "self.imu.read",
             {},
         ),
+        "read_environment": (
+            "self.environment.read",
+            {},
+        ),
         "gpio_test": (
             "self.robot.gpio_test",
             {},
@@ -1276,6 +1280,17 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "flags, and a monotonic sample timestamp. The magnetometer can "
                     "be distorted by the nearby servos and is best used as an "
                     "availability/change signal unless calibrated in place."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="read_environment",
+                description=(
+                    "Read one LTR-553ALS-WA ambient-light and proximity snapshot. "
+                    "Returns the visible-plus-IR and IR-only ambient-light ADC "
+                    "channels plus the proximity ADC value in raw counts, with "
+                    "data-ready, validity, and saturation flags. This is a "
+                    "single read; it does not start a monitoring stream."
                 ),
                 inputSchema={"type": "object", "properties": {}},
             ),

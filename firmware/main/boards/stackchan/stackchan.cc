@@ -32,6 +32,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include "avatar_images.h"
 #include "avatar_set.h"
 #include "avatar_set_fetcher.h"
+#include "stackchan_environment.h"
 #include "stackchan_imu.h"
 
 #include <smooth_ui_toolkit.hpp>
@@ -530,6 +531,7 @@ private:
     PowerSaveTimer* power_save_timer_;
     ScsBus scs_bus_;
     std::unique_ptr<Py32IoExpander> io_expander_;
+    std::unique_ptr<StackChanEnvironment> environment_;
     std::unique_ptr<StackChanImu> imu_;
 
     // Avatar overlay state. avatar_img_ is created lazily on the active LVGL
@@ -2161,6 +2163,15 @@ private:
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "IMU startup initialization failed; self.imu.read will retry: %s",
                      imu_->last_error().c_str());
+        }
+    }
+
+    void InitializeEnvironment() {
+        environment_ = std::make_unique<StackChanEnvironment>(i2c_bus_);
+        esp_err_t err = environment_->Initialize();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "LTR-553 startup initialization failed; self.environment.read will retry: %s",
+                     environment_->last_error().c_str());
         }
     }
 
@@ -5499,6 +5510,67 @@ private:
             });
 
         mcp_server.AddTool(
+            "self.environment.read",
+            "Read one LTR-553ALS-WA ambient-light and proximity snapshot. Returns the two ambient-light "
+            "ADC channels and the proximity ADC value in raw counts, data-ready/valid/saturation flags, "
+            "sensor identity, and a monotonic sample time. This dedicated tool never exposes the shared "
+            "internal I2C bus.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                if (!environment_) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "LTR-553 driver unavailable");
+                    return root;
+                }
+
+                StackChanEnvironmentSnapshot sample;
+                esp_err_t err = environment_->Read(&sample);
+                if (err != ESP_OK) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", environment_->last_error().c_str());
+                    cJSON_AddNumberToObject(root, "error_code", static_cast<int>(err));
+                    ESP_LOGW(TAG, "self.environment.read failed: %s",
+                             environment_->last_error().c_str());
+                    return root;
+                }
+
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddStringToObject(root, "sensor", "LTR-553ALS-WA");
+                cJSON_AddNumberToObject(root, "i2c_address", 0x23);
+                cJSON_AddNumberToObject(root, "part_id", sample.part_id);
+                cJSON_AddNumberToObject(root, "manufacturer_id", sample.manufacturer_id);
+                cJSON_AddNumberToObject(root, "sample_time_us", sample.sample_time_us);
+
+                cJSON* ambient_light = cJSON_CreateObject();
+                cJSON_AddStringToObject(ambient_light, "unit", "adc_counts");
+                cJSON_AddNumberToObject(ambient_light, "channel0_visible_ir",
+                                         sample.ambient_light_channel0);
+                cJSON_AddNumberToObject(ambient_light, "channel1_ir",
+                                         sample.ambient_light_channel1);
+                cJSON_AddBoolToObject(ambient_light, "data_ready",
+                                      sample.ambient_light_data_ready);
+                cJSON_AddBoolToObject(ambient_light, "valid", sample.ambient_light_valid);
+                cJSON_AddItemToObject(root, "ambient_light", ambient_light);
+
+                cJSON* proximity = cJSON_CreateObject();
+                cJSON_AddStringToObject(proximity, "unit", "adc_counts");
+                cJSON_AddNumberToObject(proximity, "raw", sample.proximity);
+                cJSON_AddBoolToObject(proximity, "data_ready", sample.proximity_data_ready);
+                cJSON_AddBoolToObject(proximity, "saturated", sample.proximity_saturated);
+                cJSON_AddItemToObject(root, "proximity", proximity);
+
+                ESP_LOGD(TAG,
+                         "self.environment.read als_ch0=%u als_ch1=%u ps=%u ready=%d/%d valid=%d sat=%d",
+                         sample.ambient_light_channel0, sample.ambient_light_channel1,
+                         sample.proximity, sample.ambient_light_data_ready ? 1 : 0,
+                         sample.proximity_data_ready ? 1 : 0,
+                         sample.ambient_light_valid ? 1 : 0,
+                         sample.proximity_saturated ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
             "self.robot.set_touch_sensor_enabled",
             "Update the NVS-backed head-touch sensor enable flag. Disabling "
             "takes effect immediately and persists across reboot; subsequent "
@@ -6871,6 +6943,7 @@ public:
         InitializeSi12tTouch();
         I2cDetect();
         InitializeImu();
+        InitializeEnvironment();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
         // Avatar is shown on-demand via MCP set_avatar command.
         // InitializeAvatar();
