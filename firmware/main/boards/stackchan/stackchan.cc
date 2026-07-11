@@ -34,6 +34,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include "avatar_set_fetcher.h"
 #include "stackchan_environment.h"
 #include "stackchan_imu.h"
+#include "stackchan_nfc.h"
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
@@ -533,6 +534,7 @@ private:
     std::unique_ptr<Py32IoExpander> io_expander_;
     std::unique_ptr<StackChanEnvironment> environment_;
     std::unique_ptr<StackChanImu> imu_;
+    std::unique_ptr<StackChanNfc> nfc_;
 
     // Avatar overlay state. avatar_img_ is created lazily on the active LVGL
     // screen because the screen tree (container_, emoji_label_, ...) is built
@@ -2172,6 +2174,15 @@ private:
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "LTR-553 startup initialization failed; self.environment.read will retry: %s",
                      environment_->last_error().c_str());
+        }
+    }
+
+    void InitializeNfc() {
+        nfc_ = std::make_unique<StackChanNfc>(i2c_bus_);
+        esp_err_t err = nfc_->Initialize();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "ST25R3916 startup initialization failed; self.nfc.scan will retry: %s",
+                     nfc_->last_error().c_str());
         }
     }
 
@@ -5571,6 +5582,74 @@ private:
             });
 
         mcp_server.AddTool(
+            "self.nfc.scan",
+            "Scan once for a single ISO 14443A NFC tag with the body-mounted ST25R3916. "
+            "Returns UID, ATQA, and SAK only; it does not read or write tag memory, authenticate, "
+            "emulate a card, or leave the RF field enabled after the call. If multiple tags collide, "
+            "reports the collision without choosing a tag.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                if (!nfc_) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "ST25R3916 driver unavailable");
+                    return root;
+                }
+
+                StackChanNfcSnapshot sample;
+                esp_err_t err = nfc_->Scan(&sample);
+                if (err != ESP_OK) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", nfc_->last_error().c_str());
+                    cJSON_AddNumberToObject(root, "error_code", static_cast<int>(err));
+                    ESP_LOGW(TAG, "self.nfc.scan failed: %s", nfc_->last_error().c_str());
+                    return root;
+                }
+
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddStringToObject(root, "sensor", "ST25R3916");
+                cJSON_AddNumberToObject(root, "i2c_address", 0x50);
+                cJSON_AddNumberToObject(root, "sample_time_us", sample.sample_time_us);
+                cJSON* reader = cJSON_CreateObject();
+                cJSON_AddNumberToObject(reader, "chip_type", sample.chip_type);
+                cJSON_AddNumberToObject(reader, "chip_revision", sample.chip_revision);
+                cJSON_AddItemToObject(root, "reader", reader);
+
+                cJSON* tag = cJSON_CreateObject();
+                cJSON_AddBoolToObject(tag, "present", sample.tag_present);
+                cJSON_AddBoolToObject(tag, "collision_detected", sample.collision_detected);
+                if (sample.atqa != 0) {
+                    char atqa_hex[7];
+                    std::snprintf(atqa_hex, sizeof(atqa_hex), "0x%04X", sample.atqa);
+                    cJSON_AddStringToObject(tag, "atqa", atqa_hex);
+                } else {
+                    cJSON_AddNullToObject(tag, "atqa");
+                }
+                if (sample.tag_present) {
+                    char uid_hex[sizeof(sample.uid) * 2 + 1] = {};
+                    for (size_t i = 0; i < sample.uid_length; ++i) {
+                        std::snprintf(uid_hex + i * 2, sizeof(uid_hex) - i * 2,
+                                      "%02X", sample.uid[i]);
+                    }
+                    cJSON_AddStringToObject(tag, "uid", uid_hex);
+                    cJSON_AddNumberToObject(tag, "uid_length", sample.uid_length);
+                    cJSON_AddNumberToObject(tag, "sak", sample.sak);
+                } else {
+                    cJSON_AddNullToObject(tag, "uid");
+                    cJSON_AddNullToObject(tag, "uid_length");
+                    cJSON_AddNullToObject(tag, "sak");
+                }
+                cJSON_AddItemToObject(root, "tag", tag);
+
+                // A UID can be a stable personal identifier. Keep it in the
+                // explicit tool response only; logs record no UID bytes.
+                ESP_LOGD(TAG, "self.nfc.scan present=%d collision=%d uid_length=%u",
+                         sample.tag_present ? 1 : 0, sample.collision_detected ? 1 : 0,
+                         static_cast<unsigned>(sample.uid_length));
+                return root;
+            });
+
+        mcp_server.AddTool(
             "self.robot.set_touch_sensor_enabled",
             "Update the NVS-backed head-touch sensor enable flag. Disabling "
             "takes effect immediately and persists across reboot; subsequent "
@@ -6944,6 +7023,7 @@ public:
         I2cDetect();
         InitializeImu();
         InitializeEnvironment();
+        InitializeNfc();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
         // Avatar is shown on-demand via MCP set_avatar command.
         // InitializeAvatar();

@@ -775,6 +775,10 @@ async def _dispatch_mcp_tool(
             "self.environment.read",
             {},
         ),
+        "scan_nfc": (
+            "self.nfc.scan",
+            {},
+        ),
         "gpio_test": (
             "self.robot.gpio_test",
             {},
@@ -1291,6 +1295,17 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "channels plus the proximity ADC value in raw counts, with "
                     "data-ready, validity, and saturation flags. This is a "
                     "single read; it does not start a monitoring stream."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="scan_nfc",
+                description=(
+                    "Scan once for one ISO 14443A NFC tag with the robot's "
+                    "body-mounted ST25R3916 reader. Returns a detected UID, "
+                    "ATQA, SAK, or a collision indication. It never reads or "
+                    "writes tag memory, authenticates, emulates a card, or "
+                    "keeps the RF field enabled after the scan."
                 ),
                 inputSchema={"type": "object", "properties": {}},
             ),
