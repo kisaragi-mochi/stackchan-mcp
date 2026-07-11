@@ -32,9 +32,30 @@ documented-only.
 
 ### Gateway
 
+- Added `read_imu`, a parameterless MCP wrapper for one on-board BMI270 +
+  BMM150 9-axis snapshot with physical units, raw samples, and data-ready
+  metadata.
+- Added `read_environment`, a parameterless MCP wrapper for one on-board
+  LTR-553ALS-WA ambient-light/proximity snapshot with ADC counts and status
+  flags.
+- Added `scan_nfc`, a parameterless MCP wrapper for a single ISO 14443A NFC
+  tag UID scan using StackChan's body-mounted ST25R3916 reader. It performs no
+  tag memory read/write, authentication, or emulation.
 - Added `stackchan_follow_led_stream`, a gateway-side WebSocket LED-frame
   subscriber for driving the base ring or a Port B WS2812 strip from external
   `event` / `continuous` color frames. (#335)
+
+### Firmware
+
+- Added the read-only `self.imu.read` tool for the StackChan board. It reads
+  the internal BMI270 accelerometer/gyroscope and the BMM150 connected through
+  BMI270 AUX without exposing the safety-critical internal I2C bus.
+- Added the read-only `self.environment.read` tool for the StackChan board. It
+  reads LTR-553ALS-WA ambient-light and proximity ADC values without exposing
+  the safety-critical internal I2C bus.
+- Added the `self.nfc.scan` tool for the StackChan board. It turns on the
+  ST25R3916 RF field only during a single ISO 14443A UID scan, then turns it
+  off without reading or writing tag memory.
 
 ## [0.15.0] - 2026-07-09
 

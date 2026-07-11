@@ -106,6 +106,149 @@ async def test_get_head_angles_relays_to_esp32(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_read_imu_is_exposed_and_relays_to_esp32(monkeypatch):
+    """read_imu is parameterless and maps to the dedicated firmware tool."""
+    calls = []
+    payload = {
+        "ok": True,
+        "accel_g": {"x": 0.01, "y": -0.02, "z": -0.99},
+        "gyro_dps": {"x": 0.1, "y": 0.2, "z": 0.3},
+        "mag_ut": {"x": 12.0, "y": -4.0, "z": 31.0},
+    }
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(payload),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    listed = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+    tools = {tool.name: tool for tool in listed.root.tools}
+    assert tools["read_imu"].inputSchema == {"type": "object", "properties": {}}
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "read_imu", "arguments": {}},
+        )
+    )
+
+    assert calls == [("self.imu.read", {})]
+    assert json.loads(result.root.content[0].text) == payload
+
+
+@pytest.mark.asyncio
+async def test_read_environment_is_exposed_and_relays_to_esp32(monkeypatch):
+    """read_environment is parameterless and maps to the LTR-553 tool."""
+    calls = []
+    payload = {
+        "ok": True,
+        "sensor": "LTR-553ALS-WA",
+        "ambient_light": {"channel0_visible_ir": 321, "channel1_ir": 45},
+        "proximity": {"raw": 76},
+    }
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(payload),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    listed = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+    tools = {tool.name: tool for tool in listed.root.tools}
+    assert tools["read_environment"].inputSchema == {"type": "object", "properties": {}}
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "read_environment", "arguments": {}},
+        )
+    )
+
+    assert calls == [("self.environment.read", {})]
+    assert json.loads(result.root.content[0].text) == payload
+
+
+@pytest.mark.asyncio
+async def test_scan_nfc_is_exposed_and_relays_to_esp32(monkeypatch):
+    """scan_nfc is parameterless and maps to the safe NFC firmware tool."""
+    calls = []
+    payload = {
+        "ok": True,
+        "sensor": "ST25R3916",
+        "tag": {"present": True, "uid": "04A1B2C3", "sak": 0},
+    }
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(payload),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    listed = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+    tools = {tool.name: tool for tool in listed.root.tools}
+    assert tools["scan_nfc"].inputSchema == {"type": "object", "properties": {}}
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "scan_nfc", "arguments": {}},
+        )
+    )
+
+    assert calls == [("self.nfc.scan", {})]
+    assert json.loads(result.root.content[0].text) == payload
+
+
+@pytest.mark.asyncio
 async def test_list_tools_includes_gateway_config_tools():
     """gateway_config_get/set are exposed with the expected schemas."""
     server = create_server()

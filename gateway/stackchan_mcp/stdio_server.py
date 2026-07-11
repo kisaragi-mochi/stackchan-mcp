@@ -767,6 +767,18 @@ async def _dispatch_mcp_tool(
             "self.robot.get_head_angles",
             {},
         ),
+        "read_imu": (
+            "self.imu.read",
+            {},
+        ),
+        "read_environment": (
+            "self.environment.read",
+            {},
+        ),
+        "scan_nfc": (
+            "self.nfc.scan",
+            {},
+        ),
         "gpio_test": (
             "self.robot.gpio_test",
             {},
@@ -1261,6 +1273,41 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "type": "object",
                     "properties": {},
                 },
+            ),
+            Tool(
+                name="read_imu",
+                description=(
+                    "Read one 9-axis snapshot from the robot's on-board BMI270 "
+                    "accelerometer/gyroscope and BMM150 magnetometer. Returns "
+                    "acceleration in g, angular velocity in degrees per second, "
+                    "magnetic field in microtesla, signed raw values, data-ready "
+                    "flags, and a monotonic sample timestamp. The magnetometer can "
+                    "be distorted by the nearby servos and is best used as an "
+                    "availability/change signal unless calibrated in place."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="read_environment",
+                description=(
+                    "Read one LTR-553ALS-WA ambient-light and proximity snapshot. "
+                    "Returns the visible-plus-IR and IR-only ambient-light ADC "
+                    "channels plus the proximity ADC value in raw counts, with "
+                    "data-ready, validity, and saturation flags. This is a "
+                    "single read; it does not start a monitoring stream."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="scan_nfc",
+                description=(
+                    "Scan once for one ISO 14443A NFC tag with the robot's "
+                    "body-mounted ST25R3916 reader. Returns a detected UID, "
+                    "ATQA, SAK, or a collision indication. It never reads or "
+                    "writes tag memory, authenticates, emulates a card, or "
+                    "keeps the RF field enabled after the scan."
+                ),
+                inputSchema={"type": "object", "properties": {}},
             ),
             Tool(
                 name="gpio_test",
