@@ -71,6 +71,37 @@ class _ClosingHandlerWebSocket:
         self.closed = True
 
 
+class _GracefulCloseHandlerWebSocket:
+    """Fake server-side WebSocket whose iterator exits after a graceful close."""
+
+    def __init__(
+        self,
+        messages: list[str | bytes],
+        close_code: int | None,
+        close_reason: str | None,
+    ) -> None:
+        self._messages = messages
+        self.close_code = close_code
+        self.close_reason = close_reason
+        self.request = SimpleNamespace(headers={"Device-Id": "device-test"})
+        self.sent: list[str | bytes] = []
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._messages:
+            return self._messages.pop(0)
+        raise StopAsyncIteration
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 @pytest.mark.asyncio
 async def test_manager_starts_and_stops():
     """Manager can start and stop cleanly."""
@@ -288,6 +319,32 @@ async def test_esp32_disconnect_handling(manager):
     # Connection closed
     await asyncio.sleep(0.2)
     assert manager.device_connected is False
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_graceful_close_details_once(monkeypatch, caplog):
+    """Normal async-for completion still logs enriched close details once."""
+    ticks = iter([100.0, 103.25, 105.5])
+    monkeypatch.setattr(esp32_client, "_monotonic", lambda: next(ticks))
+    ws = _GracefulCloseHandlerWebSocket(
+        [json.dumps({"type": "noop"})],
+        close_code=1000,
+        close_reason="normal",
+    )
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+
+    await ESP32Manager()._handler(ws)  # type: ignore[arg-type]
+
+    disconnect_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("ESP32 disconnected:")
+    ]
+    assert disconnect_logs == [
+        "ESP32 disconnected: device=device-test close_class=GracefulClose "
+        "rcvd_code=1000 rcvd_reason='normal' sent_code=None sent_reason=None "
+        "last_frame_age_s=2.250 lifetime_s=5.500"
+    ]
 
 
 @pytest.mark.asyncio

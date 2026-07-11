@@ -95,6 +95,33 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
+def _log_disconnect_details(
+    *,
+    device_id: str,
+    close_class: str,
+    rcvd_code: int | None,
+    rcvd_reason: str | None,
+    sent_code: int | None,
+    sent_reason: str | None,
+    connected_at: float,
+    last_frame_received_at: float | None,
+) -> None:
+    disconnected_at = _monotonic()
+    logger.info(
+        "ESP32 disconnected: device=%s close_class=%s "
+        "rcvd_code=%s rcvd_reason=%r sent_code=%s sent_reason=%r "
+        "last_frame_age_s=%s lifetime_s=%s",
+        device_id,
+        close_class,
+        rcvd_code,
+        rcvd_reason,
+        sent_code,
+        sent_reason,
+        _format_elapsed_s(last_frame_received_at, disconnected_at),
+        _format_elapsed_s(connected_at, disconnected_at),
+    )
+
+
 class ESP32Connection:
     """Manages a single ESP32 device connection."""
 
@@ -597,6 +624,7 @@ class ESP32Manager:
         connection.device_id = device_id
         connected_at = _monotonic()
         last_frame_received_at: float | None = None
+        disconnect_logged = False
 
         try:
             async for message in ws:
@@ -752,23 +780,33 @@ class ESP32Manager:
                 else:
                     logger.debug("ESP32 message type=%s (ignored)", msg_type)
 
+            if not disconnect_logged:
+                _log_disconnect_details(
+                    device_id=device_id,
+                    close_class="GracefulClose",
+                    rcvd_code=getattr(ws, "close_code", None),
+                    rcvd_reason=getattr(ws, "close_reason", None),
+                    sent_code=None,
+                    sent_reason=None,
+                    connected_at=connected_at,
+                    last_frame_received_at=last_frame_received_at,
+                )
+                disconnect_logged = True
+
         except websockets.exceptions.ConnectionClosed as exc:
-            disconnected_at = _monotonic()
             rcvd_code, rcvd_reason = _close_frame_fields(exc.rcvd)
             sent_code, sent_reason = _close_frame_fields(exc.sent)
-            logger.info(
-                "ESP32 disconnected: device=%s close_class=%s "
-                "rcvd_code=%s rcvd_reason=%r sent_code=%s sent_reason=%r "
-                "last_frame_age_s=%s lifetime_s=%s",
-                device_id,
-                exc.__class__.__name__,
-                rcvd_code,
-                rcvd_reason,
-                sent_code,
-                sent_reason,
-                _format_elapsed_s(last_frame_received_at, disconnected_at),
-                _format_elapsed_s(connected_at, disconnected_at),
+            _log_disconnect_details(
+                device_id=device_id,
+                close_class=exc.__class__.__name__,
+                rcvd_code=rcvd_code,
+                rcvd_reason=rcvd_reason,
+                sent_code=sent_code,
+                sent_reason=sent_reason,
+                connected_at=connected_at,
+                last_frame_received_at=last_frame_received_at,
             )
+            disconnect_logged = True
         finally:
             # If the device disconnected mid-capture, drop any partial
             # buffer rather than letting it leak into the next
