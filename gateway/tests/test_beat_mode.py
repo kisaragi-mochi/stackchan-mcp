@@ -15,7 +15,11 @@ from stackchan_mcp.audio_stream import (
     stop_recording,
 )
 from stackchan_mcp.beat import mode as beat_mode
-from stackchan_mcp.beat.mode import BeatMode, BeatModeConfig
+from stackchan_mcp.beat.mode import (
+    BeatMode,
+    BeatModeConfig,
+    min_onset_rms_for_sensitivity,
+)
 from stackchan_mcp.stt import EngineRegistry, STTEngine, listen_and_transcribe
 from stackchan_mcp.stt.audio_utils import DEVICE_SAMPLE_RATE
 
@@ -132,6 +136,13 @@ async def test_start_stop_are_idempotent_and_release_recording(fake_decode) -> N
         ("start", "manual"),
         ("stop", None),
     ]
+
+
+def test_sensitivity_mapping_anchors() -> None:
+    assert min_onset_rms_for_sensitivity(0.0) == pytest.approx(0.025)
+    assert min_onset_rms_for_sensitivity(0.5) == pytest.approx(0.004)
+    assert min_onset_rms_for_sensitivity(1.0) == pytest.approx(0.001)
+    assert BeatModeConfig().min_onset_rms == pytest.approx(0.004)
 
 
 @pytest.mark.asyncio
@@ -406,6 +417,7 @@ async def test_update_applies_runtime_parameters(fake_decode) -> None:
 
     status = await beat_mode.update_beat_mode(
         motion_intensity=0.2,
+        sensitivity=0.0,
         color=(255, 64, 0),
         blink_rate=2.0,
         motion_enabled=False,
@@ -413,15 +425,42 @@ async def test_update_applies_runtime_parameters(fake_decode) -> None:
     )
 
     assert status["motion"]["intensity"] == 0.2
+    assert status["sensitivity"] == 0.0
+    assert status["min_onset_rms"] == pytest.approx(0.025)
     assert status["motion"]["enabled"] is False
     assert status["led"]["color"] == [255, 64, 0]
     assert status["led"]["blink_rate"] == 2.0
     assert status["led"]["enabled"] is False
 
 
+@pytest.mark.asyncio
+async def test_update_sensitivity_preserves_tracker_history(fake_decode) -> None:
+    gateway = _FakeGateway()
+    await beat_mode.start_beat_mode(gateway, BeatModeConfig())
+    mode = beat_mode._mode
+    assert mode is not None
+
+    with mode._tracker._lock:
+        mode._tracker._record_onset(1.0)
+        mode._tracker._record_onset(1.5)
+        mode._tracker._record_onset(2.0)
+        mode._tracker._update_bpm_locked(2.0)
+    before = mode._tracker.snapshot()
+
+    status = await beat_mode.update_beat_mode(sensitivity=1.0)
+
+    assert mode._tracker.snapshot() == before
+    assert status["onsets"] == before.onset_count
+    assert status["bpm"] == before.bpm
+    assert status["sensitivity"] == 1.0
+    assert status["min_onset_rms"] == pytest.approx(0.001)
+
+
 def test_config_validation_rejects_invalid_values() -> None:
     with pytest.raises(ValueError, match="motion_intensity"):
         BeatModeConfig(motion_intensity=1.5)
+    with pytest.raises(ValueError, match="sensitivity"):
+        BeatModeConfig(sensitivity=1.5)
     with pytest.raises(ValueError, match="color channels"):
         BeatModeConfig(color=(256, 0, 0))
     with pytest.raises(ValueError, match="blink_rate"):

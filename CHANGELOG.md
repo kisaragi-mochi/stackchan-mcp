@@ -32,6 +32,9 @@ documented-only.
 
 ### Gateway
 
+- Added runtime-adjustable beat-mode onset sensitivity for venue tuning; the
+  default maps to the real-device verified 0.004 RMS floor, and metadata
+  snapshots report both the selected sensitivity and effective floor. (#301)
 - Added gateway-only beat mode MCP tools for continuous ambient audio capture
   through the existing `listen` wire path, dependency-free BPM estimation,
   beat-synced head sway/base-ring LED flashes, polling metadata snapshots, and

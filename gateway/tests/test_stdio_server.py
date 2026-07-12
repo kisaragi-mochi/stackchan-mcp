@@ -1717,11 +1717,16 @@ async def test_list_tools_includes_beat_mode_tools():
 
     start_schema = tools["beat_mode_start"].inputSchema
     assert start_schema["properties"]["motion_intensity"]["maximum"] == 1
+    assert start_schema["properties"]["sensitivity"]["default"] == 0.5
+    assert start_schema["properties"]["sensitivity"]["maximum"] == 1
+    sensitivity_description = start_schema["properties"]["sensitivity"]["description"]
+    assert "0.5 => 0.004" in sensitivity_description
     assert start_schema["properties"]["color"]["minItems"] == 3
     assert "listen() calls fail fast" in tools["beat_mode_start"].description
     assert "base ring" in tools["beat_mode_start"].description
 
     update_schema = tools["beat_mode_update"].inputSchema
+    assert update_schema["properties"]["sensitivity"]["minimum"] == 0
     assert update_schema["properties"]["blink_rate"]["minimum"] == 0.25
     assert update_schema["properties"]["motion_enabled"]["type"] == "boolean"
     assert "persists on disk" in tools["beat_clip_save"].description
@@ -1741,6 +1746,8 @@ async def test_beat_mode_start_arguments_propagate(monkeypatch):
         return {
             "active": True,
             "motion": {"intensity": cfg.motion_intensity},
+            "sensitivity": cfg.sensitivity,
+            "min_onset_rms": cfg.min_onset_rms,
             "led": {"color": list(cfg.color)},
         }
 
@@ -1757,6 +1764,7 @@ async def test_beat_mode_start_arguments_propagate(monkeypatch):
                 "name": "beat_mode_start",
                 "arguments": {
                     "motion_intensity": 0.75,
+                    "sensitivity": 0.25,
                     "color": [10, 20, 30],
                     "duration_sec": 12,
                 },
@@ -1767,8 +1775,31 @@ async def test_beat_mode_start_arguments_propagate(monkeypatch):
     payload = json.loads(result.root.content[0].text)
     assert payload["ok"] is True
     assert captured["cfg"].motion_intensity == 0.75
+    assert captured["cfg"].sensitivity == 0.25
     assert captured["cfg"].color == (10, 20, 30)
     assert captured["cfg"].duration_sec == 12
+
+
+@pytest.mark.asyncio
+async def test_beat_mode_start_rejects_invalid_sensitivity(monkeypatch):
+    class FakeGateway:
+        pass
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "beat_mode_start",
+                "arguments": {"sensitivity": -0.1},
+            },
+        )
+    )
+
+    assert "Input validation error" in result.root.content[0].text
+    assert "less than the minimum of 0" in result.root.content[0].text
 
 
 @pytest.mark.asyncio
@@ -1791,6 +1822,28 @@ async def test_beat_mode_update_rejects_invalid_color(monkeypatch):
 
     assert "Input validation error" in result.root.content[0].text
     assert "too short" in result.root.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_beat_mode_update_rejects_invalid_sensitivity(monkeypatch):
+    class FakeGateway:
+        pass
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "beat_mode_update",
+                "arguments": {"sensitivity": 1.5},
+            },
+        )
+    )
+
+    assert "Input validation error" in result.root.content[0].text
+    assert "greater than the maximum of 1" in result.root.content[0].text
 
 
 @pytest.mark.asyncio

@@ -187,10 +187,10 @@ Same shape, under `mcpServers`.
 | `set_all_leds(r, g, b)` | Set all 12 base RGB LEDs to the same color. Updates immediately. |
 | `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array (1..12 entries). Single I2C burst + one latch — use this for animations / multi-color patterns instead of N individual `set_led` calls. Trailing LEDs (beyond `len(colors)`) keep their previous color. Validation is atomic: a malformed entry rejects the whole call without mutating any LED. |
 | `clear_leds` | Turn all 12 base RGB LEDs off. |
-| `beat_mode_start(motion_intensity?, color?, duration_sec?)` | Start gateway-side beat mode: capture ambient audio through the existing `listen` wire path, estimate BPM locally, and drive free-running head sway plus base-ring LED flashes. `listen()` is mutually exclusive while active; `say()` may interrupt and beat mode re-arms listening afterwards. Requires the `[stt]` extra for Opus decoding. |
+| `beat_mode_start(motion_intensity?, sensitivity?, color?, duration_sec?)` | Start gateway-side beat mode: capture ambient audio through the existing `listen` wire path, estimate BPM locally, and drive free-running head sway plus base-ring LED flashes. `sensitivity` tunes the onset floor for quiet rooms or loud venues. `listen()` is mutually exclusive while active; `say()` may interrupt and beat mode re-arms listening afterwards. Requires the `[stt]` extra for Opus decoding. |
 | `beat_mode_stop()` | Stop beat mode and retain the latest rolling audio buffer for clip export until the next beat-mode start or gateway restart. |
-| `beat_mode_update(motion_intensity?, color?, blink_rate?, motion_enabled?, led_enabled?)` | Update beat-mode motion/LED parameters without restarting capture. |
-| `beat_meta_snapshot()` | Poll the latest beat metadata, capture health, counters, and current motion/LED parameters. |
+| `beat_mode_update(motion_intensity?, sensitivity?, color?, blink_rate?, motion_enabled?, led_enabled?)` | Update beat-mode motion/LED parameters without restarting capture. |
+| `beat_meta_snapshot()` | Poll the latest beat metadata, active sensitivity/minimum onset floor, capture health, counters, and current motion/LED parameters. |
 | `beat_clip_save(seconds?)` | Save the latest rolling beat-mode audio as a 16 kHz mono WAV temp file and return its path plus captured duration. |
 
 The 12 base LEDs are 12× WS2812C wired to the PY32L020 IO expander

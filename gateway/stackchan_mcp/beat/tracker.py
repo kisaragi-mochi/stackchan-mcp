@@ -54,6 +54,23 @@ class BeatTracker:
         self._confidence = 0.0
         self._onset_count = 0
 
+    def set_min_onset_rms(self, min_onset_rms: float) -> None:
+        """Update the absolute onset floor without resetting beat history."""
+        if (
+            isinstance(min_onset_rms, bool)
+            or not isinstance(min_onset_rms, int | float)
+            or not math.isfinite(float(min_onset_rms))
+            or float(min_onset_rms) <= 0
+        ):
+            raise ValueError("min_onset_rms must be a positive finite number")
+        with self._lock:
+            self.min_onset_rms = float(min_onset_rms)
+
+    def get_min_onset_rms(self) -> float:
+        """Return the active absolute onset floor."""
+        with self._lock:
+            return self.min_onset_rms
+
     def process_pcm(self, pcm: bytes, *, received_at: float) -> BeatSnapshot:
         """Consume a PCM chunk and return the updated beat snapshot.
 

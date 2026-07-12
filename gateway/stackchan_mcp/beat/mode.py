@@ -39,6 +39,10 @@ LISTEN_RESTART_MAX_BACKOFF_S = 8.0
 MIN_MOTION_CONFIDENCE = 0.35
 SERVO_YAW_MIN, SERVO_YAW_MAX = -90, 90
 SERVO_PITCH_MIN, SERVO_PITCH_MAX = 5, 85
+DEFAULT_SENSITIVITY = 0.5
+MIN_ONSET_RMS_LEAST_SENSITIVE = 0.025
+MIN_ONSET_RMS_DEFAULT = 0.004
+MIN_ONSET_RMS_MOST_SENSITIVE = 0.001
 _OWNER_GENERATIONS = count(1)
 
 
@@ -65,6 +69,22 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def min_onset_rms_for_sensitivity(sensitivity: float) -> float:
+    """Map 0..1 operator sensitivity to the tracker RMS floor on a log scale."""
+    if not _is_finite_number(sensitivity) or not 0.0 <= float(sensitivity) <= 1.0:
+        raise ValueError("sensitivity must be a number in 0..1")
+    sensitivity = float(sensitivity)
+    if sensitivity <= DEFAULT_SENSITIVITY:
+        ratio = sensitivity / DEFAULT_SENSITIVITY
+        return MIN_ONSET_RMS_LEAST_SENSITIVE * (
+            MIN_ONSET_RMS_DEFAULT / MIN_ONSET_RMS_LEAST_SENSITIVE
+        ) ** ratio
+    ratio = (sensitivity - DEFAULT_SENSITIVITY) / (1.0 - DEFAULT_SENSITIVITY)
+    return MIN_ONSET_RMS_DEFAULT * (
+        MIN_ONSET_RMS_MOST_SENSITIVE / MIN_ONSET_RMS_DEFAULT
+    ) ** ratio
+
+
 def _validate_color(value: tuple[int, int, int]) -> tuple[int, int, int]:
     if len(value) != 3:
         raise ValueError("color must contain exactly three RGB channels")
@@ -81,6 +101,7 @@ def _validate_color(value: tuple[int, int, int]) -> tuple[int, int, int]:
 @dataclass(frozen=True)
 class BeatModeConfig:
     motion_intensity: float = 0.5
+    sensitivity: float = DEFAULT_SENSITIVITY
     color: tuple[int, int, int] = (0, 160, 255)
     duration_sec: int | None = None
     blink_rate: float = 1.0
@@ -94,6 +115,12 @@ class BeatModeConfig:
         if not 0.0 <= float(self.motion_intensity) <= 1.0:
             raise ValueError("motion_intensity must be a number in 0..1")
         object.__setattr__(self, "motion_intensity", float(self.motion_intensity))
+
+        if not _is_finite_number(self.sensitivity):
+            raise ValueError("sensitivity must be a number in 0..1")
+        if not 0.0 <= float(self.sensitivity) <= 1.0:
+            raise ValueError("sensitivity must be a number in 0..1")
+        object.__setattr__(self, "sensitivity", float(self.sensitivity))
         object.__setattr__(self, "color", _validate_color(self.color))
 
         if self.duration_sec is not None:
@@ -118,6 +145,10 @@ class BeatModeConfig:
         if not _is_finite_number(self.capture_seconds) or self.capture_seconds <= 0:
             raise ValueError("capture_seconds must be > 0")
         object.__setattr__(self, "capture_seconds", float(self.capture_seconds))
+
+    @property
+    def min_onset_rms(self) -> float:
+        return min_onset_rms_for_sensitivity(self.sensitivity)
 
 
 class RollingPcmBuffer:
@@ -184,7 +215,10 @@ class BeatMode:
     def __init__(self, gateway: Any, config: BeatModeConfig) -> None:
         self._gateway = gateway
         self._config = config
-        self._tracker = BeatTracker(sample_rate=DEVICE_SAMPLE_RATE)
+        self._tracker = BeatTracker(
+            sample_rate=DEVICE_SAMPLE_RATE,
+            min_onset_rms=config.min_onset_rms,
+        )
         self._capture = RollingPcmBuffer(seconds=config.capture_seconds)
         self._opus_queue: asyncio.Queue[bytes] = asyncio.Queue(
             maxsize=OPUS_QUEUE_MAX_FRAMES
@@ -318,6 +352,7 @@ class BeatMode:
         self,
         *,
         motion_intensity: float | None = None,
+        sensitivity: float | None = None,
         color: tuple[int, int, int] | None = None,
         blink_rate: float | None = None,
         motion_enabled: bool | None = None,
@@ -326,6 +361,8 @@ class BeatMode:
         updates: dict[str, Any] = {}
         if motion_intensity is not None:
             updates["motion_intensity"] = motion_intensity
+        if sensitivity is not None:
+            updates["sensitivity"] = sensitivity
         if color is not None:
             updates["color"] = color
         if blink_rate is not None:
@@ -335,6 +372,8 @@ class BeatMode:
         if led_enabled is not None:
             updates["led_enabled"] = led_enabled
         self._config = replace(self._config, **updates)
+        if "sensitivity" in updates:
+            self._tracker.set_min_onset_rms(self._config.min_onset_rms)
         return self.status()
 
     def status(self) -> dict[str, Any]:
@@ -378,6 +417,8 @@ class BeatMode:
             "last_beat_at_ms": last_beat_at_ms,
             "last_beat_age_ms": last_beat_age_ms,
             "onsets": beat.onset_count,
+            "sensitivity": self._config.sensitivity,
+            "min_onset_rms": self._tracker.get_min_onset_rms(),
             "capture_healthy": capture_healthy,
             "capture_state": self._capture_state,
             "capture_seconds": round(self._capture.duration_seconds, 3),
@@ -789,6 +830,7 @@ async def start_beat_mode(gateway: Any, config: BeatModeConfig) -> dict[str, Any
                 motion_intensity=config.motion_intensity,
                 color=config.color,
                 blink_rate=config.blink_rate,
+                sensitivity=config.sensitivity,
                 motion_enabled=config.motion_enabled,
                 led_enabled=config.led_enabled,
             )
@@ -817,6 +859,7 @@ async def stop_beat_mode(
 async def update_beat_mode(
     *,
     motion_intensity: float | None = None,
+    sensitivity: float | None = None,
     color: tuple[int, int, int] | None = None,
     blink_rate: float | None = None,
     motion_enabled: bool | None = None,
@@ -827,6 +870,7 @@ async def update_beat_mode(
             raise RuntimeError("beat mode is not active")
         return await _mode.update(
             motion_intensity=motion_intensity,
+            sensitivity=sensitivity,
             color=color,
             blink_rate=blink_rate,
             motion_enabled=motion_enabled,

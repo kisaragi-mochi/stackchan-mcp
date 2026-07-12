@@ -734,6 +734,13 @@ async def _handle_beat_mode_start(
     ):
         return _beat_error("motion_intensity must be a number in 0..1")
 
+    sensitivity = arguments.get("sensitivity", 0.5)
+    if (
+        not _is_number_arg(sensitivity)
+        or not 0.0 <= float(sensitivity) <= 1.0
+    ):
+        return _beat_error("sensitivity must be a number in 0..1")
+
     try:
         color = _parse_rgb_color(arguments.get("color")) or (0, 160, 255)
     except ValueError as exc:
@@ -748,6 +755,7 @@ async def _handle_beat_mode_start(
     try:
         cfg = BeatModeConfig(
             motion_intensity=float(motion_intensity),
+            sensitivity=float(sensitivity),
             color=color,
             duration_sec=duration_sec,
         )
@@ -773,6 +781,12 @@ async def _handle_beat_mode_update(arguments: dict[str, Any]) -> list[TextConten
         if not _is_number_arg(value) or not 0.0 <= float(value) <= 1.0:
             return _beat_error("motion_intensity must be a number in 0..1")
         updates["motion_intensity"] = float(value)
+
+    if "sensitivity" in arguments:
+        value = arguments["sensitivity"]
+        if not _is_number_arg(value) or not 0.0 <= float(value) <= 1.0:
+            return _beat_error("sensitivity must be a number in 0..1")
+        updates["sensitivity"] = float(value)
 
     if "color" in arguments:
         try:
@@ -2429,6 +2443,18 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                                 "center; 1 uses the maximum v1 sway template."
                             ),
                         },
+                        "sensitivity": {
+                            "type": "number",
+                            "default": 0.5,
+                            "minimum": 0,
+                            "maximum": 1,
+                            "description": (
+                                "Onset sensitivity for venue tuning. Log-scale "
+                                "anchors: 0.0 => min_onset_rms 0.025 (least "
+                                "sensitive), 0.5 => 0.004 (default verified on "
+                                "device), 1.0 => about 0.001 (most sensitive)."
+                            ),
+                        },
                         "color": {
                             "type": "array",
                             "items": {
@@ -2467,8 +2493,8 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 name="beat_mode_update",
                 description=(
                     "Update beat mode VJ parameters without restarting capture: "
-                    "motion intensity, base-ring flash color, blink-rate "
-                    "multiplier, and motion/LED enable toggles."
+                    "motion intensity, onset sensitivity, base-ring flash color, "
+                    "blink-rate multiplier, and motion/LED enable toggles."
                 ),
                 inputSchema={
                     "type": "object",
@@ -2477,6 +2503,18 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "type": "number",
                             "minimum": 0,
                             "maximum": 1,
+                        },
+                        "sensitivity": {
+                            "type": "number",
+                            "default": 0.5,
+                            "minimum": 0,
+                            "maximum": 1,
+                            "description": (
+                                "Onset sensitivity for venue tuning. Log-scale "
+                                "anchors: 0.0 => min_onset_rms 0.025 (least "
+                                "sensitive), 0.5 => 0.004 (default verified on "
+                                "device), 1.0 => about 0.001 (most sensitive)."
+                            ),
                         },
                         "color": {
                             "type": "array",
