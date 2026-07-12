@@ -2506,7 +2506,6 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                         "sensitivity": {
                             "type": "number",
-                            "default": 0.5,
                             "minimum": 0,
                             "maximum": 1,
                             "description": (
@@ -2545,9 +2544,10 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 description=(
                     "Return the latest beat mode snapshot: active state, BPM, "
                     "confidence, last beat/audio monotonic timestamps, capture "
-                    "health, rolling-buffer duration, counters, and current "
-                    "motion/LED parameters. This is a polling snapshot; beat "
-                    "mode does not push notifications."
+                    "health, rolling-buffer duration, counters, current "
+                    "motion/LED parameters, and the active sensitivity with "
+                    "its effective min_onset_rms floor. This is a polling "
+                    "snapshot; beat mode does not push notifications."
                 ),
                 inputSchema={"type": "object", "properties": {}},
             ),
