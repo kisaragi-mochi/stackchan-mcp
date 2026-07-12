@@ -37,7 +37,12 @@ import logging
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal
 
-from ..audio_stream import is_recording, start_recording, stop_recording
+from ..audio_stream import (
+    is_recording,
+    recording_owner,
+    start_recording,
+    stop_recording,
+)
 from .audio_utils import DEVICE_FRAME_DURATION_MS, DEVICE_SAMPLE_RATE, decode_opus_frames
 from .base import EngineRegistry, get_registry
 
@@ -378,6 +383,12 @@ async def listen_and_transcribe(
     listen_lock = getattr(gateway.esp32, "listen_lock", None)
     lock_ctx = listen_lock if listen_lock is not None else nullcontext()
 
+    if is_recording() and recording_owner() == "beat_mode":
+        raise RuntimeError(
+            "beat mode is already using the device microphone; stop "
+            "beat mode before calling listen()"
+        )
+
     duration_ms = int(duration_raw)
     language = arguments.get("language", "ja")
     model = arguments.get("model")
@@ -402,6 +413,12 @@ async def listen_and_transcribe(
         # slot from esp32_client without going through lock_ctx, so this
         # check is the cross-source guard.
         if is_recording():
+            owner = recording_owner()
+            if owner == "beat_mode":
+                raise RuntimeError(
+                    "beat mode is already using the device microphone; stop "
+                    "beat mode before calling listen()"
+                )
             raise RuntimeError(
                 "audio_stream recording slot is already held "
                 "(device-driven capture in progress); MCP listen() "

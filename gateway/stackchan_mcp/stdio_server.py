@@ -423,12 +423,29 @@ def _follow_led_error(message: str) -> list[TextContent]:
     return _follow_pose_text({"ok": False, "error": message})
 
 
+def _beat_error(message: str) -> list[TextContent]:
+    return _follow_pose_text({"ok": False, "error": message})
+
+
 def _is_int_arg(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _is_number_arg(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _parse_rgb_color(value: Any) -> tuple[int, int, int] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError("color must be an RGB array: [r, g, b]")
+    channels: list[int] = []
+    for channel in value:
+        if not _is_int_arg(channel) or not 0 <= channel <= 255:
+            raise ValueError("color channels must be integers in 0..255")
+        channels.append(int(channel))
+    return channels[0], channels[1], channels[2]
 
 
 def _optional_non_empty_string(
@@ -704,6 +721,107 @@ async def _handle_follow_led_stream(
     return _follow_pose_text({"ok": True, **status})
 
 
+async def _handle_beat_mode_start(
+    gateway: Any,
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    from .beat import BeatModeConfig, start_beat_mode
+
+    motion_intensity = arguments.get("motion_intensity", 0.5)
+    if (
+        not _is_number_arg(motion_intensity)
+        or not 0.0 <= float(motion_intensity) <= 1.0
+    ):
+        return _beat_error("motion_intensity must be a number in 0..1")
+
+    try:
+        color = _parse_rgb_color(arguments.get("color")) or (0, 160, 255)
+    except ValueError as exc:
+        return _beat_error(str(exc))
+
+    duration_sec = arguments.get("duration_sec")
+    if duration_sec is not None and (
+        not _is_int_arg(duration_sec) or duration_sec <= 0
+    ):
+        return _beat_error("duration_sec must be a positive integer or null")
+
+    try:
+        cfg = BeatModeConfig(
+            motion_intensity=float(motion_intensity),
+            color=color,
+            duration_sec=duration_sec,
+        )
+        status = await start_beat_mode(gateway, cfg)
+    except (ValueError, RuntimeError) as exc:
+        return _beat_error(str(exc))
+    return _follow_pose_text({"ok": True, **status})
+
+
+async def _handle_beat_mode_stop() -> list[TextContent]:
+    from .beat import stop_beat_mode
+
+    status = await stop_beat_mode()
+    return _follow_pose_text({"ok": True, **status})
+
+
+async def _handle_beat_mode_update(arguments: dict[str, Any]) -> list[TextContent]:
+    from .beat import update_beat_mode
+
+    updates: dict[str, Any] = {}
+    if "motion_intensity" in arguments:
+        value = arguments["motion_intensity"]
+        if not _is_number_arg(value) or not 0.0 <= float(value) <= 1.0:
+            return _beat_error("motion_intensity must be a number in 0..1")
+        updates["motion_intensity"] = float(value)
+
+    if "color" in arguments:
+        try:
+            color = _parse_rgb_color(arguments["color"])
+        except ValueError as exc:
+            return _beat_error(str(exc))
+        if color is None:
+            return _beat_error("color must be an RGB array: [r, g, b]")
+        updates["color"] = color
+
+    if "blink_rate" in arguments:
+        value = arguments["blink_rate"]
+        if not _is_number_arg(value) or not 0.25 <= float(value) <= 4.0:
+            return _beat_error("blink_rate must be a number in 0.25..4")
+        updates["blink_rate"] = float(value)
+
+    for name in ("motion_enabled", "led_enabled"):
+        if name in arguments:
+            value = arguments[name]
+            if not isinstance(value, bool):
+                return _beat_error(f"{name} must be a boolean")
+            updates[name] = value
+
+    try:
+        status = await update_beat_mode(**updates)
+    except (ValueError, RuntimeError) as exc:
+        return _beat_error(str(exc))
+    return _follow_pose_text({"ok": True, **status})
+
+
+def _handle_beat_meta_snapshot() -> list[TextContent]:
+    from .beat import get_beat_mode_snapshot
+
+    return _follow_pose_text({"ok": True, **get_beat_mode_snapshot()})
+
+
+async def _handle_beat_clip_save(arguments: dict[str, Any]) -> list[TextContent]:
+    from .beat import save_beat_clip
+
+    seconds = arguments.get("seconds", 10.0)
+    if not _is_number_arg(seconds) or float(seconds) <= 0:
+        return _beat_error("seconds must be a positive number")
+    try:
+        result = await save_beat_clip(float(seconds))
+    except (ValueError, RuntimeError) as exc:
+        return _beat_error(str(exc))
+    return _follow_pose_text({"ok": True, **result})
+
+
 async def _dispatch_mcp_tool(
     name: str,
     arguments: dict[str, Any],
@@ -769,6 +887,21 @@ async def _dispatch_mcp_tool(
 
     if name == "stackchan_follow_led_stream":
         return await _handle_follow_led_stream(gateway, arguments)
+
+    if name == "beat_mode_start":
+        return await _handle_beat_mode_start(gateway, arguments)
+
+    if name == "beat_mode_stop":
+        return await _handle_beat_mode_stop()
+
+    if name == "beat_mode_update":
+        return await _handle_beat_mode_update(arguments)
+
+    if name == "beat_meta_snapshot":
+        return _handle_beat_meta_snapshot()
+
+    if name == "beat_clip_save":
+        return await _handle_beat_clip_save(arguments)
 
     if not gateway.esp32.device_connected:
         return [
@@ -2266,6 +2399,140 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "default": 50.0,
                             "minimum": 5,
                             "maximum": 85,
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="beat_mode_start",
+                description=(
+                    "Start gateway-side beat mode. The gateway reuses the "
+                    "existing listen wire path to capture ambient device audio, "
+                    "decodes it to 16 kHz mono PCM, estimates beat/BPM locally, "
+                    "and drives a free-running beat-synced head sway plus base "
+                    "ring LED flash. While active, listen() calls fail fast "
+                    "because beat mode owns the microphone capture slot. say() "
+                    "is allowed to interrupt; beat mode re-sends listen.start "
+                    "after speech or reconnect when audio frames stop arriving. "
+                    "Requires the Opus decoder from the STT extra."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "motion_intensity": {
+                            "type": "number",
+                            "default": 0.5,
+                            "minimum": 0,
+                            "maximum": 1,
+                            "description": (
+                                "Head sway intensity. 0 keeps motion near "
+                                "center; 1 uses the maximum v1 sway template."
+                            ),
+                        },
+                        "color": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255,
+                            },
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "description": (
+                                "Optional base-ring flash color as [r, g, b]. "
+                                "Defaults to cyan-blue."
+                            ),
+                        },
+                        "duration_sec": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": (
+                                "Optional auto-stop duration in seconds. Omit "
+                                "to keep beat mode running until stopped."
+                            ),
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="beat_mode_stop",
+                description=(
+                    "Stop beat mode, send listen.stop best-effort, and keep "
+                    "the last rolling audio buffer available for beat_clip_save "
+                    "until the next beat mode start or gateway restart."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="beat_mode_update",
+                description=(
+                    "Update beat mode VJ parameters without restarting capture: "
+                    "motion intensity, base-ring flash color, blink-rate "
+                    "multiplier, and motion/LED enable toggles."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "motion_intensity": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                        },
+                        "color": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255,
+                            },
+                            "minItems": 3,
+                            "maxItems": 3,
+                        },
+                        "blink_rate": {
+                            "type": "number",
+                            "minimum": 0.25,
+                            "maximum": 4,
+                            "description": (
+                                "LED flash cadence multiplier relative to the "
+                                "detected beat period."
+                            ),
+                        },
+                        "motion_enabled": {"type": "boolean"},
+                        "led_enabled": {"type": "boolean"},
+                    },
+                },
+            ),
+            Tool(
+                name="beat_meta_snapshot",
+                description=(
+                    "Return the latest beat mode snapshot: active state, BPM, "
+                    "confidence, last beat/audio monotonic timestamps, capture "
+                    "health, rolling-buffer duration, counters, and current "
+                    "motion/LED parameters. This is a polling snapshot; beat "
+                    "mode does not push notifications."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="beat_clip_save",
+                description=(
+                    "Save the most recent beat-mode audio window as a WAV file "
+                    "(16 kHz mono signed 16-bit PCM) and return the absolute "
+                    "temp-file path plus actual captured duration. Works while "
+                    "beat mode is active and against the retained buffer after "
+                    "stop, until a new beat mode starts or the gateway restarts."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "seconds": {
+                            "type": "number",
+                            "default": 10.0,
+                            "exclusiveMinimum": 0,
+                            "description": (
+                                "How many recent seconds to write, capped by "
+                                "the rolling capture window."
+                            ),
                         },
                     },
                 },

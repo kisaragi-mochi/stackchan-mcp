@@ -1698,6 +1698,130 @@ async def test_list_tools_includes_follow_led_stream_schema():
 
 
 @pytest.mark.asyncio
+async def test_list_tools_includes_beat_mode_tools():
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools = {tool.name: tool for tool in result.root.tools}
+    for name in (
+        "beat_mode_start",
+        "beat_mode_stop",
+        "beat_mode_update",
+        "beat_meta_snapshot",
+        "beat_clip_save",
+    ):
+        assert name in tools
+
+    start_schema = tools["beat_mode_start"].inputSchema
+    assert start_schema["properties"]["motion_intensity"]["maximum"] == 1
+    assert start_schema["properties"]["color"]["minItems"] == 3
+    assert "listen() calls fail fast" in tools["beat_mode_start"].description
+    assert "base ring" in tools["beat_mode_start"].description
+
+    update_schema = tools["beat_mode_update"].inputSchema
+    assert update_schema["properties"]["blink_rate"]["minimum"] == 0.25
+    assert update_schema["properties"]["motion_enabled"]["type"] == "boolean"
+
+
+@pytest.mark.asyncio
+async def test_beat_mode_start_arguments_propagate(monkeypatch):
+    captured = {}
+
+    class FakeGateway:
+        pass
+
+    async def fake_start_beat_mode(gateway, cfg):
+        captured["gateway"] = gateway
+        captured["cfg"] = cfg
+        return {
+            "active": True,
+            "motion": {"intensity": cfg.motion_intensity},
+            "led": {"color": list(cfg.color)},
+        }
+
+    import stackchan_mcp.beat as beat
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(beat, "start_beat_mode", fake_start_beat_mode)
+
+    server = create_server()
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "beat_mode_start",
+                "arguments": {
+                    "motion_intensity": 0.75,
+                    "color": [10, 20, 30],
+                    "duration_sec": 12,
+                },
+            },
+        )
+    )
+
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is True
+    assert captured["cfg"].motion_intensity == 0.75
+    assert captured["cfg"].color == (10, 20, 30)
+    assert captured["cfg"].duration_sec == 12
+
+
+@pytest.mark.asyncio
+async def test_beat_mode_update_rejects_invalid_color(monkeypatch):
+    class FakeGateway:
+        pass
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "beat_mode_update",
+                "arguments": {"color": [255, 0]},
+            },
+        )
+    )
+
+    assert "Input validation error" in result.root.content[0].text
+    assert "too short" in result.root.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_beat_clip_save_defaults_to_ten_seconds(monkeypatch):
+    captured = {}
+
+    class FakeGateway:
+        pass
+
+    async def fake_save_beat_clip(seconds):
+        captured["seconds"] = seconds
+        return {"path": "/tmp/beat.wav", "seconds": 1.0}
+
+    import stackchan_mcp.beat as beat
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(beat, "save_beat_clip", fake_save_beat_clip)
+
+    server = create_server()
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "beat_clip_save", "arguments": {}},
+        )
+    )
+
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is True
+    assert payload["path"] == "/tmp/beat.wav"
+    assert captured["seconds"] == 10.0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("target", ["port_b", "port_c"])
 async def test_follow_led_ws2812_target_arguments_propagate(monkeypatch, target):
     captured = _make_follow_led_fake_gateway(monkeypatch)
