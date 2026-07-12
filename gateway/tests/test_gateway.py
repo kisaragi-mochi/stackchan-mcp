@@ -211,6 +211,92 @@ async def test_gateway_stop_stops_active_beat_mode_before_esp32_transport(
 
 
 @pytest.mark.asyncio
+async def test_gateway_stop_completes_when_beat_listen_stop_hangs(
+    monkeypatch,
+    caplog,
+):
+    import stackchan_mcp.gateway as gw_mod
+
+    events: list[tuple[str, str | None] | tuple[str]] = []
+    stop_started = asyncio.Event()
+    stop_cancelled = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class FakeStreamingOpusDecoder:
+        def decode_frame(self, frame: bytes) -> bytes:
+            return frame
+
+    class FakeEsp32:
+        def __init__(self) -> None:
+            self.device_connected = True
+            self.connection = SimpleNamespace(
+                protocol_version=1,
+                session_id="gateway-stop-beat-timeout",
+            )
+            self.listen_lock = asyncio.Lock()
+
+        async def send_listen_state(
+            self,
+            state: str,
+            mode: str = "manual",
+        ) -> None:
+            events.append(("listen", state))
+            if state == "stop":
+                stop_started.set()
+                try:
+                    await release_stop.wait()
+                except asyncio.CancelledError:
+                    stop_cancelled.set()
+                    raise
+
+        async def call_tool(
+            self,
+            name: str,
+            arguments: dict,
+        ) -> tuple[dict, None]:
+            events.append(("tool", name))
+            return {"ok": True}, None
+
+        async def stop(self) -> None:
+            events.append(("esp32_stop",))
+
+    monkeypatch.setattr(beat_mode, "StreamingOpusDecoder", FakeStreamingOpusDecoder)
+    monkeypatch.setattr(gw_mod, "BEAT_MODE_LISTEN_STOP_TIMEOUT_S", 0.01)
+
+    gw = Gateway()
+    gw.esp32 = FakeEsp32()
+
+    try:
+        await beat_mode.start_beat_mode(gw, BeatModeConfig())
+        mode = beat_mode._mode
+        assert mode is not None
+        assert is_recording()
+
+        with caplog.at_level("WARNING"):
+            await asyncio.wait_for(gw.stop(), timeout=0.25)
+
+        assert stop_started.is_set()
+        assert stop_cancelled.is_set()
+        assert events == [
+            ("listen", "start"),
+            ("listen", "stop"),
+            ("esp32_stop",),
+        ]
+        assert not is_recording()
+        assert mode._tasks == []
+        assert mode.status()["active"] is False
+        assert mode.status()["capture_state"] == "stopped"
+        assert gw._running is False
+        assert "listen.stop timed out" in caplog.text
+    finally:
+        release_stop.set()
+        await beat_mode.stop_beat_mode(listen_stop_timeout_s=0.01)
+        if is_recording():
+            stop_recording()
+        beat_mode._mode = None
+
+
+@pytest.mark.asyncio
 async def test_gateway_start_advertises_mdns_by_default(monkeypatch):
     """Gateway.start() starts mDNS advertising after listeners are ready."""
     import stackchan_mcp.gateway as gw_mod

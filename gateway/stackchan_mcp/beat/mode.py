@@ -32,6 +32,7 @@ BEAT_MODE_OWNER_PREFIX = f"{BEAT_MODE_OWNER}:"
 BASE_RING_LED_COUNT = 12
 CAPTURE_SECONDS_DEFAULT = 30.0
 OPUS_QUEUE_MAX_FRAMES = 200
+LISTEN_STOP_TIMEOUT_S = 3.0
 LISTEN_RESTART_AFTER_S = 2.5
 LISTEN_RESTART_INITIAL_BACKOFF_S = 1.0
 LISTEN_RESTART_MAX_BACKOFF_S = 8.0
@@ -259,14 +260,21 @@ class BeatMode:
             )
         return self.status()
 
-    async def stop(self) -> dict[str, Any]:
+    async def stop(
+        self,
+        *,
+        listen_stop_timeout_s: float = LISTEN_STOP_TIMEOUT_S,
+    ) -> dict[str, Any]:
         if self._stop_task is None:
             async with self._stop_lock:
                 if self._stop_task is None:
                     if not self._active and self._capture_state == "stopped":
                         return self.status()
                     self._stop_task = asyncio.create_task(
-                        self._stop_impl(asyncio.current_task()),
+                        self._stop_impl(
+                            asyncio.current_task(),
+                            listen_stop_timeout_s=listen_stop_timeout_s,
+                        ),
                         name="stackchan-beat-mode-stop",
                     )
         return await asyncio.shield(self._stop_task)
@@ -274,10 +282,18 @@ class BeatMode:
     async def _stop_impl(
         self,
         caller: asyncio.Task[Any] | None,
+        *,
+        listen_stop_timeout_s: float,
     ) -> dict[str, Any]:
         self._capture_state = "stopping"
         self._stop_event.set()
-        await self._shield_listen_stop()
+        try:
+            await self._bounded_listen_stop(listen_stop_timeout_s)
+        finally:
+            await self._finish_stop(caller)
+        return self.status()
+
+    async def _finish_stop(self, caller: asyncio.Task[Any] | None) -> None:
         self._release_recording_slot()
 
         current = asyncio.current_task()
@@ -297,7 +313,6 @@ class BeatMode:
         self._active = False
         self._capture_state = "stopped"
         self._stopped_at = asyncio.get_running_loop().time()
-        return self.status()
 
     async def update(
         self,
@@ -450,6 +465,7 @@ class BeatMode:
             )
         connection = self._gateway.esp32.connection
         session_id = getattr(connection, "session_id", "") if connection else ""
+        self._reset_stream_if_session_changed(session_id)
         start_recording(
             session_id,
             owner=self._recording_owner,
@@ -470,20 +486,65 @@ class BeatMode:
         async with lock:
             await self._gateway.esp32.send_listen_state("stop")
 
-    async def _shield_listen_stop(self) -> None:
+    async def _bounded_listen_stop(self, timeout_s: float) -> None:
         task = asyncio.create_task(self._send_listen_stop())
-        while True:
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception as exc:
-                self._last_error = f"best-effort listen.stop failed: {exc}"
-                logger.warning("best-effort beat mode listen.stop failed: %s", exc)
-            break
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout_s)
+        except asyncio.CancelledError:
+            task.cancel()
+            task.add_done_callback(self._consume_listen_stop_result)
+            raise
+        if task not in done:
+            task.cancel()
+            self._last_error = f"best-effort listen.stop timed out after {timeout_s:.1f}s"
+            logger.warning(
+                "best-effort beat mode listen.stop timed out after %.1fs",
+                timeout_s,
+            )
+            await asyncio.sleep(0)
+            if task.done():
+                self._consume_listen_stop_result(task)
+            else:
+                task.add_done_callback(self._consume_listen_stop_result)
+            return
+        try:
+            await task
+        except Exception as exc:
+            self._last_error = f"best-effort listen.stop failed: {exc}"
+            logger.warning("best-effort beat mode listen.stop failed: %s", exc)
+
+    @staticmethod
+    def _consume_listen_stop_result(task: asyncio.Task[None]) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
 
     def _release_recording_slot(self) -> None:
         stop_recording_if_owner(self._recording_owner)
+
+    def _reset_stream_if_session_changed(self, session_id: str) -> None:
+        if self._session_id is None or self._session_id == session_id:
+            return
+        dropped = self._discard_queued_opus_frames()
+        self._ensure_decoder_available()
+        if dropped:
+            logger.debug(
+                "beat mode discarded %d queued Opus frames after session changed "
+                "from %s to %s",
+                dropped,
+                self._session_id,
+                session_id,
+            )
+
+    def _discard_queued_opus_frames(self) -> int:
+        dropped = 0
+        while True:
+            try:
+                self._opus_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            dropped += 1
+        self._frames_dropped += dropped
+        return dropped
 
     def _enqueue_opus_frame(self, frame: bytes) -> None:
         self._frames_received += 1
@@ -705,11 +766,15 @@ def _get_mode_lock() -> asyncio.Lock:
     return _mode_lock
 
 
-async def _stop_mode_instance(mode: BeatMode) -> dict[str, Any]:
+async def _stop_mode_instance(
+    mode: BeatMode,
+    *,
+    listen_stop_timeout_s: float = LISTEN_STOP_TIMEOUT_S,
+) -> dict[str, Any]:
     async with _get_mode_lock():
         if _mode is not mode:
             return mode.status()
-        return await mode.stop()
+        return await mode.stop(listen_stop_timeout_s=listen_stop_timeout_s)
 
 
 async def start_beat_mode(gateway: Any, config: BeatModeConfig) -> dict[str, Any]:
@@ -735,11 +800,14 @@ async def start_beat_mode(gateway: Any, config: BeatModeConfig) -> dict[str, Any
             raise
 
 
-async def stop_beat_mode() -> dict[str, Any]:
+async def stop_beat_mode(
+    *,
+    listen_stop_timeout_s: float = LISTEN_STOP_TIMEOUT_S,
+) -> dict[str, Any]:
     async with _get_mode_lock():
         if _mode is None:
             return {"active": False}
-        return await _mode.stop()
+        return await _mode.stop(listen_stop_timeout_s=listen_stop_timeout_s)
 
 
 async def update_beat_mode(

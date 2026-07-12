@@ -311,6 +311,40 @@ async def test_streaming_decoder_reused_across_frames_and_reset_between_sessions
     assert fake_decode[0] is not fake_decode[1]
 
 
+@pytest.mark.asyncio
+async def test_reconnect_mid_mode_resets_decoder_and_drops_stale_frames(
+    fake_decode,
+) -> None:
+    gateway = _FakeGateway()
+    await beat_mode.start_beat_mode(gateway, BeatModeConfig())
+    mode = beat_mode._mode
+    assert mode is not None
+
+    stale_frame = b"\x11\x00" * 10
+    mode._enqueue_opus_frame(stale_frame)
+    old_decoder = mode._decoder
+
+    gateway.esp32.connection.session_id = "beat-session-reconnected"
+    await mode._arm_listen_unlocked()
+
+    assert mode._session_id == "beat-session-reconnected"
+    assert len(fake_decode) == 2
+    assert old_decoder is fake_decode[0]
+    assert mode._decoder is fake_decode[1]
+    assert mode._opus_queue.empty()
+    assert mode.status()["frames_dropped"] == 1
+
+    await handle_audio_frame(b"\x12\x00" * 10, session_id="beat-session")
+    new_frame = b"\x13\x00" * 10
+    await handle_audio_frame(new_frame, session_id="beat-session-reconnected")
+    await _wait_until(
+        lambda: beat_mode.get_beat_mode_snapshot()["frames_decoded"] >= 1
+    )
+
+    assert fake_decode[0].frames == []
+    assert fake_decode[1].frames == [new_frame]
+
+
 def test_watchdog_uses_newest_listen_or_audio_timestamp() -> None:
     mode = BeatMode(_FakeGateway(), BeatModeConfig())
     restart_after = beat_mode.LISTEN_RESTART_AFTER_S

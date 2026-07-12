@@ -7,7 +7,6 @@ This module orchestrates both sides.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 
@@ -19,7 +18,7 @@ from .mdns_advertiser import MdnsAdvertiser
 
 logger = logging.getLogger(__name__)
 
-BEAT_MODE_SHUTDOWN_TIMEOUT_S = 3.0
+BEAT_MODE_LISTEN_STOP_TIMEOUT_S = 3.0
 
 
 class Gateway:
@@ -200,14 +199,8 @@ class Gateway:
         try:
             from .beat import stop_beat_mode
 
-            await asyncio.wait_for(
-                asyncio.shield(stop_beat_mode()),
-                timeout=BEAT_MODE_SHUTDOWN_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "beat mode shutdown timed out after %.1fs",
-                BEAT_MODE_SHUTDOWN_TIMEOUT_S,
+            await stop_beat_mode(
+                listen_stop_timeout_s=BEAT_MODE_LISTEN_STOP_TIMEOUT_S,
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("beat mode shutdown failed: %s", exc)
