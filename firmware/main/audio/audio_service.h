@@ -184,9 +184,9 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     std::mutex raw_capture_mutex_;
     std::atomic<uint32_t> raw_capture_generation_{0};
-    std::vector<int16_t> raw_capture_buffer_;
+    std::unique_ptr<std::vector<int16_t>> raw_capture_buffer_;
     size_t raw_capture_buffer_samples_ = 0;
-    std::deque<std::unique_ptr<RawCaptureFrame>> raw_capture_free_frames_;
+    std::unique_ptr<std::deque<std::unique_ptr<RawCaptureFrame>>> raw_capture_free_frames_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
 

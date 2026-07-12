@@ -322,27 +322,32 @@ void AudioService::FeedRawCapture(std::vector<int16_t>&& data) {
     }
 
     size_t offset = 0;
+    std::vector<int16_t> frame_pcm;
     std::unique_lock<std::mutex> lock(raw_capture_mutex_);
     while (offset < data.size()) {
         if (!IsRawCaptureGenerationCurrent(generation) ||
-            raw_capture_buffer_.size() != (size_t)encoder_frame_size_) {
+            !raw_capture_buffer_ ||
+            raw_capture_buffer_->size() != (size_t)encoder_frame_size_) {
             return;
         }
 
         size_t writable = (size_t)encoder_frame_size_ - raw_capture_buffer_samples_;
         size_t samples_to_copy = std::min(writable, data.size() - offset);
-        std::memcpy(raw_capture_buffer_.data() + raw_capture_buffer_samples_,
+        std::memcpy(raw_capture_buffer_->data() + raw_capture_buffer_samples_,
                     data.data() + offset,
                     samples_to_copy * sizeof(int16_t));
         raw_capture_buffer_samples_ += samples_to_copy;
         offset += samples_to_copy;
 
         if (raw_capture_buffer_samples_ == (size_t)encoder_frame_size_) {
-            if (!PushRawCaptureFrameToEncodeQueue(generation, raw_capture_buffer_.data())) {
-                raw_capture_buffer_samples_ = 0;
+            frame_pcm.resize(encoder_frame_size_);
+            std::memcpy(frame_pcm.data(), raw_capture_buffer_->data(), encoder_frame_size_ * sizeof(int16_t));
+            raw_capture_buffer_samples_ = 0;
+            lock.unlock();
+            if (!PushRawCaptureFrameToEncodeQueue(generation, frame_pcm.data())) {
                 return;
             }
-            raw_capture_buffer_samples_ = 0;
+            lock.lock();
         }
     }
 }
@@ -365,17 +370,24 @@ void AudioService::AllocateRawCaptureStorage() {
 
     {
         std::lock_guard<std::mutex> lock(raw_capture_mutex_);
-        raw_capture_buffer_.resize(encoder_frame_size_);
+        if (!raw_capture_buffer_) {
+            raw_capture_buffer_ = std::make_unique<std::vector<int16_t>>();
+        }
+        raw_capture_buffer_->resize(encoder_frame_size_);
         raw_capture_buffer_samples_ = 0;
     }
 
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-        raw_capture_free_frames_.clear();
+        if (!raw_capture_free_frames_) {
+            raw_capture_free_frames_ = std::make_unique<std::deque<std::unique_ptr<RawCaptureFrame>>>();
+        } else {
+            raw_capture_free_frames_->clear();
+        }
         for (size_t i = 0; i < kRawCaptureFramePoolSize; ++i) {
             auto frame = std::make_unique<RawCaptureFrame>();
             frame->pcm.resize(encoder_frame_size_);
-            raw_capture_free_frames_.push_back(std::move(frame));
+            raw_capture_free_frames_->push_back(std::move(frame));
         }
         audio_queue_cv_.notify_all();
     }
@@ -401,15 +413,14 @@ void AudioService::DropRawCaptureQueuedDataLocked() {
 void AudioService::ReleaseRawCaptureStorage() {
     {
         std::lock_guard<std::mutex> lock(raw_capture_mutex_);
-        raw_capture_buffer_.clear();
-        raw_capture_buffer_.shrink_to_fit();
+        raw_capture_buffer_.reset();
         raw_capture_buffer_samples_ = 0;
     }
 
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);
         DropRawCaptureQueuedDataLocked();
-        raw_capture_free_frames_.clear();
+        raw_capture_free_frames_.reset();
         audio_queue_cv_.notify_all();
     }
 }
@@ -420,15 +431,19 @@ bool AudioService::PushRawCaptureFrameToEncodeQueue(uint32_t generation, const i
         return service_stopped_ ||
             !IsRawCaptureGenerationCurrent(generation) ||
             (audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE &&
-             !raw_capture_free_frames_.empty());
+             raw_capture_free_frames_ &&
+             !raw_capture_free_frames_->empty());
     });
 
-    if (service_stopped_ || !IsRawCaptureGenerationCurrent(generation)) {
+    if (service_stopped_ ||
+        !IsRawCaptureGenerationCurrent(generation) ||
+        !raw_capture_free_frames_ ||
+        raw_capture_free_frames_->empty()) {
         return false;
     }
 
-    auto frame = std::move(raw_capture_free_frames_.front());
-    raw_capture_free_frames_.pop_front();
+    auto frame = std::move(raw_capture_free_frames_->front());
+    raw_capture_free_frames_->pop_front();
     std::memcpy(frame->pcm.data(), pcm, encoder_frame_size_ * sizeof(int16_t));
 
     auto task = std::make_unique<AudioTask>();
@@ -457,8 +472,8 @@ void AudioService::ReturnRawCaptureFrame(std::unique_ptr<RawCaptureFrame> frame,
     }
 
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    if (IsRawCaptureGenerationCurrent(generation)) {
-        raw_capture_free_frames_.push_back(std::move(frame));
+    if (IsRawCaptureGenerationCurrent(generation) && raw_capture_free_frames_) {
+        raw_capture_free_frames_->push_back(std::move(frame));
     }
     audio_queue_cv_.notify_all();
 }
@@ -780,6 +795,7 @@ void AudioService::EnableVoiceProcessing(bool enable) {
     if (enable) {
         xEventGroupClearBits(event_group_, AS_EVENT_RAW_CAPTURE_RUNNING);
         raw_capture_generation_.fetch_add(1, std::memory_order_acq_rel);
+        audio_queue_cv_.notify_all();
         ReleaseRawCaptureStorage();
         if (!audio_processor_initialized_) {
             audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS, models_list_);
@@ -809,6 +825,7 @@ void AudioService::EnableRawCapture(bool enable) {
     ESP_LOGD(TAG, "%s raw capture", enable ? "Enabling" : "Disabling");
     if (enable) {
         raw_capture_generation_.fetch_add(1, std::memory_order_acq_rel);
+        audio_queue_cv_.notify_all();
         if (audio_processor_initialized_) {
             audio_processor_->Stop();
         }
@@ -827,6 +844,7 @@ void AudioService::EnableRawCapture(bool enable) {
     } else {
         xEventGroupClearBits(event_group_, AS_EVENT_RAW_CAPTURE_RUNNING);
         raw_capture_generation_.fetch_add(1, std::memory_order_acq_rel);
+        audio_queue_cv_.notify_all();
         ReleaseRawCaptureStorage();
     }
 }

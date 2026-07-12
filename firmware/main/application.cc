@@ -623,9 +623,7 @@ void Application::InitializeProtocol() {
                     StartListening(profile);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
-                    StopListening();
-                });
+                StopListening();
             } else {
                 ESP_LOGW(TAG, "Unknown listen state: %s", state->valuestring);
             }
@@ -935,6 +933,12 @@ void Application::HandleWakeWordDetectedEvent() {
     }
 
     auto state = GetDeviceState();
+    if (listening_profile_ == kListeningProfileRaw) {
+        ESP_LOGI(TAG, "Ignoring wake word event while raw listening profile is active (state: %d)", (int)state);
+        audio_service_.EnableWakeWordDetection(false);
+        return;
+    }
+
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
