@@ -36,5 +36,20 @@ target_link_libraries(mdns_candidate_extract_test
     PRIVATE GTest::gtest_main
 )
 
+add_executable(listening_profile_test
+    test_listening_profile.cc
+    ../main/listening_profile.cc
+)
+
+target_include_directories(listening_profile_test
+    PRIVATE
+        ../main
+)
+
+target_link_libraries(listening_profile_test
+    PRIVATE GTest::gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(mdns_candidate_extract_test)
+gtest_discover_tests(listening_profile_test)

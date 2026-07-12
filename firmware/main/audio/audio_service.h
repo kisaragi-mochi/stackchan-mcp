@@ -6,6 +6,8 @@
 #include <condition_variable>
 #include <chrono>
 #include <mutex>
+#include <vector>
+#include <atomic>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -51,6 +53,7 @@
 #define AS_EVENT_WAKE_WORD_RUNNING          (1 << 1)
 #define AS_EVENT_AUDIO_PROCESSOR_RUNNING    (1 << 2)
 #define AS_EVENT_PLAYBACK_NOT_EMPTY         (1 << 3)
+#define AS_EVENT_RAW_CAPTURE_RUNNING        (1 << 4)
 
 #define AS_OPUS_GET_FRAME_DRU_ENUM(duration_ms)                   \
     ((duration_ms) == 5 ? ESP_OPUS_ENC_FRAME_DURATION_5_MS :      \
@@ -89,10 +92,16 @@ enum AudioTaskType {
     kAudioTaskTypeDecodeToPlaybackQueue,
 };
 
+struct RawCaptureFrame {
+    std::vector<int16_t> pcm;
+};
+
 struct AudioTask {
     AudioTaskType type;
     std::vector<int16_t> pcm;
-    uint32_t timestamp;
+    std::unique_ptr<RawCaptureFrame> raw_capture_frame;
+    uint32_t timestamp = 0;
+    uint32_t raw_capture_generation = 0;
 };
 
 struct DebugStatistics {
@@ -118,10 +127,12 @@ public:
     void WaitForPlaybackQueueEmpty();
     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
+    bool IsRawCaptureRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_RAW_CAPTURE_RUNNING; }
     bool IsAfeWakeWord();
 
     void EnableWakeWordDetection(bool enable);
     void EnableVoiceProcessing(bool enable);
+    void EnableRawCapture(bool enable);
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
 
@@ -171,6 +182,11 @@ private:
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
+    std::mutex raw_capture_mutex_;
+    std::atomic<uint32_t> raw_capture_generation_{0};
+    std::unique_ptr<std::vector<int16_t>> raw_capture_buffer_;
+    size_t raw_capture_buffer_samples_ = 0;
+    std::unique_ptr<std::deque<std::unique_ptr<RawCaptureFrame>>> raw_capture_free_frames_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
 
@@ -187,6 +203,14 @@ private:
     void AudioInputTask();
     void AudioOutputTask();
     void OpusCodecTask();
+    void FeedRawCapture(std::vector<int16_t>&& data);
+    bool PushRawCaptureFrameToEncodeQueue(uint32_t generation, const int16_t* pcm);
+    void ReturnRawCaptureFrame(std::unique_ptr<RawCaptureFrame> frame, uint32_t generation);
+    bool IsRawCaptureGenerationCurrent(uint32_t generation) const;
+    void AllocateRawCaptureStorage();
+    void ReleaseRawCaptureStorage();
+    void DropRawCaptureQueuedDataLocked();
+    void ResetRawCaptureBuffer();
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();

@@ -1014,7 +1014,7 @@ async def test_manager_send_tts_state_no_device():
 
 @pytest.mark.asyncio
 async def test_connection_send_listen_state_start_includes_mode():
-    """listen.start carries a mode field on the wire."""
+    """listen.start carries a mode field and omits the default voice profile."""
     ws = _FakeWebSocket()
     conn = ESP32Connection(ws, session_id="session-listen")  # type: ignore[arg-type]
 
@@ -1027,6 +1027,25 @@ async def test_connection_send_listen_state_start_includes_mode():
         "type": "listen",
         "state": "start",
         "mode": "manual",
+    }
+
+
+@pytest.mark.asyncio
+async def test_connection_send_listen_state_raw_profile_includes_profile():
+    """listen.start carries profile only when a non-default profile is requested."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-listen")  # type: ignore[arg-type]
+
+    await conn.send_listen_state("start", mode="manual", profile="raw")
+
+    assert len(ws.sent) == 1
+    payload = json.loads(ws.sent[0])
+    assert payload == {
+        "session_id": "session-listen",
+        "type": "listen",
+        "state": "start",
+        "mode": "manual",
+        "profile": "raw",
     }
 
 

@@ -36,6 +36,14 @@ documented-only.
   through the existing `listen` wire path, dependency-free BPM estimation,
   beat-synced head sway/base-ring LED flashes, polling metadata snapshots, and
   WAV clip export from a bounded rolling buffer. (#301)
+- Beat mode now requests the raw `listen` capture profile so ambient music
+  reaches the gateway without device-side speech AFE suppression. (#349)
+
+### Firmware
+
+- Added an optional inbound `listen.profile` field with `voice` (default) and
+  `raw` modes; raw streams pre-AFE microphone PCM through the existing Opus
+  audio path for beat analysis. (#349)
 
 ## [0.16.0] - 2026-07-11
 
