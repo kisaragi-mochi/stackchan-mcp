@@ -10,6 +10,7 @@
 #include <mutex>
 #include <deque>
 #include <memory>
+#include <atomic>
 
 #include "protocol.h"
 #include "ota.h"
@@ -37,6 +38,11 @@ enum AecMode {
     kAecOff,
     kAecOnDeviceSide,
     kAecOnServerSide,
+};
+
+enum ListeningProfile {
+    kListeningProfileVoice,
+    kListeningProfileRaw,
 };
 
 class Application {
@@ -98,7 +104,7 @@ public:
      * Start listening (event-based, thread-safe)
      * Sends MAIN_EVENT_START_LISTENING to be handled in Run()
      */
-    void StartListening();
+    void StartListening(ListeningProfile profile = kListeningProfileVoice);
 
     /**
      * Stop listening (event-based, thread-safe)
@@ -141,6 +147,8 @@ private:
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
+    std::atomic<ListeningProfile> pending_listening_profile_{kListeningProfileVoice};
+    ListeningProfile listening_profile_ = kListeningProfileVoice;
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;

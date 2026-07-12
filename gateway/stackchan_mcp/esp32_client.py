@@ -389,7 +389,12 @@ class ESP32Connection:
         }
         await self._ws_send(json.dumps(message))
 
-    async def send_listen_state(self, state: str, mode: str = "manual") -> None:
+    async def send_listen_state(
+        self,
+        state: str,
+        mode: str = "manual",
+        profile: str = "voice",
+    ) -> None:
         """Send a listen state notification (``start`` / ``stop``).
 
         Server-driven counterpart to the device's existing
@@ -404,6 +409,12 @@ class ESP32Connection:
         :func:`HandleStartListeningEvent` unconditionally enters
         ``kListeningModeManualStop`` (the gateway controls the stop
         boundary explicitly).
+
+        ``profile`` selects the firmware microphone capture source for
+        ``state="start"``. The default ``"voice"`` profile is omitted
+        from the JSON to keep the wire shape compatible with older logs
+        and firmware. Beat mode uses ``"raw"`` to bypass the device-side
+        speech AFE path.
         """
         if not self._connected:
             raise ConnectionError("ESP32 not connected")
@@ -414,6 +425,8 @@ class ESP32Connection:
         }
         if state == "start":
             message["mode"] = mode
+            if profile != "voice":
+                message["profile"] = profile
         await self._ws_send(json.dumps(message))
 
     def disconnect(self) -> None:
@@ -1108,7 +1121,12 @@ class ESP32Manager:
             raise ConnectionError("No ESP32 device connected")
         await self._connection.send_tts_state(state)
 
-    async def send_listen_state(self, state: str, mode: str = "manual") -> None:
+    async def send_listen_state(
+        self,
+        state: str,
+        mode: str = "manual",
+        profile: str = "voice",
+    ) -> None:
         """Send a listen state notification to put the device into /
         out of listening mode (Issue #91).
 
@@ -1117,7 +1135,7 @@ class ESP32Manager:
         """
         if not self._connection or not self._connection.connected:
             raise ConnectionError("No ESP32 device connected")
-        await self._connection.send_listen_state(state, mode=mode)
+        await self._connection.send_listen_state(state, mode=mode, profile=profile)
 
     def get_status(self) -> dict[str, Any]:
         """Get current connection status."""

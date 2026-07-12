@@ -19,6 +19,30 @@
 
 #define TAG "Application"
 
+namespace {
+
+ListeningProfile ParseListenProfile(const cJSON* root) {
+    auto profile = cJSON_GetObjectItem(root, "profile");
+    if (profile == nullptr) {
+        return kListeningProfileVoice;
+    }
+    if (!cJSON_IsString(profile)) {
+        ESP_LOGW(TAG, "listen profile is not a string; falling back to voice");
+        return kListeningProfileVoice;
+    }
+    if (strcmp(profile->valuestring, "raw") == 0) {
+        return kListeningProfileRaw;
+    }
+    if (strcmp(profile->valuestring, "voice") == 0) {
+        return kListeningProfileVoice;
+    }
+
+    ESP_LOGW(TAG, "Unknown listen profile: %s; falling back to voice", profile->valuestring);
+    return kListeningProfileVoice;
+}
+
+} // namespace
+
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -581,6 +605,11 @@ void Application::InitializeProtocol() {
             // wake-word. Used by the gateway-side ``listen()`` MCP tool to
             // perform STT capture on demand.
             //
+            // ``profile`` selects the microphone capture source for this
+            // listen session. Missing / ``voice`` preserves the existing AFE
+            // voice path; ``raw`` bypasses AFE and streams pre-AFE mic
+            // PCM through the same Opus SendAudio path.
+            //
             // Phase 1 honours only ``state: "start" | "stop"``; the ``mode``
             // field is parsed but currently ignored because
             // ``HandleStartListeningEvent()`` unconditionally calls
@@ -593,8 +622,9 @@ void Application::InitializeProtocol() {
             if (!cJSON_IsString(state)) {
                 ESP_LOGW(TAG, "listen message missing state");
             } else if (strcmp(state->valuestring, "start") == 0) {
-                Schedule([this]() {
-                    StartListening();
+                auto profile = ParseListenProfile(root);
+                Schedule([this, profile]() {
+                    StartListening(profile);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
@@ -725,11 +755,12 @@ void Application::ToggleChatState() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT);
 }
 
-void Application::StartListening() {
+void Application::StartListening(ListeningProfile profile) {
     // Thin event setter. The popup-on-listening flag is armed inside
     // HandleStartListeningEvent (main task) so all writes to
     // play_popup_on_listening_ converge to the same task that reads
     // and clears it in HandleStateChangedEvent.
+    pending_listening_profile_.store(profile, std::memory_order_relaxed);
     xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
 }
 
@@ -808,7 +839,10 @@ void Application::HandleStartListeningEvent() {
         return;
     }
 
+    auto requested_profile = pending_listening_profile_.load(std::memory_order_relaxed);
     if (state == kDeviceStateIdle || state == kDeviceStateSpeaking) {
+        listening_profile_ = requested_profile;
+
         // Arm the OGG_POPUP cue that HandleStateChangedEvent plays after
         // the kDeviceStateListening branch resets the decoder
         // (~line 980). Previously this flag was set only on wake-word
@@ -948,7 +982,9 @@ void Application::HandleStateChangedEvent() {
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+            audio_service_.EnableRawCapture(false);
             audio_service_.EnableVoiceProcessing(false);
+            listening_profile_ = kListeningProfileVoice;
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
@@ -956,13 +992,17 @@ void Application::HandleStateChangedEvent() {
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
             break;
-        case kDeviceStateListening:
+        case kDeviceStateListening: {
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
-            // Make sure the audio processor is running
-            if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
-                // For auto mode, wait for playback queue to be empty before enabling voice processing
+            // Make sure the selected listening source is running
+            bool is_raw_profile = listening_profile_ == kListeningProfileRaw;
+            bool is_listening_source_running = is_raw_profile
+                ? audio_service_.IsRawCaptureRunning()
+                : audio_service_.IsAudioProcessorRunning();
+            if (play_popup_on_listening_ || !is_listening_source_running) {
+                // For auto mode, wait for playback queue to be empty before enabling mic capture
                 // This prevents audio truncation when STOP arrives late due to network jitter
                 if (listening_mode_ == kListeningModeAutoStop) {
                     audio_service_.WaitForPlaybackQueueEmpty();
@@ -970,7 +1010,13 @@ void Application::HandleStateChangedEvent() {
                 
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
-                audio_service_.EnableVoiceProcessing(true);
+                if (is_raw_profile) {
+                    audio_service_.EnableVoiceProcessing(false);
+                    audio_service_.EnableRawCapture(true);
+                } else {
+                    audio_service_.EnableRawCapture(false);
+                    audio_service_.EnableVoiceProcessing(true);
+                }
             }
 
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
@@ -987,18 +1033,25 @@ void Application::HandleStateChangedEvent() {
                 audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
             }
             break;
+        }
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
 
+            if (listening_profile_ == kListeningProfileRaw) {
+                audio_service_.EnableRawCapture(false);
+            }
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
+            listening_profile_ = kListeningProfileVoice;
             audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
+            audio_service_.EnableRawCapture(false);
             audio_service_.EnableVoiceProcessing(false);
+            listening_profile_ = kListeningProfileVoice;
             audio_service_.EnableWakeWordDetection(false);
             break;
         default:

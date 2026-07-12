@@ -168,6 +168,7 @@ async def test_gateway_stop_stops_active_beat_mode_before_esp32_transport(
             self,
             state: str,
             mode: str = "manual",
+            profile: str = "voice",
         ) -> None:
             events.append(("listen", state))
 
@@ -239,6 +240,7 @@ async def test_gateway_stop_completes_when_beat_listen_stop_hangs(
             self,
             state: str,
             mode: str = "manual",
+            profile: str = "voice",
         ) -> None:
             events.append(("listen", state))
             if state == "stop":

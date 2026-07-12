@@ -29,10 +29,17 @@ class _FakeESP32:
         )
         self.listen_lock = asyncio.Lock()
         self.listen_states: list[tuple[str, str | None]] = []
+        self.listen_profiles: list[tuple[str, str | None]] = []
         self.tool_calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def send_listen_state(self, state: str, mode: str = "manual") -> None:
+    async def send_listen_state(
+        self,
+        state: str,
+        mode: str = "manual",
+        profile: str = "voice",
+    ) -> None:
         self.listen_states.append((state, mode if state == "start" else None))
+        self.listen_profiles.append((state, profile if state == "start" else None))
 
     async def call_tool(
         self,
@@ -113,6 +120,7 @@ async def test_start_stop_are_idempotent_and_release_recording(fake_decode) -> N
     assert is_recording()
     assert beat_mode.is_beat_mode_owner(recording_owner())
     assert gateway.esp32.listen_states == [("start", "manual")]
+    assert gateway.esp32.listen_profiles == [("start", "raw")]
 
     stopped = await beat_mode.stop_beat_mode()
     stopped_again = await beat_mode.stop_beat_mode()
@@ -137,8 +145,12 @@ async def test_start_cancellation_releases_recording_slot_after_claim(
     async def blocked_send_listen_state(
         state: str,
         mode: str = "manual",
+        profile: str = "voice",
     ) -> None:
         gateway.esp32.listen_states.append((state, mode if state == "start" else None))
+        gateway.esp32.listen_profiles.append(
+            (state, profile if state == "start" else None)
+        )
         if state == "start":
             send_started.set()
             await release_send.wait()
@@ -169,8 +181,12 @@ async def test_explicit_stop_waits_for_auto_stop_cleanup(fake_decode) -> None:
     async def blocked_send_listen_state(
         state: str,
         mode: str = "manual",
+        profile: str = "voice",
     ) -> None:
         gateway.esp32.listen_states.append((state, mode if state == "start" else None))
+        gateway.esp32.listen_profiles.append(
+            (state, profile if state == "start" else None)
+        )
         if state == "stop":
             stop_started.set()
             await release_stop.wait()
@@ -327,6 +343,10 @@ async def test_reconnect_mid_mode_resets_decoder_and_drops_stale_frames(
     gateway.esp32.connection.session_id = "beat-session-reconnected"
     await mode._arm_listen_unlocked()
 
+    assert gateway.esp32.listen_profiles == [
+        ("start", "raw"),
+        ("start", "raw"),
+    ]
     assert mode._session_id == "beat-session-reconnected"
     assert len(fake_decode) == 2
     assert old_decoder is fake_decode[0]

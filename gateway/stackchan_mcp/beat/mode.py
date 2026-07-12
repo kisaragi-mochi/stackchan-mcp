@@ -472,7 +472,11 @@ class BeatMode:
             frame_hook=self._enqueue_opus_frame,
             buffer_frames=False,
         )
-        await self._gateway.esp32.send_listen_state("start", mode="manual")
+        await self._gateway.esp32.send_listen_state(
+            "start",
+            mode="manual",
+            profile="raw",
+        )
         self._session_id = session_id
         self._last_listen_start_at = asyncio.get_running_loop().time()
         self._listen_start_count += 1
