@@ -2515,13 +2515,15 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
             ),
             Tool(
                 name="beat_clip_save",
-                description=(
-                    "Save the most recent beat-mode audio window as a WAV file "
-                    "(16 kHz mono signed 16-bit PCM) and return the absolute "
-                    "temp-file path plus actual captured duration. Works while "
-                    "beat mode is active and against the retained buffer after "
-                    "stop, until a new beat mode starts or the gateway restarts."
-                ),
+	                description=(
+	                    "Save the most recent beat-mode audio window as a WAV file "
+	                    "(16 kHz mono signed 16-bit PCM) and return the absolute "
+	                    "temp-file path plus actual captured duration. Works while "
+	                    "beat mode is active and against the retained buffer after "
+	                    "stop, until a new beat mode starts or the gateway restarts. "
+	                    "The file persists on disk; the caller is responsible for "
+	                    "deleting it when no longer needed."
+	                ),
                 inputSchema={
                     "type": "object",
                     "properties": {

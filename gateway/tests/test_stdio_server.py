@@ -1724,6 +1724,8 @@ async def test_list_tools_includes_beat_mode_tools():
     update_schema = tools["beat_mode_update"].inputSchema
     assert update_schema["properties"]["blink_rate"]["minimum"] == 0.25
     assert update_schema["properties"]["motion_enabled"]["type"] == "boolean"
+    assert "persists on disk" in tools["beat_clip_save"].description
+    assert "caller is responsible" in tools["beat_clip_save"].description
 
 
 @pytest.mark.asyncio

@@ -78,6 +78,16 @@ LISTEN_START_TRANSITION_DELAY_S = 0.05
 LISTENING_FACE = "thinking"
 IDLE_FACE = "idle"
 LISTEN_MOTIONS = {"none", "face-only", "look-up"}
+BEAT_MODE_OWNER = "beat_mode"
+BEAT_MODE_OWNER_PREFIX = f"{BEAT_MODE_OWNER}:"
+
+
+def _is_beat_mode_owner(owner: str | None) -> bool:
+    return owner == BEAT_MODE_OWNER or (
+        owner is not None and owner.startswith(BEAT_MODE_OWNER_PREFIX)
+    )
+
+
 MIN_LOOK_UP_PITCH = 5.0
 MAX_LOOK_UP_PITCH = 85.0
 
@@ -383,7 +393,7 @@ async def listen_and_transcribe(
     listen_lock = getattr(gateway.esp32, "listen_lock", None)
     lock_ctx = listen_lock if listen_lock is not None else nullcontext()
 
-    if is_recording() and recording_owner() == "beat_mode":
+    if is_recording() and _is_beat_mode_owner(recording_owner()):
         raise RuntimeError(
             "beat mode is already using the device microphone; stop "
             "beat mode before calling listen()"
@@ -414,7 +424,7 @@ async def listen_and_transcribe(
         # check is the cross-source guard.
         if is_recording():
             owner = recording_owner()
-            if owner == "beat_mode":
+            if _is_beat_mode_owner(owner):
                 raise RuntimeError(
                     "beat mode is already using the device microphone; stop "
                     "beat mode before calling listen()"

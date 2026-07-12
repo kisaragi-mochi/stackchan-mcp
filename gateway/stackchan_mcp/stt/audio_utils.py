@@ -40,6 +40,34 @@ DEVICE_FRAME_DURATION_MS = 60
 SAMPLES_PER_FRAME = DEVICE_SAMPLE_RATE * DEVICE_FRAME_DURATION_MS // 1000
 
 
+class StreamingOpusDecoder:
+    """Stateful decoder for sequential Opus frames from one device session."""
+
+    def __init__(
+        self,
+        *,
+        sample_rate: int = DEVICE_SAMPLE_RATE,
+        channels: int = DEVICE_CHANNELS,
+        frame_duration_ms: int = DEVICE_FRAME_DURATION_MS,
+    ) -> None:
+        try:
+            import opuslib  # type: ignore[import-not-found]
+        except ImportError as exc:  # pragma: no cover - exercised via integration
+            raise RuntimeError(
+                "opuslib is not installed. Install with "
+                "'pip install stackchan-mcp[stt]' to enable Opus decoding."
+            ) from exc
+
+        self.samples_per_frame = sample_rate * frame_duration_ms // 1000
+        self._decoder = opuslib.Decoder(sample_rate, channels)
+
+    def decode_frame(self, frame: bytes) -> bytes:
+        """Decode one Opus frame, preserving decoder state across calls."""
+        if not frame:
+            return b""
+        return self._decoder.decode(frame, self.samples_per_frame)
+
+
 def decode_opus_frames(
     frames: Iterable[bytes],
     *,
@@ -72,23 +100,18 @@ def decode_opus_frames(
             message points at the right install command so the caller
             can surface a clean MCP error.
     """
-    try:
-        import opuslib  # type: ignore[import-not-found]
-    except ImportError as exc:  # pragma: no cover - exercised via integration
-        raise RuntimeError(
-            "opuslib is not installed. Install with "
-            "'pip install stackchan-mcp[stt]' to enable Opus decoding."
-        ) from exc
-
-    samples_per_frame = sample_rate * frame_duration_ms // 1000
-    decoder = opuslib.Decoder(sample_rate, channels)
+    decoder = StreamingOpusDecoder(
+        sample_rate=sample_rate,
+        channels=channels,
+        frame_duration_ms=frame_duration_ms,
+    )
 
     pcm_chunks: list[bytes] = []
     for index, frame in enumerate(frames):
         if not frame:
             continue
         try:
-            pcm = decoder.decode(frame, samples_per_frame)
+            pcm = decoder.decode_frame(frame)
         except Exception as exc:  # pragma: no cover - decode errors are rare
             logger.warning(
                 "Opus decode failed for frame %d (size=%d): %s; skipping",

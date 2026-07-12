@@ -70,7 +70,7 @@
 | `beat_mode_stop()` | beat mode を停止し、best-effort で `listen.stop` を送る。最新の rolling audio buffer は、次の beat mode 開始または gateway 再起動まで clip 書き出し用に保持される | ✅ |
 | `beat_mode_update(motion_intensity?, color?, blink_rate?, motion_enabled?, led_enabled?)` | キャプチャを再起動せずに beat mode の VJ パラメータを更新する | ✅ |
 | `beat_meta_snapshot()` | beat mode の最新メタデータを polling で取得する。active 状態、BPM、confidence、最終 beat/audio timestamp、capture health、counter、現在の motion/LED パラメータを返す | ✅ |
-| `beat_clip_save(seconds?)` | 最新の rolling beat-mode 音声を 16 kHz mono WAV の一時ファイルとして保存し、パスと実際に保存できた秒数を返す | ✅ |
+| `beat_clip_save(seconds?)` | 最新の rolling beat-mode 音声を 16 kHz mono WAV の一時ファイルとして保存し、パスと実際に保存できた秒数を返す。clip ファイルはディスクに残るため、不要になったら caller 側で削除してください | ✅ |
 | `stackchan_follow_pose_stream(action, url, ...)` | 任意の外部 WebSocket pose-stream を購読し、 受信した `yaw` / `pitch` フレームに対して 1:1 で首を追従させる（SCS0009 動作範囲内、 yaw ±90°、 pitch 5..85°）。 `action` は `start` / `stop` / `status` を切替。 軸反転、 pitch センター offset、 ダウンサンプル、 角速度クランプ、 exponential backoff 付き reconnect を内包し、 初期姿勢はデバイス側から seed することで初回フレームから角速度クランプが実サーボ位置を基準に効きます。 上流サーバ側のプロトコル（zero-offset コマンド、 ソース選択、 トランスポート）は本 gateway のスコープ外。 | ✅ |
 | `stackchan_follow_led_stream(action, url, target, ...)` | 任意の外部 WebSocket LED-frame stream を購読し、検証済みの `colors` フレームをベース部 12 LED または Port B WS2812 strip に転送する。`event` フレームは rate gate を bypass し、`continuous` フレームは `max_fps` で制限される | ✅ |
 

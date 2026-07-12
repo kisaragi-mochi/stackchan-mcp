@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from collections import deque
 from dataclasses import dataclass, replace
+from itertools import count
 import json
 import logging
 import math
@@ -21,12 +22,13 @@ from ..audio_stream import (
     start_recording,
     stop_recording_if_owner,
 )
-from ..stt.audio_utils import DEVICE_SAMPLE_RATE, decode_opus_frames
+from ..stt.audio_utils import DEVICE_SAMPLE_RATE, StreamingOpusDecoder
 from .tracker import BeatTracker
 
 logger = logging.getLogger(__name__)
 
 BEAT_MODE_OWNER = "beat_mode"
+BEAT_MODE_OWNER_PREFIX = f"{BEAT_MODE_OWNER}:"
 BASE_RING_LED_COUNT = 12
 CAPTURE_SECONDS_DEFAULT = 30.0
 OPUS_QUEUE_MAX_FRAMES = 200
@@ -36,6 +38,17 @@ LISTEN_RESTART_MAX_BACKOFF_S = 8.0
 MIN_MOTION_CONFIDENCE = 0.35
 SERVO_YAW_MIN, SERVO_YAW_MAX = -90, 90
 SERVO_PITCH_MIN, SERVO_PITCH_MAX = 5, 85
+_OWNER_GENERATIONS = count(1)
+
+
+def _new_owner_token() -> str:
+    return f"{BEAT_MODE_OWNER}:{next(_OWNER_GENERATIONS)}"
+
+
+def is_beat_mode_owner(owner: str | None) -> bool:
+    return owner == BEAT_MODE_OWNER or (
+        owner is not None and owner.startswith(BEAT_MODE_OWNER_PREFIX)
+    )
 
 
 def _is_finite_number(value: Any) -> bool:
@@ -175,8 +188,12 @@ class BeatMode:
         self._opus_queue: asyncio.Queue[bytes] = asyncio.Queue(
             maxsize=OPUS_QUEUE_MAX_FRAMES
         )
+        self._recording_owner = _new_owner_token()
+        self._decoder: StreamingOpusDecoder | None = None
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
+        self._stop_lock = asyncio.Lock()
+        self._stop_task: asyncio.Task[dict[str, Any]] | None = None
         self._active = False
         self._started_at: float | None = None
         self._stopped_at: float | None = None
@@ -212,9 +229,10 @@ class BeatMode:
         self._capture_state = "starting"
         try:
             await self._arm_listen()
-        except Exception:
-            stop_recording_if_owner(BEAT_MODE_OWNER)
+        except BaseException:
+            self._release_recording_slot()
             self._capture_state = "stopped"
+            self._stopped_at = asyncio.get_running_loop().time()
             raise
 
         self._active = True
@@ -242,21 +260,32 @@ class BeatMode:
         return self.status()
 
     async def stop(self) -> dict[str, Any]:
-        if not self._active:
-            self._capture_state = "stopped"
-            return self.status()
+        if self._stop_task is None:
+            async with self._stop_lock:
+                if self._stop_task is None:
+                    if not self._active and self._capture_state == "stopped":
+                        return self.status()
+                    self._stop_task = asyncio.create_task(
+                        self._stop_impl(asyncio.current_task()),
+                        name="stackchan-beat-mode-stop",
+                    )
+        return await asyncio.shield(self._stop_task)
 
-        self._active = False
+    async def _stop_impl(
+        self,
+        caller: asyncio.Task[Any] | None,
+    ) -> dict[str, Any]:
+        self._capture_state = "stopping"
         self._stop_event.set()
         await self._shield_listen_stop()
-        stop_recording_if_owner(BEAT_MODE_OWNER)
+        self._release_recording_slot()
 
         current = asyncio.current_task()
         for task in self._tasks:
-            if task is not current and not task.done():
+            if task not in (current, caller) and not task.done():
                 task.cancel()
         for task in self._tasks:
-            if task is current:
+            if task in (current, caller):
                 continue
             try:
                 await task
@@ -265,6 +294,7 @@ class BeatMode:
             except Exception as exc:  # pragma: no cover - defensive
                 self._last_error = str(exc)
         self._tasks = []
+        self._active = False
         self._capture_state = "stopped"
         self._stopped_at = asyncio.get_running_loop().time()
         return self.status()
@@ -389,7 +419,7 @@ class BeatMode:
         }
 
     def _ensure_decoder_available(self) -> None:
-        decode_opus_frames([])
+        self._decoder = StreamingOpusDecoder()
 
     def _ensure_device_ready(self) -> None:
         if not getattr(self._gateway.esp32, "device_connected", False):
@@ -413,7 +443,7 @@ class BeatMode:
     async def _arm_listen_unlocked(self) -> None:
         self._ensure_device_ready()
         owner = recording_owner()
-        if is_recording() and owner != BEAT_MODE_OWNER:
+        if is_recording() and owner != self._recording_owner:
             raise RuntimeError(
                 "audio capture is already active; stop listen() or the "
                 "device-driven capture before starting beat mode"
@@ -422,7 +452,7 @@ class BeatMode:
         session_id = getattr(connection, "session_id", "") if connection else ""
         start_recording(
             session_id,
-            owner=BEAT_MODE_OWNER,
+            owner=self._recording_owner,
             frame_hook=self._enqueue_opus_frame,
             buffer_frames=False,
         )
@@ -452,6 +482,9 @@ class BeatMode:
                 logger.warning("best-effort beat mode listen.stop failed: %s", exc)
             break
 
+    def _release_recording_slot(self) -> None:
+        stop_recording_if_owner(self._recording_owner)
+
     def _enqueue_opus_frame(self, frame: bytes) -> None:
         self._frames_received += 1
         try:
@@ -469,10 +502,12 @@ class BeatMode:
             self._frames_dropped += 1
 
     async def _decode_loop(self) -> None:
+        if self._decoder is None:
+            self._decoder = StreamingOpusDecoder()
         while not self._stop_event.is_set():
             frame = await self._opus_queue.get()
             try:
-                pcm = decode_opus_frames([frame])
+                pcm = self._decoder.decode_frame(frame)
             except Exception as exc:
                 self._decode_errors += 1
                 self._frames_dropped += 1
@@ -495,9 +530,7 @@ class BeatMode:
             await self._sleep_or_stop(1.0)
             if self._stop_event.is_set():
                 break
-            now = asyncio.get_running_loop().time()
-            reference = self._last_audio_at or self._last_listen_start_at
-            if reference is not None and now - reference < LISTEN_RESTART_AFTER_S:
+            if not self._listen_restart_due(self._now()):
                 continue
 
             self._capture_state = "retrying"
@@ -513,6 +546,21 @@ class BeatMode:
                 )
             else:
                 self._restart_backoff_s = LISTEN_RESTART_INITIAL_BACKOFF_S
+
+    def _now(self) -> float:
+        return asyncio.get_running_loop().time()
+
+    def _listen_watchdog_reference(self) -> float | None:
+        candidates = [
+            value
+            for value in (self._last_audio_at, self._last_listen_start_at)
+            if value is not None
+        ]
+        return max(candidates) if candidates else None
+
+    def _listen_restart_due(self, now: float) -> bool:
+        reference = self._listen_watchdog_reference()
+        return reference is None or now - reference >= LISTEN_RESTART_AFTER_S
 
     async def _motion_led_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -634,7 +682,7 @@ class BeatMode:
     async def _auto_stop_after(self, duration_sec: int) -> None:
         await self._sleep_or_stop(float(duration_sec))
         if not self._stop_event.is_set():
-            await self.stop()
+            await _stop_mode_instance(self)
 
     async def _sleep_or_stop(self, delay: float) -> None:
         if delay <= 0:
@@ -657,6 +705,13 @@ def _get_mode_lock() -> asyncio.Lock:
     return _mode_lock
 
 
+async def _stop_mode_instance(mode: BeatMode) -> dict[str, Any]:
+    async with _get_mode_lock():
+        if _mode is not mode:
+            return mode.status()
+        return await mode.stop()
+
+
 async def start_beat_mode(gateway: Any, config: BeatModeConfig) -> dict[str, Any]:
     global _mode
     async with _get_mode_lock():
@@ -674,8 +729,9 @@ async def start_beat_mode(gateway: Any, config: BeatModeConfig) -> dict[str, Any
         _mode = mode
         try:
             return await mode.start()
-        except Exception:
-            _mode = None
+        except BaseException:
+            if _mode is mode:
+                _mode = None
             raise
 
 

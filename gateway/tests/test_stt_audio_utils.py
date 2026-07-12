@@ -19,6 +19,13 @@ from stackchan_mcp.stt.audio_utils import (
 )
 
 
+def _import_opuslib_or_skip():
+    try:
+        return pytest.importorskip("opuslib")
+    except Exception as exc:
+        pytest.skip(f"opuslib unavailable: {exc}")
+
+
 def test_device_audio_constants_match_tts():
     """The STT and TTS sides agree on the device wire parameters.
 
@@ -41,13 +48,13 @@ def test_device_audio_constants_match_tts():
 
 def test_decode_opus_frames_empty_iterable_returns_empty_bytes():
     """Decoding zero frames is a no-op rather than an error."""
-    opuslib = pytest.importorskip("opuslib")  # noqa: F841
+    _import_opuslib_or_skip()
     assert decode_opus_frames([]) == b""
 
 
 def test_decode_opus_frames_skips_empty_frame():
     """An empty (zero-byte) frame is skipped, not passed to the decoder."""
-    opuslib = pytest.importorskip("opuslib")  # noqa: F841
+    _import_opuslib_or_skip()
     assert decode_opus_frames([b""]) == b""
 
 
@@ -59,7 +66,7 @@ def test_decode_opus_roundtrip_with_real_libopus():
     (one frame's worth per encoded frame) — that proves the framing
     parameters (sample rate, frame duration, channels) are all in sync.
     """
-    opuslib = pytest.importorskip("opuslib")
+    opuslib = _import_opuslib_or_skip()
 
     encoder = opuslib.Encoder(
         DEVICE_SAMPLE_RATE, DEVICE_CHANNELS, opuslib.APPLICATION_VOIP
@@ -84,7 +91,7 @@ def test_decode_opus_frames_skips_corrupt_frame():
     A malformed inbound packet should not abort the whole listen()
     call — partial transcription beats a hard failure on the wire.
     """
-    opuslib = pytest.importorskip("opuslib")
+    opuslib = _import_opuslib_or_skip()
 
     encoder = opuslib.Encoder(
         DEVICE_SAMPLE_RATE, DEVICE_CHANNELS, opuslib.APPLICATION_VOIP

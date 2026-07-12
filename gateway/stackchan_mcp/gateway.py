@@ -7,6 +7,7 @@ This module orchestrates both sides.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -17,6 +18,8 @@ from .esp32_client import ESP32Manager
 from .mdns_advertiser import MdnsAdvertiser
 
 logger = logging.getLogger(__name__)
+
+BEAT_MODE_SHUTDOWN_TIMEOUT_S = 3.0
 
 
 class Gateway:
@@ -193,6 +196,21 @@ class Gateway:
             await stop_led_follow()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("follow_led_stream shutdown failed: %s", exc)
+
+        try:
+            from .beat import stop_beat_mode
+
+            await asyncio.wait_for(
+                asyncio.shield(stop_beat_mode()),
+                timeout=BEAT_MODE_SHUTDOWN_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "beat mode shutdown timed out after %.1fs",
+                BEAT_MODE_SHUTDOWN_TIMEOUT_S,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("beat mode shutdown failed: %s", exc)
 
         self._running = False
         if self._mdns_advertiser:

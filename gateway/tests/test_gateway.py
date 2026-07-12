@@ -1,7 +1,13 @@
 """Tests for gateway module."""
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
+from stackchan_mcp.audio_stream import is_recording, stop_recording
+from stackchan_mcp.beat import mode as beat_mode
+from stackchan_mcp.beat.mode import BeatModeConfig
 from stackchan_mcp.gateway import Gateway, get_gateway
 
 
@@ -137,6 +143,71 @@ async def test_gateway_start_stop(monkeypatch):
     assert gw._running is False
     assert ("http_cleanup",) in calls
     assert ("esp32_stop",) in calls
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_stops_active_beat_mode_before_esp32_transport(
+    monkeypatch,
+):
+    events: list[tuple[str, str | None] | tuple[str]] = []
+
+    class FakeStreamingOpusDecoder:
+        def decode_frame(self, frame: bytes) -> bytes:
+            return frame
+
+    class FakeEsp32:
+        def __init__(self) -> None:
+            self.device_connected = True
+            self.connection = SimpleNamespace(
+                protocol_version=1,
+                session_id="gateway-stop-beat",
+            )
+            self.listen_lock = asyncio.Lock()
+
+        async def send_listen_state(
+            self,
+            state: str,
+            mode: str = "manual",
+        ) -> None:
+            events.append(("listen", state))
+
+        async def call_tool(
+            self,
+            name: str,
+            arguments: dict,
+        ) -> tuple[dict, None]:
+            events.append(("tool", name))
+            return {"ok": True}, None
+
+        async def stop(self) -> None:
+            events.append(("esp32_stop",))
+
+    monkeypatch.setattr(beat_mode, "StreamingOpusDecoder", FakeStreamingOpusDecoder)
+
+    gw = Gateway()
+    gw.esp32 = FakeEsp32()
+
+    try:
+        await beat_mode.start_beat_mode(gw, BeatModeConfig())
+        mode = beat_mode._mode
+        assert mode is not None
+        assert is_recording()
+
+        await gw.stop()
+
+        assert events == [
+            ("listen", "start"),
+            ("listen", "stop"),
+            ("esp32_stop",),
+        ]
+        assert not is_recording()
+        assert mode._tasks == []
+        assert mode.status()["active"] is False
+    finally:
+        await beat_mode.stop_beat_mode()
+        if is_recording():
+            stop_recording()
+        beat_mode._mode = None
 
 
 @pytest.mark.asyncio
