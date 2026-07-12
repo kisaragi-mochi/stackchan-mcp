@@ -18,6 +18,8 @@ from .mdns_advertiser import MdnsAdvertiser
 
 logger = logging.getLogger(__name__)
 
+BEAT_MODE_LISTEN_STOP_TIMEOUT_S = 3.0
+
 
 class Gateway:
     """Main gateway orchestrator.
@@ -193,6 +195,15 @@ class Gateway:
             await stop_led_follow()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("follow_led_stream shutdown failed: %s", exc)
+
+        try:
+            from .beat import stop_beat_mode
+
+            await stop_beat_mode(
+                listen_stop_timeout_s=BEAT_MODE_LISTEN_STOP_TIMEOUT_S,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("beat mode shutdown failed: %s", exc)
 
         self._running = False
         if self._mdns_advertiser:

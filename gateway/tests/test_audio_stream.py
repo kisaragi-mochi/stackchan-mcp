@@ -8,6 +8,7 @@ from stackchan_mcp.audio_stream import (
     handle_audio_frame,
     is_recording,
     push_opus_frames,
+    recording_owner,
     start_recording,
     stop_recording,
 )
@@ -107,6 +108,27 @@ async def test_start_recording_resets_previous_buffer():
 
     frames = stop_recording()
     assert frames == [b"new-1"]
+
+
+@pytest.mark.asyncio
+async def test_recording_hook_can_receive_frames_without_buffering():
+    """Long-running modes can tap frames without growing the Opus buffer."""
+    seen: list[bytes] = []
+
+    start_recording(
+        "session-hook",
+        owner="beat_mode",
+        frame_hook=seen.append,
+        buffer_frames=False,
+    )
+
+    await handle_audio_frame(b"frame-1", session_id="session-hook")
+    await handle_audio_frame(b"frame-2", session_id="session-hook")
+
+    frames = stop_recording()
+    assert seen == [b"frame-1", b"frame-2"]
+    assert frames == []
+    assert recording_owner() is None
 
 
 @pytest.mark.asyncio

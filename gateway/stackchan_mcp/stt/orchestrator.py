@@ -37,7 +37,12 @@ import logging
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal
 
-from ..audio_stream import is_recording, start_recording, stop_recording
+from ..audio_stream import (
+    is_recording,
+    recording_owner,
+    start_recording,
+    stop_recording,
+)
 from .audio_utils import DEVICE_FRAME_DURATION_MS, DEVICE_SAMPLE_RATE, decode_opus_frames
 from .base import EngineRegistry, get_registry
 
@@ -73,6 +78,16 @@ LISTEN_START_TRANSITION_DELAY_S = 0.05
 LISTENING_FACE = "thinking"
 IDLE_FACE = "idle"
 LISTEN_MOTIONS = {"none", "face-only", "look-up"}
+BEAT_MODE_OWNER = "beat_mode"
+BEAT_MODE_OWNER_PREFIX = f"{BEAT_MODE_OWNER}:"
+
+
+def _is_beat_mode_owner(owner: str | None) -> bool:
+    return owner == BEAT_MODE_OWNER or (
+        owner is not None and owner.startswith(BEAT_MODE_OWNER_PREFIX)
+    )
+
+
 MIN_LOOK_UP_PITCH = 5.0
 MAX_LOOK_UP_PITCH = 85.0
 
@@ -378,6 +393,12 @@ async def listen_and_transcribe(
     listen_lock = getattr(gateway.esp32, "listen_lock", None)
     lock_ctx = listen_lock if listen_lock is not None else nullcontext()
 
+    if is_recording() and _is_beat_mode_owner(recording_owner()):
+        raise RuntimeError(
+            "beat mode is already using the device microphone; stop "
+            "beat mode before calling listen()"
+        )
+
     duration_ms = int(duration_raw)
     language = arguments.get("language", "ja")
     model = arguments.get("model")
@@ -402,6 +423,12 @@ async def listen_and_transcribe(
         # slot from esp32_client without going through lock_ctx, so this
         # check is the cross-source guard.
         if is_recording():
+            owner = recording_owner()
+            if _is_beat_mode_owner(owner):
+                raise RuntimeError(
+                    "beat mode is already using the device microphone; stop "
+                    "beat mode before calling listen()"
+                )
             raise RuntimeError(
                 "audio_stream recording slot is already held "
                 "(device-driven capture in progress); MCP listen() "
