@@ -30,6 +30,8 @@ documented-only.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-12
+
 ### Gateway
 
 - Added runtime-adjustable beat-mode onset sensitivity for venue tuning; the
@@ -45,6 +47,8 @@ documented-only.
   scale) to match real-device microphone levels; onset detection now works
   against actual ambient music (verified on device). The adaptive threshold
   continues to prevent false onsets in quiet rooms. (#301)
+
+## [firmware-v1.16.0] - 2026-07-12
 
 ### Firmware
 
@@ -1823,7 +1827,9 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.16.0...v0.17.0
+[firmware-v1.16.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.15.0...firmware-v1.16.0
 [0.16.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.15.0...v0.16.0
 [firmware-v1.15.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.14.0...firmware-v1.15.0
 [0.15.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.14.0...v0.15.0
