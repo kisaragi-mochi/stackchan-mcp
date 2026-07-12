@@ -15,6 +15,7 @@
 #include "protocol.h"
 #include "ota.h"
 #include "audio_service.h"
+#include "listening_profile.h"
 #include "device_state.h"
 #include "device_state_machine.h"
 
@@ -38,11 +39,6 @@ enum AecMode {
     kAecOff,
     kAecOnDeviceSide,
     kAecOnServerSide,
-};
-
-enum ListeningProfile {
-    kListeningProfileVoice,
-    kListeningProfileRaw,
 };
 
 class Application {
@@ -148,6 +144,8 @@ private:
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     std::atomic<ListeningProfile> pending_listening_profile_{kListeningProfileVoice};
+    std::atomic<uint32_t> pending_listening_generation_{0};
+    std::atomic<uint32_t> listening_request_generation_{0};
     ListeningProfile listening_profile_ = kListeningProfileVoice;
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
@@ -171,8 +169,11 @@ private:
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
-    void ContinueOpenAudioChannel(ListeningMode mode);
-    void ContinueWakeWordInvoke(const std::string& wake_word);
+    uint32_t BeginListeningRequest(ListeningProfile profile);
+    void InvalidatePendingListeningRequest();
+    bool IsListeningRequestCurrent(uint32_t generation) const;
+    void ContinueOpenAudioChannel(ListeningMode mode, uint32_t generation);
+    void ContinueWakeWordInvoke(const std::string& wake_word, uint32_t generation);
 
     // Activation task (runs in background)
     void ActivationTask();

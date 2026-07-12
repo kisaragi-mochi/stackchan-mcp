@@ -7,6 +7,7 @@
 #include <chrono>
 #include <mutex>
 #include <vector>
+#include <atomic>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -91,10 +92,16 @@ enum AudioTaskType {
     kAudioTaskTypeDecodeToPlaybackQueue,
 };
 
+struct RawCaptureFrame {
+    std::vector<int16_t> pcm;
+};
+
 struct AudioTask {
     AudioTaskType type;
     std::vector<int16_t> pcm;
-    uint32_t timestamp;
+    std::unique_ptr<RawCaptureFrame> raw_capture_frame;
+    uint32_t timestamp = 0;
+    uint32_t raw_capture_generation = 0;
 };
 
 struct DebugStatistics {
@@ -176,7 +183,10 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     std::mutex raw_capture_mutex_;
+    std::atomic<uint32_t> raw_capture_generation_{0};
     std::vector<int16_t> raw_capture_buffer_;
+    size_t raw_capture_buffer_samples_ = 0;
+    std::deque<std::unique_ptr<RawCaptureFrame>> raw_capture_free_frames_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
 
@@ -194,6 +204,12 @@ private:
     void AudioOutputTask();
     void OpusCodecTask();
     void FeedRawCapture(std::vector<int16_t>&& data);
+    bool PushRawCaptureFrameToEncodeQueue(uint32_t generation, const int16_t* pcm);
+    void ReturnRawCaptureFrame(std::unique_ptr<RawCaptureFrame> frame, uint32_t generation);
+    bool IsRawCaptureGenerationCurrent(uint32_t generation) const;
+    void AllocateRawCaptureStorage();
+    void ReleaseRawCaptureStorage();
+    void DropRawCaptureQueuedDataLocked();
     void ResetRawCaptureBuffer();
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);

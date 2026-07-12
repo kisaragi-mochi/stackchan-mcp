@@ -23,22 +23,18 @@ namespace {
 
 ListeningProfile ParseListenProfile(const cJSON* root) {
     auto profile = cJSON_GetObjectItem(root, "profile");
-    if (profile == nullptr) {
-        return kListeningProfileVoice;
-    }
-    if (!cJSON_IsString(profile)) {
+    bool profile_present = profile != nullptr;
+    bool profile_is_string = cJSON_IsString(profile);
+    auto result = ParseListenProfileField(profile_present,
+                                          profile_is_string,
+                                          profile_is_string ? profile->valuestring : nullptr);
+    if (result.warning == kListenProfileParseWarningNonString) {
         ESP_LOGW(TAG, "listen profile is not a string; falling back to voice");
-        return kListeningProfileVoice;
+    } else if (result.warning == kListenProfileParseWarningUnknown) {
+        ESP_LOGW(TAG, "Unknown listen profile: %s; falling back to voice",
+                 profile->valuestring);
     }
-    if (strcmp(profile->valuestring, "raw") == 0) {
-        return kListeningProfileRaw;
-    }
-    if (strcmp(profile->valuestring, "voice") == 0) {
-        return kListeningProfileVoice;
-    }
-
-    ESP_LOGW(TAG, "Unknown listen profile: %s; falling back to voice", profile->valuestring);
-    return kListeningProfileVoice;
+    return result.profile;
 }
 
 } // namespace
@@ -755,16 +751,35 @@ void Application::ToggleChatState() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT);
 }
 
+uint32_t Application::BeginListeningRequest(ListeningProfile profile) {
+    uint32_t generation = listening_request_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    pending_listening_profile_.store(profile, std::memory_order_release);
+    pending_listening_generation_.store(generation, std::memory_order_release);
+    return generation;
+}
+
+void Application::InvalidatePendingListeningRequest() {
+    listening_request_generation_.fetch_add(1, std::memory_order_acq_rel);
+    pending_listening_profile_.store(kListeningProfileVoice, std::memory_order_release);
+    pending_listening_generation_.store(0, std::memory_order_release);
+}
+
+bool Application::IsListeningRequestCurrent(uint32_t generation) const {
+    return generation != 0 &&
+        listening_request_generation_.load(std::memory_order_acquire) == generation;
+}
+
 void Application::StartListening(ListeningProfile profile) {
     // Thin event setter. The popup-on-listening flag is armed inside
     // HandleStartListeningEvent (main task) so all writes to
     // play_popup_on_listening_ converge to the same task that reads
     // and clears it in HandleStateChangedEvent.
-    pending_listening_profile_.store(profile, std::memory_order_relaxed);
+    BeginListeningRequest(profile);
     xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
 }
 
 void Application::StopListening() {
+    InvalidatePendingListeningRequest();
     xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
 }
 
@@ -792,10 +807,11 @@ void Application::HandleToggleChatEvent() {
     if (state == kDeviceStateIdle) {
         ListeningMode mode = GetDefaultListeningMode();
         if (!protocol_->IsAudioChannelOpened()) {
+            uint32_t generation = BeginListeningRequest(kListeningProfileVoice);
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this, mode]() {
-                ContinueOpenAudioChannel(mode);
+            Schedule([this, mode, generation]() {
+                ContinueOpenAudioChannel(mode, generation);
             });
             return;
         }
@@ -807,9 +823,10 @@ void Application::HandleToggleChatEvent() {
     }
 }
 
-void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+void Application::ContinueOpenAudioChannel(ListeningMode mode, uint32_t generation) {
     // Check state again in case it was changed during scheduling
-    if (GetDeviceState() != kDeviceStateConnecting) {
+    if (GetDeviceState() != kDeviceStateConnecting || !IsListeningRequestCurrent(generation)) {
+        listening_profile_ = ListeningProfileAfterStop(listening_profile_);
         return;
     }
 
@@ -819,11 +836,24 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         }
     }
 
+    if (!IsListeningRequestCurrent(generation)) {
+        if (protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel();
+        }
+        listening_profile_ = ListeningProfileAfterStop(listening_profile_);
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
+
     SetListeningMode(mode);
 }
 
 void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
+    auto requested_generation = pending_listening_generation_.load(std::memory_order_acquire);
+    if (!IsListeningRequestCurrent(requested_generation)) {
+        return;
+    }
     
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
@@ -839,7 +869,7 @@ void Application::HandleStartListeningEvent() {
         return;
     }
 
-    auto requested_profile = pending_listening_profile_.load(std::memory_order_relaxed);
+    auto requested_profile = pending_listening_profile_.load(std::memory_order_acquire);
     if (state == kDeviceStateIdle || state == kDeviceStateSpeaking) {
         listening_profile_ = requested_profile;
 
@@ -864,8 +894,8 @@ void Application::HandleStartListeningEvent() {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this]() {
-                ContinueOpenAudioChannel(kListeningModeManualStop);
+            Schedule([this, requested_generation]() {
+                ContinueOpenAudioChannel(kListeningModeManualStop, requested_generation);
             });
             return;
         }
@@ -882,6 +912,14 @@ void Application::HandleStopListeningEvent() {
     if (state == kDeviceStateAudioTesting) {
         audio_service_.EnableAudioTesting(false);
         SetDeviceState(kDeviceStateWifiConfiguring);
+        return;
+    } else if (state == kDeviceStateConnecting) {
+        listening_profile_ = ListeningProfileAfterStop(listening_profile_);
+        play_popup_on_listening_ = false;
+        if (protocol_ && protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel();
+        }
+        SetDeviceState(kDeviceStateIdle);
         return;
     } else if (state == kDeviceStateListening) {
         if (protocol_) {
@@ -903,18 +941,19 @@ void Application::HandleWakeWordDetectedEvent() {
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();
         auto wake_word = audio_service_.GetLastWakeWord();
+        uint32_t generation = BeginListeningRequest(kListeningProfileVoice);
 
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update),
             // then continue with OpenAudioChannel which may block for ~1 second
-            Schedule([this, wake_word]() {
-                ContinueWakeWordInvoke(wake_word);
+            Schedule([this, wake_word, generation]() {
+                ContinueWakeWordInvoke(wake_word, generation);
             });
             return;
         }
         // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word);
+        ContinueWakeWordInvoke(wake_word, generation);
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
         // Clear send queue to avoid sending residues to server
@@ -937,9 +976,10 @@ void Application::HandleWakeWordDetectedEvent() {
     }
 }
 
-void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
+void Application::ContinueWakeWordInvoke(const std::string& wake_word, uint32_t generation) {
     // Check state again in case it was changed during scheduling
-    if (GetDeviceState() != kDeviceStateConnecting) {
+    if (GetDeviceState() != kDeviceStateConnecting || !IsListeningRequestCurrent(generation)) {
+        listening_profile_ = ListeningProfileAfterStop(listening_profile_);
         return;
     }
 
@@ -948,6 +988,15 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
             audio_service_.EnableWakeWordDetection(true);
             return;
         }
+    }
+
+    if (!IsListeningRequestCurrent(generation)) {
+        if (protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel();
+        }
+        listening_profile_ = ListeningProfileAfterStop(listening_profile_);
+        SetDeviceState(kDeviceStateIdle);
+        return;
     }
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
@@ -984,7 +1033,7 @@ void Application::HandleStateChangedEvent() {
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
             audio_service_.EnableRawCapture(false);
             audio_service_.EnableVoiceProcessing(false);
-            listening_profile_ = kListeningProfileVoice;
+            listening_profile_ = ListeningProfileAfterStop(listening_profile_);
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
@@ -1045,13 +1094,13 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
-            listening_profile_ = kListeningProfileVoice;
+            listening_profile_ = ListeningProfileAfterStop(listening_profile_);
             audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableRawCapture(false);
             audio_service_.EnableVoiceProcessing(false);
-            listening_profile_ = kListeningProfileVoice;
+            listening_profile_ = ListeningProfileAfterStop(listening_profile_);
             audio_service_.EnableWakeWordDetection(false);
             break;
         default:
@@ -1159,17 +1208,18 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();
+        uint32_t generation = BeginListeningRequest(kListeningProfileVoice);
 
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this, wake_word]() {
-                ContinueWakeWordInvoke(wake_word);
+            Schedule([this, wake_word, generation]() {
+                ContinueWakeWordInvoke(wake_word, generation);
             });
             return;
         }
         // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word);
+        ContinueWakeWordInvoke(wake_word, generation);
     } else if (state == kDeviceStateSpeaking) {
         Schedule([this]() {
             AbortSpeaking(kAbortReasonNone);
