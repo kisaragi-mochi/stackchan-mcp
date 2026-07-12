@@ -31,7 +31,7 @@ class BeatTracker:
         onset_window_s: float = 20.0,
         energy_window_s: float = 1.2,
         onset_refractory_s: float = 0.24,
-        min_onset_rms: float = 0.025,
+        min_onset_rms: float = 0.004,
         threshold_ratio: float = 1.65,
         rise_ratio: float = 1.18,
     ) -> None:
