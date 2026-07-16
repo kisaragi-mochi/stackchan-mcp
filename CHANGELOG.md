@@ -30,6 +30,20 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Added an `imu_read` tool relaying to the new `self.imu.read` device tool
+  for polling the built-in accelerometer and its recent-window motion
+  statistics.
+
+### Firmware
+
+- Added a `self.imu.read` device tool exposing the CoreS3's built-in BMI270
+  accelerometer: latest 3-axis sample in milli-g plus statistics over a
+  3.2 s / 20 Hz sampling window (per-axis mean and variance, and the
+  orientation-independent variance of the acceleration magnitude, intended
+  for sustained-shake detection by a polling host).
+
 ## [0.17.0] - 2026-07-12
 
 ### Gateway
