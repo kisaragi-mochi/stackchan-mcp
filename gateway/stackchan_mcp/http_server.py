@@ -24,7 +24,16 @@ from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from .notify_config import NotifyConfig
-from .queue import CommandQueue, QueueFull, QueueItem, build_queue_full_error
+from .queue import (
+    CommandDropped,
+    CommandQueue,
+    HeadTimeout,
+    QueueFull,
+    QueueItem,
+    build_dropped_error,
+    build_head_timeout_error,
+    build_queue_full_error,
+)
 from .stdio_server import _dispatch_mcp_tool, create_server
 
 # Follower lifecycle operations must remain callable when the ESP32 is
@@ -214,13 +223,20 @@ def _install_queue_tool_handler(
             enqueued_at=time.monotonic(),
         )
         try:
-            queue.enqueue(item)
+            queue.enqueue_with_backpressure(item)
+        except CommandDropped as exc:
+            return ErrorData(**build_dropped_error(exc))
         except QueueFull as exc:
             return ErrorData(**build_queue_full_error(exc.queue_depth))
 
         pending_items[item.correlation_id] = item
         try:
             content_or_error = await response_future
+        except HeadTimeout as exc:
+            return ErrorData(**build_head_timeout_error(exc))
+        except CommandDropped as exc:
+            # This item was queued, then evicted to admit a newer command.
+            return ErrorData(**build_dropped_error(exc))
         except asyncio.CancelledError:
             response_future.cancel()
             raise
