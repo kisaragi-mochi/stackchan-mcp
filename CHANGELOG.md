@@ -30,6 +30,22 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Added a `show_caption` tool that relays to the new
+  `self.display.show_caption` device tool, for showing an utterance as an
+  on-screen subtitle in silent operation.
+
+### Firmware
+
+- Added a `self.display.show_caption` device tool: a translucent bottom
+  subtitle band (small white text over the avatar, at most two lines with
+  ellipsis truncation) that fades out automatically after a configurable
+  duration. Font size (14/16/20 px Montserrat, ASCII-only) and band
+  opacity are per-call arguments so the look can be tuned without
+  reflashing. Intended for silent-mode operation where speech is shown
+  instead of spoken.
+
 ## [0.17.0] - 2026-07-12
 
 ### Gateway
