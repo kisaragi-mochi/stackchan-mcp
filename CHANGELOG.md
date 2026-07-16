@@ -30,6 +30,12 @@ documented-only.
 
 ## [Unreleased]
 
+### Docs
+
+- Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
+  frame-geometry consistency, edit-grade sources for moving parts, the
+  avatar-set fetch window, and per-face blink cadence.
+
 ## [0.17.0] - 2026-07-12
 
 ### Gateway
