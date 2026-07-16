@@ -378,6 +378,83 @@ async def test_list_tools_includes_set_mouth_sequence():
 
 
 @pytest.mark.asyncio
+async def test_list_tools_includes_show_caption():
+    """show_caption is exposed to MCP clients with text required."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tool = next((t for t in result.root.tools if t.name == "show_caption"), None)
+    assert tool is not None, "show_caption tool should be registered"
+
+    schema = tool.inputSchema
+    assert schema["properties"]["text"]["type"] == "string"
+    assert schema["properties"]["duration_ms"]["type"] == "integer"
+    assert schema["properties"]["font_size"]["type"] == "integer"
+    assert schema["properties"]["bg_opa"]["type"] == "integer"
+    assert schema["required"] == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_show_caption_relays_to_device(monkeypatch):
+    """show_caption forwards text/duration_ms to self.display.show_caption."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {"ok": True, "truncated": False, "duration_ms": 4500}
+                        ),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "show_caption",
+                "arguments": {
+                    "text": "Quiet mode tonight; captions on.",
+                    "duration_ms": 4500,
+                    "font_size": 14,
+                    "bg_opa": 55,
+                },
+            },
+        )
+    )
+
+    assert calls == [
+        (
+            "self.display.show_caption",
+            {
+                "text": "Quiet mode tonight; captions on.",
+                "duration_ms": 4500,
+                "font_size": 14,
+                "bg_opa": 55,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_list_tools_includes_say():
     """say is exposed to MCP clients with text required."""
     server = create_server()

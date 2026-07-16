@@ -8,7 +8,9 @@
                 "CONFIG_CAMERA_GC0308=y",
                 "CONFIG_CAMERA_GC0308_AUTO_DETECT_DVP_INTERFACE_SENSOR=y",
                 "CONFIG_CAMERA_GC0308_DVP_YUV422_320X240_20FPS=y",
-                "CONFIG_STACKCHAN_SERVO_FEETECH=y"
+                "CONFIG_STACKCHAN_SERVO_FEETECH=y",
+                "CONFIG_LV_FONT_MONTSERRAT_16=y",
+                "CONFIG_LV_FONT_MONTSERRAT_20=y"
             ]
         }
     ]
