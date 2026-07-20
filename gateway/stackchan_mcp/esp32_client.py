@@ -1148,6 +1148,10 @@ class ESP32Manager:
         return {
             "connected": True,
             "device_id": self._connection.device_id,
+            # Changes on every WebSocket (re)connection. Lets pollers detect
+            # a device reboot even when the reconnect lands between polls and
+            # the connected flag never reads false (e.g. a firmware reflash).
+            "session_id": self._connection.session_id,
             "initialized": self._connection.initialized,
             "tools_count": len(self._connection.tools),
             "tools": [t.get("name", "") for t in self._connection.tools],

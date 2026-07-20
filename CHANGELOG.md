@@ -30,6 +30,13 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- `get_status` now reports the WebSocket `session_id` alongside the
+  connection flags. The id changes on every (re)connection, so a polling
+  host can detect a device reboot even when the reconnect lands between
+  polls and `connected` never reads false.
+
 ## [0.17.0] - 2026-07-12
 
 ### Gateway
