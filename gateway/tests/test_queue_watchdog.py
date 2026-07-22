@@ -40,13 +40,18 @@ from tests.test_http_server import (
 )
 
 
-def _make_item(tool_name: str, *, request_id: int = 1) -> QueueItem:
+def _make_item(
+    tool_name: str,
+    *,
+    request_id: int = 1,
+    arguments: dict | None = None,
+) -> QueueItem:
     return QueueItem(
         correlation_id=f"{tool_name}-{request_id}",
         client_session_id=None,
         client_request_id=request_id,
         tool_name=tool_name,
-        arguments={},
+        arguments=arguments or {},
         response_future=asyncio.get_running_loop().create_future(),
         enqueued_at=0.0,
     )
@@ -60,7 +65,7 @@ def _read_queue_events(path: Path) -> list[dict]:
 
 
 def test_droppable_classification() -> None:
-    # Cosmetic LED-class traffic may be shed.
+    # Cosmetic LED-class traffic may be shed, Port B and Port C alike.
     for tool in (
         "set_led",
         "set_leds",
@@ -70,6 +75,10 @@ def test_droppable_classification() -> None:
         "port_b_ws2812_set_strip",
         "port_b_ws2812_refresh",
         "port_b_ws2812_clear",
+        "port_c_ws2812_set_pixel",
+        "port_c_ws2812_set_strip",
+        "port_c_ws2812_refresh",
+        "port_c_ws2812_clear",
     ):
         assert is_droppable_tool(tool), tool
     # Explicit one-shot commands must never be shed. move_head stays
@@ -83,6 +92,7 @@ def test_droppable_classification() -> None:
         "load_avatar_set",
         "take_photo",
         "port_b_ws2812_init",
+        "port_c_ws2812_init",
     ):
         assert not is_droppable_tool(tool), tool
 
@@ -91,6 +101,78 @@ def test_dispatch_timeout_overrides() -> None:
     assert dispatch_timeout_for("get_device_info") == queue_module.DISPATCH_TIMEOUT_S
     assert dispatch_timeout_for("say") > queue_module.DISPATCH_TIMEOUT_S
     assert dispatch_timeout_for("load_avatar_set") > queue_module.DISPATCH_TIMEOUT_S
+
+
+def test_dispatch_timeout_follows_caller_timeout() -> None:
+    static = dispatch_timeout_for("load_avatar_set")
+    margin = queue_module.CALL_TIMEOUT_MARGIN_S
+
+    # A caller timeout inside the static budget keeps the static budget.
+    assert dispatch_timeout_for("load_avatar_set", {"timeout": 60.0}) == static
+    # A schema-legal timeout above the static budget extends it: the
+    # watchdog must never cancel a call still inside its own wait window.
+    assert dispatch_timeout_for("load_avatar_set", {"timeout": 250.0}) == (
+        250.0 + margin
+    )
+    assert dispatch_timeout_for("load_avatar_set", {"timeout": 300.0}) == (
+        300.0 + margin
+    )
+    # Out-of-schema values are clamped to the schema maximum so a rogue
+    # argument cannot disable the watchdog.
+    assert dispatch_timeout_for("load_avatar_set", {"timeout": 100000}) == (
+        300.0 + margin
+    )
+    # Malformed or missing arguments fall back to the static budget.
+    assert dispatch_timeout_for("load_avatar_set", {"timeout": "soon"}) == static
+    assert dispatch_timeout_for("load_avatar_set", {"timeout": -5}) == static
+    assert dispatch_timeout_for("load_avatar_set", {}) == static
+    # Tools without a registered timeout argument ignore it entirely.
+    assert dispatch_timeout_for("get_device_info", {"timeout": 250.0}) == (
+        queue_module.DISPATCH_TIMEOUT_S
+    )
+
+
+@pytest.mark.asyncio
+async def test_caller_timeout_call_survives_static_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression for the schema/watchdog mismatch: a load_avatar_set call
+    # with a schema-legal timeout above the static budget used to be
+    # force-cancelled mid-transfer — and because the real fetch path
+    # swallows CancelledError and reports {"ok": False, "error":
+    # "superseded"}, the caller saw that misleading value instead of a
+    # head-timeout. With the dynamic budget the dispatch runs to
+    # completion inside the caller's own wait window.
+    monkeypatch.setattr(
+        queue_module, "DISPATCH_TIMEOUT_OVERRIDES", {"load_avatar_set": 0.05}
+    )
+    monkeypatch.setattr(
+        queue_module, "CALL_TIMEOUT_ARGS", {"load_avatar_set": ("timeout", 10.0)}
+    )
+    monkeypatch.setattr(queue_module, "CALL_TIMEOUT_MARGIN_S", 1.0)
+
+    queue = CommandQueue(capacity=2)
+    item = _make_item("load_avatar_set", arguments={"timeout": 0.2})
+    queue.enqueue(item)
+
+    async def dispatch(queued: QueueItem) -> dict:
+        # Mirror send_avatar_set_fetch: cancellation is absorbed and
+        # surfaced as a normal return value, never as an exception.
+        try:
+            await asyncio.sleep(0.2)
+            return {"ok": True}
+        except asyncio.CancelledError:
+            return {"ok": False, "error": "superseded"}
+
+    dispatcher = asyncio.create_task(queue.run_dispatcher(dispatch))
+    try:
+        result = await asyncio.wait_for(item.response_future, timeout=2.0)
+    finally:
+        dispatcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await dispatcher
+
+    assert result == {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -245,6 +327,23 @@ async def test_queue_events_honor_explicit_event_log_path(tmp_path: Path) -> Non
     events = _read_queue_events(events_path)
     assert len(events) == 1
     assert events[0]["subtype"] == "drop_incoming"
+
+
+@pytest.mark.asyncio
+async def test_queue_events_respect_jsonl_disabled(tmp_path: Path) -> None:
+    # jsonl_enabled=False in the notify config must suppress the JSONL
+    # side effect entirely — no file creation on the first intervention.
+    events_path = tmp_path / "disabled.jsonl"
+    queue = CommandQueue(
+        capacity=2, event_log_path=events_path, event_log_enabled=False
+    )
+    queue.enqueue(_make_item("say", request_id=1))
+    queue.enqueue(_make_item("move_head", request_id=2))
+
+    with pytest.raises(CommandDropped):
+        queue.enqueue_with_backpressure(_make_item("set_all_leds", request_id=3))
+
+    assert not events_path.exists()
 
 
 @pytest.mark.asyncio

@@ -14,10 +14,11 @@ than in the HTTP layer:
   dispatch (a TTS engine that never answers, a device wedged mid-upload)
   used to stall every queued command behind it until the process was
   restarted. ``run_dispatcher`` now bounds each dispatch with a per-tool
-  timeout (:data:`DISPATCH_TIMEOUT_S`, long-running tools get overrides
-  in :data:`DISPATCH_TIMEOUT_OVERRIDES`), force-dequeues the head on
-  expiry, fails its response future with :class:`HeadTimeout`, and moves
-  on to the next item.
+  timeout (:data:`DISPATCH_TIMEOUT_S`; long-running tools get overrides
+  in :data:`DISPATCH_TIMEOUT_OVERRIDES`, and tools whose schema accepts
+  a per-call timeout get a dynamic budget via :data:`CALL_TIMEOUT_ARGS`),
+  force-dequeues the head on expiry, fails its response future with
+  :class:`HeadTimeout`, and moves on to the next item.
 
 * **Saturation lockout.** A full queue used to reject every newcomer
   uniformly, so a burst of cosmetic LED frames could starve one-shot
@@ -71,14 +72,25 @@ DISPATCH_TIMEOUT_OVERRIDES: dict[str, float] = {
     "listen": 120.0,
     "load_avatar_set": 180.0,
 }
+# Tools whose public schema accepts a per-call timeout that may exceed
+# the static override. The dispatch budget follows the caller's value
+# plus margin so the watchdog never cuts short a call the schema
+# permits: the inner wait always expires (and reports its own error)
+# before the watchdog would. Values are (argument name, schema maximum)
+# — the cap mirrors the tool's declared "maximum" so an out-of-schema
+# argument cannot disable the watchdog.
+CALL_TIMEOUT_ARGS: dict[str, tuple[str, float]] = {
+    "load_avatar_set": ("timeout", 300.0),
+}
+CALL_TIMEOUT_MARGIN_S = 30.0
 HEAD_TIMEOUT_ERROR_CODE = -32001
 HEAD_TIMEOUT_MESSAGE = "stackchan command timed out at queue head"
 
 # Cosmetic, high-frequency traffic where the next frame supersedes the
 # dropped one. Explicit one-shot commands (say / set_avatar /
 # take_photo / move_head / ...) are deliberately absent: they must
-# never be shed. port_b_ws2812_init is also excluded — it is setup, not
-# a frame.
+# never be shed. The Port B/C ws2812 *_init tools are also excluded —
+# they are setup, not frames.
 DROPPABLE_TOOLS = frozenset(
     {
         "set_led",
@@ -89,6 +101,10 @@ DROPPABLE_TOOLS = frozenset(
         "port_b_ws2812_set_strip",
         "port_b_ws2812_refresh",
         "port_b_ws2812_clear",
+        "port_c_ws2812_set_pixel",
+        "port_c_ws2812_set_strip",
+        "port_c_ws2812_refresh",
+        "port_c_ws2812_clear",
     }
 )
 DROPPED_ERROR_CODE = -32002
@@ -100,9 +116,29 @@ QUEUE_EVENT_SESSION_ID = "gateway"
 DispatchFn = Callable[["QueueItem"], Awaitable[Any]]
 
 
-def dispatch_timeout_for(tool_name: str) -> float:
-    """Return the head-of-queue dispatch budget for ``tool_name``."""
-    return DISPATCH_TIMEOUT_OVERRIDES.get(tool_name, DISPATCH_TIMEOUT_S)
+def dispatch_timeout_for(
+    tool_name: str, arguments: dict[str, Any] | None = None
+) -> float:
+    """Return the head-of-queue dispatch budget for ``tool_name``.
+
+    For tools listed in :data:`CALL_TIMEOUT_ARGS` the caller's own
+    timeout argument (clamped to the tool's schema maximum) extends the
+    budget by :data:`CALL_TIMEOUT_MARGIN_S`, so a call the public schema
+    permits is never cancelled by the watchdog while still inside its
+    own wait window. A missing or malformed argument falls back to the
+    static budget.
+    """
+    budget = DISPATCH_TIMEOUT_OVERRIDES.get(tool_name, DISPATCH_TIMEOUT_S)
+    spec = CALL_TIMEOUT_ARGS.get(tool_name)
+    if spec is not None and arguments is not None:
+        arg_name, schema_max = spec
+        try:
+            caller_s = float(arguments.get(arg_name))
+        except (TypeError, ValueError):
+            return budget
+        if caller_s > 0:
+            budget = max(budget, min(caller_s, schema_max) + CALL_TIMEOUT_MARGIN_S)
+    return budget
 
 
 def is_droppable_tool(tool_name: str) -> bool:
@@ -167,6 +203,7 @@ class CommandQueue:
         capacity: int | None = None,
         *,
         event_log_path: Path | None = None,
+        event_log_enabled: bool = True,
     ) -> None:
         self._capacity = capacity if capacity is not None else _capacity_from_env()
         if self._capacity < 1:
@@ -177,8 +214,13 @@ class CommandQueue:
         # Where watchdog events are appended. None falls back to the
         # event log's own resolution (STACKCHAN_EVENTS_PATH env / default);
         # the HTTP daemon passes the notify.yml JSONL path so queue events
-        # land in the same file as device events.
+        # land in the same file as device events. ``event_log_enabled``
+        # mirrors the notify config's ``jsonl_enabled`` flag: when False
+        # no JSONL entry is written (WARNING logging is unaffected), so a
+        # deployment with JSONL logging disabled never gets the file
+        # created as a side effect of a queue intervention.
         self._event_log_path = event_log_path
+        self._event_log_enabled = event_log_enabled
 
     @property
     def capacity(self) -> int:
@@ -273,7 +315,7 @@ class CommandQueue:
         """
         while True:
             item = await self.get()
-            timeout_s = dispatch_timeout_for(item.tool_name)
+            timeout_s = dispatch_timeout_for(item.tool_name, item.arguments)
             try:
                 result = await asyncio.wait_for(dispatch_fn(item), timeout_s)
             except (asyncio.TimeoutError, TimeoutError):
@@ -323,6 +365,8 @@ class CommandQueue:
             self.capacity,
             detail,
         )
+        if not self._event_log_enabled:
+            return
         try:
             from .event_log import log_event
 

@@ -883,8 +883,13 @@ async def _run_streamable_http_daemon(
     set_notify_config = getattr(esp32, "set_notify_config", None)
     if callable(set_notify_config):
         set_notify_config(notify_config)
-    # Route queue-watchdog events into the same JSONL file as device events.
-    queue = CommandQueue(event_log_path=notify_config.jsonl_path)
+    # Route queue-watchdog events into the same JSONL file as device
+    # events, honoring the same jsonl_enabled gate as the device-event
+    # call sites.
+    queue = CommandQueue(
+        event_log_path=notify_config.jsonl_path,
+        event_log_enabled=notify_config.jsonl_enabled,
+    )
     app = build_app(
         queue,
         gateway=gateway,

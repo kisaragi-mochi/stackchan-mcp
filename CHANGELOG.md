@@ -34,13 +34,16 @@ documented-only.
 
 - Added a command-queue watchdog to the HTTP daemon: a hung head-of-queue
   dispatch is now force-dequeued after a per-tool timeout (default 30 s;
-  `say`/`listen`/`load_avatar_set` get longer budgets) instead of stalling
-  every queued command behind it, and a saturated queue sheds the oldest
-  cosmetic LED-class command to admit new commands (`say`, `set_avatar`,
-  `take_photo`, `move_head` and other one-shot commands are never
-  dropped). Interventions are logged and appended to the stackchan JSONL
-  event log (`event_type="queue"`), following the notify configuration's
-  JSONL path when one is set.
+  `say`/`listen`/`load_avatar_set` get longer budgets, and a
+  `load_avatar_set` call with an explicit `timeout` argument gets a
+  budget derived from that value so schema-legal long fetches are never
+  cut short) instead of stalling every queued command behind it, and a
+  saturated queue sheds the oldest cosmetic LED-class command (Port B
+  and Port C ws2812 frames alike) to admit new commands (`say`,
+  `set_avatar`, `take_photo`, `move_head` and other one-shot commands
+  are never dropped). Interventions are logged and appended to the
+  stackchan JSONL event log (`event_type="queue"`), following the
+  notify configuration's JSONL path and its `jsonl_enabled` gate.
 
 ## [0.17.0] - 2026-07-12
 
