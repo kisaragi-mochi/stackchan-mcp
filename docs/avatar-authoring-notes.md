@@ -28,33 +28,46 @@ does not rescue it; the anchors drift even when the canvas matches.
 
 ## Moving parts need edit-grade sources
 
-Eyes and mouths are compositing parts: the same part is combined with
-several faces (explicitly in layered mode, at bake time for a matrix
-set). A part cropped out of an already-composited picture carries its
-old background along its edges — anti-aliased pixels, compression
-artifacts, a halo of the previous face's shading. Composited onto a
-different face variant, that edge shows up as a faint outline that
-appears and disappears as frames cycle.
+Eyes and mouths recombine with several faces — but only in your
+authoring tool, at export time. On the device there is no compositor:
+the firmware always shows exactly one full-frame RGB565 image at a
+time, and RGB565 carries no alpha. In layered mode a blink or mouth
+change swaps the whole screen to the eyes or mouth frame; a matrix
+set bakes every face × eyes × mouth combination ahead of time. Either
+way, every exported frame must be a complete full-frame image — a
+part exported with transparency renders as a broken face the first
+time its frame is selected.
 
-Author the moving parts as separate layers with clean alpha from the
-start (or redraw them as such), and composite at export time. If all
-you have is a flat reference image, treat it as a reference to redraw
-from, not as a source to crop from.
+Inside the authoring file, still build the moving parts as separate
+layers with clean alpha: a part cropped out of an already-composited
+picture carries its old background along its edges — anti-aliased
+pixels, compression artifacts, a halo of the previous face's shading —
+and that edge shows up as a faint outline that appears and disappears
+as frames cycle. Composite the layers onto the face and flatten at
+export time. If all you have is a flat reference image, treat it as a
+reference to redraw from, not as a source to crop from.
 
 ## Mind the fetch window
 
 A matrix set is a ~3.3 MB transfer. Over a healthy link it is quick,
 but with Wi-Fi power save active (the modem idles between beacons) we
-have measured a full fetch taking two to three minutes. During the
-fetch the device is busy downloading; queued commands wait, and a slow
-dispatch such as `say` issued right after `load_avatar_set` is likely
-to hit the MCP client's timeout before it ever reaches the device.
+have measured a full fetch taking two to three minutes.
 
-Practical sequencing: stage the set, wait for the fetch to complete
-(the gateway logs the device's GET, and the `load_avatar_set` call
-itself blocks until the device confirms), and only then resume normal
-traffic. If your host automates a set load at connect time, give the
-commands that follow it generous timeouts.
+The fetch runs on its own task on the device: the WebSocket loop keeps
+processing commands, so `say` and other non-avatar traffic go through
+normally during the download. What is held back are the avatar-facing
+updates — face, mouth and blink changes are quiesced until the new set
+is adopted — so sequencing matters for avatar-affecting calls, not for
+commands in general.
+
+The wait itself belongs to `load_avatar_set`: the call blocks until
+the device confirms adoption, bounded by its own `timeout` argument
+(default 60 s, maximum 300 s). A multi-minute power-save fetch
+therefore needs that per-call `timeout` raised to the 180–300 s range,
+or the call returns `device_timeout` while the device is still
+downloading. Raising timeouts on subsequent commands does not extend
+the fetch wait. The gateway logs the device's GET, which is the
+easiest way to watch a slow fetch make progress.
 
 ## Blink cadence is a per-face aesthetic
 
@@ -64,6 +77,7 @@ How that cadence reads depends on the face: small, stylized faces tend
 to read better with quicker blinks, while realistic proportions stay
 calm on the stock gap. When a new set feels subtly wrong — too static,
 or too nervous — the blink gap is worth checking before touching the
-art. Changing the bounds currently means editing the constants and
-reflashing, so it is a bake-time decision per avatar set rather than a
-runtime knob.
+art. The bounds are build-time constants that apply to every avatar
+set on the device: changing them means editing the constants and
+reflashing, and the new cadence applies device-wide, not per set. Tune
+them for the set the device actually runs day to day.

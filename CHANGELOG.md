@@ -33,8 +33,8 @@ documented-only.
 ### Docs
 
 - Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
-  frame-geometry consistency, edit-grade sources for moving parts, the
-  avatar-set fetch window, and per-face blink cadence.
+  frame-geometry consistency, full-frame exports from layered sources,
+  the avatar-set fetch window, and blink cadence tuning.
 
 ## [0.17.0] - 2026-07-12
 
