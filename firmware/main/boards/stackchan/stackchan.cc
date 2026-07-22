@@ -576,18 +576,34 @@ private:
     static constexpr int CAPTION_MAX_LINES = 2;
 
     // Caption font sizes are snapped to the three compiled-in Montserrat
-    // faces. The per-line budgets for pre-truncation are conservative
+    // faces by minimum distance (a tie takes the smaller face — the
+    // smaller face has the larger per-line budget, so ties truncate
+    // less). The per-line budgets for pre-truncation are conservative
     // average-width ASCII character counts for the 304 px inner width
     // (Montserrat is variable-width); CJK codepoints count double.
+    static int SnapCaptionFontSize(int font_size) {
+        static constexpr int kFaces[] = {14, 16, 20};
+        int best = kFaces[0];
+        for (int face : kFaces) {
+            if (std::abs(font_size - face) < std::abs(font_size - best)) {
+                best = face;
+            }
+        }
+        return best;
+    }
     static const lv_font_t* CaptionFontForSize(int font_size) {
-        if (font_size <= 14) return &lv_font_montserrat_14;
-        if (font_size >= 20) return &lv_font_montserrat_20;
-        return &lv_font_montserrat_16;
+        switch (SnapCaptionFontSize(font_size)) {
+            case 14: return &lv_font_montserrat_14;
+            case 20: return &lv_font_montserrat_20;
+            default: return &lv_font_montserrat_16;
+        }
     }
     static int CaptionPerLineBudget(int font_size) {
-        if (font_size <= 14) return 36;
-        if (font_size >= 20) return 26;
-        return 32;
+        switch (SnapCaptionFontSize(font_size)) {
+            case 14: return 36;
+            case 20: return 26;
+            default: return 32;
+        }
     }
 
     // Dynamic avatar set loaded via the load_avatar_set MCP tool. Stays
@@ -2499,15 +2515,25 @@ private:
 
     // Pre-truncate UTF-8 text to the two-line width budget. Units are
     // average ASCII character widths for the active caption font: ASCII
-    // glyphs count 1, all other codepoints 2. Appends an ellipsis when
-    // truncated. The MCP caller keeps the full transcript on the chat
-    // channel, so clipping here is presentation-only.
-    static std::string TruncateCaptionUtf8(const std::string& text,
+    // glyphs count 1, all other codepoints 2. Appends an ASCII "..."
+    // when truncated — the compiled-in ASCII Montserrat faces have no
+    // U+2026 glyph, and with LV_USE_FONT_PLACEHOLDER off a missing
+    // glyph draws nothing. The MCP caller keeps the full transcript on
+    // the chat channel, so clipping here is presentation-only.
+    static std::string TruncateCaptionUtf8(const std::string& raw,
                                            int budget_units,
                                            bool* truncated) {
+        // The caption is one text flow wrapped by LVGL. A literal
+        // newline would add a rendered line regardless of the width
+        // budget and break the two-line contract, so control
+        // whitespace is normalized to spaces before budgeting.
+        std::string text = raw;
+        for (char& ch : text) {
+            if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+        }
         const int kBudgetHalfCols = budget_units;
-        // Reserve roughly one character for the ellipsis when we cut.
-        const int kCutHalfCols = kBudgetHalfCols - 2;
+        // Reserve room for the three "..." characters when we cut.
+        const int kCutHalfCols = kBudgetHalfCols - 3;
         int half_cols = 0;
         size_t i = 0;
         size_t cut_bytes = 0;
@@ -2537,7 +2563,7 @@ private:
         if (!needs_cut) {
             return text.substr(0, i);  // also drops a malformed tail byte
         }
-        return text.substr(0, cut_bytes) + "\xE2\x80\xA6";  // U+2026 …
+        return text.substr(0, cut_bytes) + "...";
     }
 
     bool EnsureCaptionObjectLocked() {
@@ -2719,8 +2745,16 @@ private:
             text, CaptionPerLineBudget(font_size) * CAPTION_MAX_LINES,
             &truncated);
         StopCaptionFadeLocked();
-        lv_obj_set_style_text_font(caption_label_,
-                                   CaptionFontForSize(font_size), 0);
+        const lv_font_t* font = CaptionFontForSize(font_size);
+        lv_obj_set_style_text_font(caption_label_, font, 0);
+        // Hard ceiling on the two-line contract: the width budget is a
+        // character-count heuristic, so a run of wide glyphs can still
+        // wrap to a third line. Clamping the label to two text lines
+        // clips that overflow instead of letting the content-sized band
+        // grow past its documented maximum.
+        lv_obj_set_style_max_height(
+            caption_label_,
+            lv_font_get_line_height(font) * CAPTION_MAX_LINES, 0);
         lv_obj_set_style_bg_opa(
             caption_band_,
             static_cast<lv_opa_t>((bg_opa_pct * 255 + 50) / 100), 0);
