@@ -61,6 +61,43 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 
 #define TAG "StackChanBoard"
 
+// Charge-control boot default used when automatic control is disabled
+// (AXP2101 reg 0x18 bit1, see class Pmic below). Undefined/0 keeps charging
+// disabled at every boot. Override at build time (e.g.
+// -DSTACKCHAN_DEFAULT_CHARGE_ENABLED=1) to restore the AXP2101 factory
+// default (charge enabled). Automatic mode always starts OFF, then applies
+// its battery-based startup decision.
+#ifndef STACKCHAN_DEFAULT_CHARGE_ENABLED
+#define STACKCHAN_DEFAULT_CHARGE_ENABLED 0
+#endif
+
+// Automatic charge hysteresis. These values may be overridden with compiler
+// -D options. The existing one-second status-bar battery poll drives the
+// decision at a 60-second cadence; no dedicated timer or task is created.
+#ifndef STACKCHAN_CHARGE_AUTO
+#define STACKCHAN_CHARGE_AUTO 1
+#endif
+
+#ifndef STACKCHAN_CHARGE_ON_BELOW
+#define STACKCHAN_CHARGE_ON_BELOW 30
+#endif
+
+#ifndef STACKCHAN_CHARGE_OFF_ABOVE
+#define STACKCHAN_CHARGE_OFF_ABOVE 70
+#endif
+
+#if STACKCHAN_CHARGE_ON_BELOW < 0 || STACKCHAN_CHARGE_ON_BELOW > 100
+#error "STACKCHAN_CHARGE_ON_BELOW must be between 0 and 100"
+#endif
+
+#if STACKCHAN_CHARGE_OFF_ABOVE < 0 || STACKCHAN_CHARGE_OFF_ABOVE > 100
+#error "STACKCHAN_CHARGE_OFF_ABOVE must be between 0 and 100"
+#endif
+
+#if STACKCHAN_CHARGE_ON_BELOW >= STACKCHAN_CHARGE_OFF_ABOVE
+#error "STACKCHAN_CHARGE_ON_BELOW must be lower than STACKCHAN_CHARGE_OFF_ABOVE"
+#endif
+
 class Pmic : public Axp2101 {
 public:
     // Power Init
@@ -75,6 +112,65 @@ public:
         WriteReg(0x90, 0xBF);
         WriteReg(0x94, 33 - 5);
         WriteReg(0x95, 33 - 5);
+
+        // Apply the charge-control boot default last, after every other
+        // Power Init write above. This preserves the established PMIC
+        // initialization order and changes charging only after all other
+        // controls are configured.
+#if STACKCHAN_CHARGE_AUTO
+        // Automatic mode always starts from the safe OFF state. The
+        // board performs its first battery-based decision immediately after
+        // this constructor (and all existing PMIC initialization) completes.
+        SetChargeEnabled(false);
+#else
+        SetChargeEnabled(STACKCHAN_DEFAULT_CHARGE_ENABLED != 0);
+#endif
+    }
+
+    // AXP2101 reg 0x18 bit1 = Cell Battery charge enable (datasheet
+    // §6.13.2.14: 0=disable, 1=enable, System Reset default=1).
+    // Read-Modify-Write only bit1; bit3 (Gauge Module enable), bit2
+    // (Button Battery charge enable), and bit0 (Watchdog Module enable)
+    // must survive untouched.
+    void SetChargeEnabled(bool enable) {
+        uint8_t value = ReadReg(0x18);
+        if (enable) {
+            value |= 0b00000010;
+        } else {
+            value &= static_cast<uint8_t>(~0b00000010);
+        }
+        WriteReg(0x18, value);
+    }
+
+    bool IsChargeEnabled() {
+        return (ReadReg(0x18) & 0b00000010) != 0;
+    }
+
+    uint8_t GetChargeControlRegister() {
+        return ReadReg(0x18);
+    }
+
+    // Read the same AXP2101 fuel-gauge register used by
+    // Axp2101::GetBatteryLevel(), but return a failure instead of aborting the
+    // firmware on an I2C error. Values outside the percentage range are also
+    // treated as unavailable so automatic control keeps its current state.
+    bool TryGetBatteryLevel(int* level) {
+        uint8_t reg = 0xA4;
+        uint8_t value = 0;
+        esp_err_t err =
+            i2c_master_transmit_receive(i2c_device_, &reg, 1, &value, 1, 100);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Battery level read failed: %s",
+                     esp_err_to_name(err));
+            return false;
+        }
+        if (value > 100) {
+            ESP_LOGW(TAG, "Battery level is invalid: %u",
+                     static_cast<unsigned>(value));
+            return false;
+        }
+        *level = value;
+        return true;
     }
 
     void SetBrightness(uint8_t brightness) {
@@ -527,6 +623,22 @@ private:
     static constexpr gpio_num_t PORT_C_WS2812_DATA_PIN = GPIO_NUM_17;  // CoreS3 HY2.0-4P (Port C) signal 1
     static constexpr uint16_t PORT_C_WS2812_MAX_LEDS = 256;
     Pmic* pmic_;
+    enum class ChargeAutoDecision : uint8_t {
+        kNotRun = 0,
+        kEnabledLowBattery,
+        kDisabledHighBattery,
+        kKeptBetweenThresholds,
+        kStartupDisabledAboveOnThreshold,
+        kSkippedBatteryReadFailed,
+        kAutoDisabled,
+    };
+    static constexpr uint32_t CHARGE_AUTO_INTERVAL_MS = 60 * 1000;
+    std::atomic<ChargeAutoDecision> last_charge_auto_decision_{
+        (STACKCHAN_CHARGE_AUTO != 0)
+            ? ChargeAutoDecision::kNotRun
+            : ChargeAutoDecision::kAutoDisabled};
+    std::atomic<int> last_charge_auto_battery_level_{-1};
+    std::atomic<uint32_t> last_charge_auto_check_ms_{0};
     Aw9523* aw9523_;
     Ft6336* ft6336_;
     LcdDisplay* display_;
@@ -2295,9 +2407,116 @@ private:
         }
     }
 
+    static const char* ChargeAutoDecisionName(ChargeAutoDecision decision) {
+        switch (decision) {
+            case ChargeAutoDecision::kEnabledLowBattery:
+                return "enabled_low_battery";
+            case ChargeAutoDecision::kDisabledHighBattery:
+                return "disabled_high_battery";
+            case ChargeAutoDecision::kKeptBetweenThresholds:
+                return "kept_between_thresholds";
+            case ChargeAutoDecision::kStartupDisabledAboveOnThreshold:
+                return "startup_disabled_above_on_threshold";
+            case ChargeAutoDecision::kSkippedBatteryReadFailed:
+                return "skipped_battery_read_failed";
+            case ChargeAutoDecision::kAutoDisabled:
+                return "auto_disabled";
+            case ChargeAutoDecision::kNotRun:
+            default:
+                return "not_run";
+        }
+    }
+
+    bool ReadBatteryLevel(int* level) {
+        return pmic_ != nullptr && pmic_->TryGetBatteryLevel(level);
+    }
+
+    // Apply the automatic policy to a battery sample. At startup, the
+    // startup OFF state is kept for every valid sample above the lower
+    // threshold; subsequent checks use full hysteresis and leave reg 0x18
+    // untouched between thresholds.
+    void ApplyAutomaticChargePolicy(int level, bool level_available,
+                                    bool startup) {
+        last_charge_auto_battery_level_.store(
+            level_available ? level : -1, std::memory_order_relaxed);
+
+        if (!level_available) {
+            last_charge_auto_decision_.store(
+                ChargeAutoDecision::kSkippedBatteryReadFailed,
+                std::memory_order_release);
+            ESP_LOGW(TAG,
+                     "Automatic charge check skipped: battery level unavailable; "
+                     "charge state unchanged");
+            return;
+        }
+
+        ChargeAutoDecision decision;
+        if (level <= STACKCHAN_CHARGE_ON_BELOW) {
+            pmic_->SetChargeEnabled(true);
+            decision = ChargeAutoDecision::kEnabledLowBattery;
+        } else if (startup) {
+            // Explicitly retain the safe startup state even if the legacy
+            // STACKCHAN_DEFAULT_CHARGE_ENABLED build option is enabled.
+            pmic_->SetChargeEnabled(false);
+            decision =
+                (level >= STACKCHAN_CHARGE_OFF_ABOVE)
+                    ? ChargeAutoDecision::kDisabledHighBattery
+                    : ChargeAutoDecision::kStartupDisabledAboveOnThreshold;
+        } else if (level >= STACKCHAN_CHARGE_OFF_ABOVE) {
+            pmic_->SetChargeEnabled(false);
+            decision = ChargeAutoDecision::kDisabledHighBattery;
+        } else {
+            // Hysteresis band: intentionally make no PMIC write.
+            decision = ChargeAutoDecision::kKeptBetweenThresholds;
+        }
+
+        last_charge_auto_decision_.store(decision,
+                                         std::memory_order_release);
+        ESP_LOGI(TAG, "Automatic charge check: level=%d decision=%s",
+                 level, ChargeAutoDecisionName(decision));
+    }
+
+    // Reuse the existing one-second status-bar battery poll, but only make an
+    // automatic decision approximately once per 60 seconds. Unsigned
+    // subtraction keeps the interval correct when the 32-bit millisecond
+    // counter wraps. The startup call bypasses the interval exactly once.
+    void MaybeApplyAutomaticChargePolicy(int level, bool level_available,
+                                         bool startup = false) {
+        if (STACKCHAN_CHARGE_AUTO == 0) {
+            return;
+        }
+
+        uint32_t now_ms =
+            static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        if (startup) {
+            last_charge_auto_check_ms_.store(now_ms,
+                                             std::memory_order_relaxed);
+        } else {
+            uint32_t last_ms =
+                last_charge_auto_check_ms_.load(std::memory_order_relaxed);
+            do {
+                if (static_cast<uint32_t>(now_ms - last_ms) <
+                    CHARGE_AUTO_INTERVAL_MS) {
+                    return;
+                }
+            } while (!last_charge_auto_check_ms_.compare_exchange_weak(
+                last_ms, now_ms, std::memory_order_relaxed));
+        }
+
+        ApplyAutomaticChargePolicy(level, level_available, startup);
+    }
+
     void InitializeAxp2101() {
         ESP_LOGI(TAG, "Init AXP2101");
         pmic_ = new Pmic(i2c_bus_, 0x34);
+        if (STACKCHAN_CHARGE_AUTO != 0) {
+            int level = -1;
+            bool level_available = ReadBatteryLevel(&level);
+            MaybeApplyAutomaticChargePolicy(level, level_available, true);
+        } else {
+            ESP_LOGI(TAG,
+                     "Automatic charge control disabled at build time");
+        }
     }
 
     void InitializeAw9523() {
@@ -7057,6 +7276,103 @@ private:
                 return root;
             });
 
+        mcp_server.AddTool(
+            "self.power.set_charge_enabled",
+            "Enable or disable AXP2101 cell battery charging (register "
+            "0x18 bit1, Read-Modify-Write; the fuel gauge enable bit and "
+            "every other bit are preserved). Takes effect immediately "
+            "over I2C and is read back from the PMIC before returning. "
+            "When automatic charge control is enabled, this manual setting "
+            "is temporary and may be overwritten by the startup decision "
+            "or the next approximately 60-second automatic decision. When "
+            "automatic control is disabled at build time, the setting is "
+            "still not persisted to NVS and the compile-time boot default "
+            "(STACKCHAN_DEFAULT_CHARGE_ENABLED) applies on reboot. "
+            "Disabling charging only stops "
+            "current flowing into the cell; it does not cut USB power to "
+            "the system (VBUS keeps powering VSYS through a separate "
+            "path per the AXP2101 datasheet).",
+            PropertyList({Property("enabled", kPropertyTypeBoolean)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                bool enabled = properties["enabled"].value<bool>();
+                pmic_->SetChargeEnabled(enabled);
+                bool actual = pmic_->IsChargeEnabled();
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", actual == enabled);
+                cJSON_AddBoolToObject(root, "charge_enabled", actual);
+                cJSON_AddNumberToObject(root, "reg_0x18", pmic_->GetChargeControlRegister());
+                cJSON_AddStringToObject(root, "takes_effect", "immediate");
+                cJSON_AddStringToObject(root, "persistence", "volatile_resets_on_boot");
+                cJSON_AddBoolToObject(root, "auto_enabled",
+                                      STACKCHAN_CHARGE_AUTO != 0);
+                cJSON_AddBoolToObject(root,
+                                      "manual_may_be_overridden_by_auto",
+                                      STACKCHAN_CHARGE_AUTO != 0);
+                cJSON_AddStringToObject(
+                    root, "automatic_control_note",
+                    (STACKCHAN_CHARGE_AUTO != 0)
+                        ? "Manual setting may be overwritten by the next automatic decision."
+                        : "Automatic charge control is disabled.");
+                ESP_LOGI(TAG, "set_charge_enabled: requested=%d actual=%d",
+                         enabled, actual);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.power.get_charge_state",
+            "Read the current AXP2101 charge-control state. charge_enabled "
+            "and reg_0x18 are a fresh Read of register 0x18 (bit1 = cell "
+            "battery charge enable). charging, discharging, and "
+            "charge_done come from the existing Axp2101 accessors (register "
+            "0x01). battery_level is the fuel-gauge percentage from "
+            "register 0xA4. The response also reports whether automatic "
+            "control is enabled, its inclusive ON/OFF thresholds, and the "
+            "last automatic decision (including threshold-band hold and "
+            "battery-read-failure skip results). Manual charge changes may "
+            "be overwritten by a later automatic decision while auto is "
+            "enabled. Battery voltage/current are intentionally not "
+            "reported because this implementation does not have confirmed "
+            "AXP2101 live-voltage/current ADC readback registers or a "
+            "conversion formula, and this tool intentionally does not add "
+            "a driver for the separate INA226 monitor.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "charge_enabled", pmic_->IsChargeEnabled());
+                cJSON_AddNumberToObject(root, "reg_0x18", pmic_->GetChargeControlRegister());
+                cJSON_AddBoolToObject(root, "charging", pmic_->IsCharging());
+                cJSON_AddBoolToObject(root, "discharging", pmic_->IsDischarging());
+                cJSON_AddBoolToObject(root, "charge_done", pmic_->IsChargingDone());
+                int battery_level = -1;
+                bool battery_level_available =
+                    ReadBatteryLevel(&battery_level);
+                cJSON_AddNumberToObject(root, "battery_level", battery_level);
+                cJSON_AddBoolToObject(root, "battery_level_available",
+                                      battery_level_available);
+                cJSON_AddBoolToObject(root, "auto_enabled",
+                                      STACKCHAN_CHARGE_AUTO != 0);
+                cJSON_AddNumberToObject(root, "auto_on_below",
+                                        STACKCHAN_CHARGE_ON_BELOW);
+                cJSON_AddNumberToObject(root, "auto_off_above",
+                                        STACKCHAN_CHARGE_OFF_ABOVE);
+                cJSON_AddNumberToObject(root, "auto_interval_seconds", 60);
+                ChargeAutoDecision last_decision =
+                    last_charge_auto_decision_.load(
+                        std::memory_order_acquire);
+                cJSON_AddStringToObject(
+                    root, "last_auto_decision",
+                    ChargeAutoDecisionName(last_decision));
+                cJSON_AddNumberToObject(
+                    root, "last_auto_battery_level",
+                    last_charge_auto_battery_level_.load(
+                        std::memory_order_relaxed));
+                cJSON_AddBoolToObject(root,
+                                      "manual_may_be_overridden_by_auto",
+                                      STACKCHAN_CHARGE_AUTO != 0);
+                return root;
+            });
+
         ESP_LOGI(TAG, "StackChan MCP tools registered");
     }
 
@@ -7116,6 +7432,13 @@ public:
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
+        level = -1;
+        bool level_available = ReadBatteryLevel(&level);
+        MaybeApplyAutomaticChargePolicy(level, level_available);
+        if (!level_available) {
+            return false;
+        }
+
         static bool last_discharging = false;
         charging = pmic_->IsCharging();
         discharging = pmic_->IsDischarging();
@@ -7124,7 +7447,6 @@ public:
             last_discharging = discharging;
         }
 
-        level = pmic_->GetBatteryLevel();
         return true;
     }
 
