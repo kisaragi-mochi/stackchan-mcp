@@ -88,6 +88,24 @@ void Settings::SetBool(const std::string& key, bool value) {
     }
 }
 
+esp_err_t Settings::SetBoolAndCommit(const std::string& key, bool value) {
+    if (!read_write_ || nvs_handle_ == 0) {
+        ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = nvs_set_u8(nvs_handle_, key.c_str(), value ? 1 : 0);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_commit(nvs_handle_);
+    // The explicit caller owns error handling. Avoid a second
+    // ESP_ERROR_CHECK commit in the destructor if this commit failed.
+    dirty_ = false;
+    return err;
+}
+
 void Settings::EraseKey(const std::string& key) {
     if (read_write_) {
         auto ret = nvs_erase_key(nvs_handle_, key.c_str());

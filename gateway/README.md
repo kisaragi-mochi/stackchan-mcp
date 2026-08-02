@@ -175,6 +175,8 @@ Same shape, under `mcpServers`.
 | `take_photo(question?)` | Trigger camera capture; returns saved JPEG path |
 | `set_volume(volume)` | Speaker volume 0-100 |
 | `set_brightness(brightness)` | Screen brightness 0-100 |
+| `set_charge_protection(enabled)` | Persistently enable/disable the default-on 30%-70% battery-protection hysteresis. Set `false` before going out when you want the PMIC to finish a full charge. |
+| `get_charge_protection` | Read the persistent/effective protection setting and current charger-enable state. |
 | `move_head(yaw, pitch, speed?)` | Drive yaw + pitch servos |
 | `get_head_angles` | Read current yaw + pitch servo angles |
 | `get_touch_state` | Touch sensor state (press/release/stroke) |
@@ -201,6 +203,28 @@ instead of cascading errors.
 
 The mapping from these names to ESP32-side `self.*` MCP tools is in
 `stackchan_mcp/stdio_server.py`.
+
+### Charge protection
+
+`charge_protection` defaults to `true` when it has never been saved and is
+stored in ESP32 NVS across restarts. With protection on, firmware preserves
+the 30%-70% hysteresis: charging is enabled at 30% or below, disabled at 70%
+or above, and unchanged between those thresholds. With protection off, that
+policy no longer stops charging; the AXP2101 charger is enabled and its own
+full-charge termination remains in control. This is useful for topping up
+before leaving home.
+
+```text
+set_charge_protection({"enabled": false})
+get_charge_protection({})
+set_charge_protection({"enabled": true})
+```
+
+Changes take effect immediately without rebooting. Switching protection back
+on immediately re-evaluates the current battery level. The firmware keeps the
+public name `charge_protection`; its physical NVS mapping is namespace
+`stackchan`, key `chg_protect`, because ESP-IDF NVS names allow at most 15
+characters.
 
 ## Architecture
 

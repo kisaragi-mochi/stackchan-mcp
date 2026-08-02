@@ -1037,6 +1037,14 @@ async def _dispatch_mcp_tool(
             "self.screen.set_brightness",
             arguments,
         ),
+        "set_charge_protection": (
+            "self.power.set_charge_protection",
+            arguments,
+        ),
+        "get_charge_protection": (
+            "self.power.get_charge_protection",
+            {},
+        ),
         "move_head": (
             "self.robot.set_head_angles",
             arguments,
@@ -1289,6 +1297,42 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                     },
                     "required": ["brightness"],
+                },
+            ),
+            Tool(
+                name="set_charge_protection",
+                description=(
+                    "Persist and immediately apply battery charge protection. "
+                    "Protection defaults on and keeps the firmware's 30%-70% "
+                    "hysteresis. Disable it temporarily before going out to "
+                    "allow the AXP2101 charger to reach its own full-charge "
+                    "termination; enable it again to resume protection."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True for persistent 30%-70% protection; "
+                                "false to allow charging to the PMIC's "
+                                "full-charge termination."
+                            ),
+                        },
+                    },
+                    "required": ["enabled"],
+                },
+            ),
+            Tool(
+                name="get_charge_protection",
+                description=(
+                    "Get the persistent and effective charge_protection "
+                    "setting plus the current charger-enable state. The "
+                    "setting defaults on when it has never been saved."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
                 },
             ),
             Tool(
