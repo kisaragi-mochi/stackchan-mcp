@@ -98,6 +98,7 @@ void Application::Initialize() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
     };
     callbacks.on_wake_word_detected = [this](const std::string& wake_word) {
+        Board::GetInstance().OnUserActivity();
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
     };
     callbacks.on_vad_change = [this](bool speaking) {
@@ -746,6 +747,7 @@ void Application::DismissAlert() {
 }
 
 void Application::ToggleChatState() {
+    Board::GetInstance().OnUserActivity();
     xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT);
 }
 
@@ -768,6 +770,7 @@ bool Application::IsListeningRequestCurrent(uint32_t generation) const {
 }
 
 void Application::StartListening(ListeningProfile profile) {
+    Board::GetInstance().OnUserActivity();
     // Thin event setter. The popup-on-listening flag is armed inside
     // HandleStartListeningEvent (main task) so all writes to
     // play_popup_on_listening_ converge to the same task that reads
@@ -1204,6 +1207,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
 }
 
 void Application::WakeWordInvoke(const std::string& wake_word) {
+    Board::GetInstance().OnUserActivity();
     if (!protocol_) {
         return;
     }

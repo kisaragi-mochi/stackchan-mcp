@@ -41,6 +41,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <driver/uart.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
+#include <esp_lcd_panel_commands.h>
 #include <esp_lcd_ili9341.h>
 #include <esp_timer.h>
 #include <esp_random.h>
@@ -60,6 +61,19 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <vector>
 
 #define TAG "StackChanBoard"
+
+#ifndef STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS
+#define STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS 300
+#endif
+
+#define STACKCHAN_SCREEN_OFF_MAX_TIMEOUT_SECONDS 86400
+#if STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS < 0 || \
+    STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS > STACKCHAN_SCREEN_OFF_MAX_TIMEOUT_SECONDS
+#error "STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS must be in 0..86400"
+#endif
+#define STACKCHAN_LCD_SLEEP_TRANSITION_MS 120
+#define STACKCHAN_SCREEN_OFF_NVS_NAMESPACE "display"
+#define STACKCHAN_SCREEN_OFF_NVS_KEY "off_timeout"
 
 class Pmic : public Axp2101 {
 public:
@@ -86,6 +100,17 @@ public:
 class CustomBacklight : public Backlight {
 public:
     CustomBacklight(Pmic *pmic) : pmic_(pmic) {}
+
+    void SetBrightnessImmediate(uint8_t brightness) {
+        if (brightness > 100) {
+            brightness = 100;
+        }
+        if (transition_timer_ != nullptr) {
+            esp_timer_stop(transition_timer_);
+        }
+        target_brightness_ = brightness;
+        SetBrightnessImpl(brightness);
+    }
 
     void SetBrightnessImpl(uint8_t brightness) override {
         pmic_->SetBrightness(target_brightness_);
@@ -533,6 +558,18 @@ private:
     EspVideo* camera_;
     esp_timer_handle_t touchpad_timer_;
     PowerSaveTimer* power_save_timer_;
+    esp_lcd_panel_io_handle_t lcd_panel_io_ = nullptr;
+    esp_lcd_panel_handle_t lcd_panel_ = nullptr;
+    esp_timer_handle_t screen_off_timer_ = nullptr;
+    SemaphoreHandle_t screen_power_mutex_ = nullptr;
+    std::atomic<int> screen_off_timeout_seconds_{
+        STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS};
+    std::atomic<bool> screen_is_off_{false};
+    int64_t screen_off_deadline_us_ = 0;  // guarded by screen_power_mutex_
+    int64_t panel_sleep_started_us_ = 0;  // guarded by screen_power_mutex_
+    uint8_t screen_saved_brightness_ = 75;  // guarded by screen_power_mutex_
+    bool panel_sleeping_ = false;  // guarded by screen_power_mutex_
+    bool panel_display_disabled_ = false;  // guarded by screen_power_mutex_
     ScsBus scs_bus_;
     std::unique_ptr<Py32IoExpander> io_expander_;
 
@@ -2142,6 +2179,304 @@ private:
         power_save_timer_->SetEnabled(true);
     }
 
+    void StopScreenOffTimerLocked() {
+        if (screen_off_timer_ == nullptr) {
+            return;
+        }
+        esp_err_t err = esp_timer_stop(screen_off_timer_);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Failed to stop screen-off timer: %s",
+                     esp_err_to_name(err));
+        }
+    }
+
+    void StartScreenOffTimerLocked(int64_t delay_us) {
+        if (screen_off_timer_ == nullptr || delay_us <= 0) {
+            return;
+        }
+        StopScreenOffTimerLocked();
+        esp_err_t err = esp_timer_start_once(screen_off_timer_,
+                                             static_cast<uint64_t>(delay_us));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to start screen-off timer: %s",
+                     esp_err_to_name(err));
+        }
+    }
+
+    void ArmScreenOffTimerLocked() {
+        StopScreenOffTimerLocked();
+        int timeout_seconds =
+            screen_off_timeout_seconds_.load(std::memory_order_acquire);
+        if (timeout_seconds == 0) {
+            screen_off_deadline_us_ = 0;
+            return;
+        }
+        int64_t delay_us = static_cast<int64_t>(timeout_seconds) * 1000000LL;
+        screen_off_deadline_us_ = esp_timer_get_time() + delay_us;
+        StartScreenOffTimerLocked(delay_us);
+    }
+
+    void EnterPanelSleepLocked() {
+        if (lcd_panel_ == nullptr || lcd_panel_io_ == nullptr) {
+            ESP_LOGW(TAG, "LCD handles are not ready; using backlight-only screen off");
+            return;
+        }
+
+        esp_err_t display_err = esp_lcd_panel_disp_on_off(lcd_panel_, false);
+        if (display_err == ESP_OK) {
+            panel_display_disabled_ = true;
+        } else {
+            ESP_LOGW(TAG, "LCD display-off command failed (%s); backlight remains off",
+                     esp_err_to_name(display_err));
+        }
+
+        // esp_lcd_ili9341 v1.2.0 implements disp_on_off but does not install
+        // the esp_lcd_panel_t::disp_sleep callback. Use the same panel IO to
+        // issue the ILI9342C-compatible SLPIN command. Frame memory is kept.
+        esp_err_t sleep_err = esp_lcd_panel_io_tx_param(
+            lcd_panel_io_, LCD_CMD_SLPIN, nullptr, 0);
+        if (sleep_err == ESP_OK) {
+            panel_sleeping_ = true;
+            panel_sleep_started_us_ = esp_timer_get_time();
+        } else {
+            ESP_LOGW(TAG, "LCD sleep-in command failed (%s); backlight remains off",
+                     esp_err_to_name(sleep_err));
+        }
+    }
+
+    bool ExitPanelSleepLocked() {
+        if (lcd_panel_ == nullptr || lcd_panel_io_ == nullptr) {
+            ESP_LOGW(TAG, "LCD handles are not ready; restoring backlight only");
+            return true;
+        }
+
+        if (panel_sleeping_) {
+            // ILI9342C requires 120 ms between SLPIN and SLPOUT. A quick
+            // activity immediately after timeout therefore waits only the
+            // unelapsed remainder.
+            int64_t elapsed_ms =
+                (esp_timer_get_time() - panel_sleep_started_us_) / 1000LL;
+            if (elapsed_ms < STACKCHAN_LCD_SLEEP_TRANSITION_MS) {
+                vTaskDelay(pdMS_TO_TICKS(
+                    STACKCHAN_LCD_SLEEP_TRANSITION_MS - elapsed_ms));
+            }
+
+            esp_err_t wake_err = esp_lcd_panel_io_tx_param(
+                lcd_panel_io_, LCD_CMD_SLPOUT, nullptr, 0);
+            if (wake_err != ESP_OK) {
+                ESP_LOGW(TAG, "LCD sleep-out command failed (%s); keeping backlight off",
+                         esp_err_to_name(wake_err));
+                return false;
+            }
+            panel_sleeping_ = false;
+            panel_sleep_started_us_ = 0;
+
+            // ILI9342C needs 120 ms after SLPOUT before normal display
+            // operation is guaranteed.
+            vTaskDelay(pdMS_TO_TICKS(STACKCHAN_LCD_SLEEP_TRANSITION_MS));
+        }
+
+        if (panel_display_disabled_) {
+            esp_err_t display_err = esp_lcd_panel_disp_on_off(lcd_panel_, true);
+            if (display_err != ESP_OK) {
+                ESP_LOGW(TAG, "LCD display-on command failed (%s); keeping backlight off",
+                         esp_err_to_name(display_err));
+                return false;
+            }
+            panel_display_disabled_ = false;
+        }
+        return true;
+    }
+
+    void TurnScreenOffLocked() {
+        if (screen_is_off_.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        auto backlight = static_cast<CustomBacklight*>(GetBacklight());
+        if (backlight != nullptr) {
+            screen_saved_brightness_ = backlight->brightness();
+            // CustomBacklight's normal SetBrightness path is driven by an
+            // esp_timer. Force the PMIC write here so brightness reaches zero
+            // before any panel power command is issued.
+            backlight->SetBrightnessImmediate(0);
+        }
+
+        if (display_ != nullptr) {
+            DisplayLockGuard lock(display_);
+            EnterPanelSleepLocked();
+        } else {
+            EnterPanelSleepLocked();
+        }
+        screen_is_off_.store(true, std::memory_order_release);
+        ESP_LOGI(TAG, "Screen turned off after idle timeout");
+    }
+
+    bool WakeScreenLocked() {
+        if (!screen_is_off_.load(std::memory_order_acquire)) {
+            return true;
+        }
+
+        bool panel_ready = false;
+        if (display_ != nullptr) {
+            DisplayLockGuard lock(display_);
+            panel_ready = ExitPanelSleepLocked();
+        } else {
+            panel_ready = ExitPanelSleepLocked();
+        }
+        if (!panel_ready) {
+            return false;
+        }
+
+        auto backlight = static_cast<CustomBacklight*>(GetBacklight());
+        if (backlight != nullptr) {
+            backlight->SetBrightnessImmediate(screen_saved_brightness_);
+        }
+
+        // Sleep In/Out on this panel retains frame memory, but the LVGL
+        // compositor's dirty-area tracking does not know the panel briefly
+        // stopped scanning it out. Without a forced full-area invalidate,
+        // the next natural partial redraw can flush a stale/half-composited
+        // frame onto the just-woken panel, seen as avatar double-display and
+        // horizontal tearing until an unrelated activity (e.g. an emotion
+        // change) happens to trigger a full redraw.
+        if (display_ != nullptr) {
+            DisplayLockGuard lock(display_);
+            lv_obj_invalidate(lv_screen_active());
+            ESP_LOGI(TAG, "Forcing full-screen redraw after wake");
+        }
+
+        screen_is_off_.store(false, std::memory_order_release);
+        ESP_LOGI(TAG, "Screen woke from idle timeout");
+        return true;
+    }
+
+    void ScreenOffTimerTick() {
+        if (screen_power_mutex_ == nullptr ||
+            xSemaphoreTake(screen_power_mutex_, portMAX_DELAY) != pdTRUE) {
+            return;
+        }
+
+        int timeout_seconds =
+            screen_off_timeout_seconds_.load(std::memory_order_acquire);
+        int64_t now_us = esp_timer_get_time();
+        if (timeout_seconds == 0) {
+            screen_off_deadline_us_ = 0;
+        } else if (screen_off_deadline_us_ > now_us) {
+            // An activity raced with an already-queued one-shot callback.
+            // Keep the newer deadline instead of turning the screen off.
+            StartScreenOffTimerLocked(screen_off_deadline_us_ - now_us);
+        } else {
+            TurnScreenOffLocked();
+        }
+
+        xSemaphoreGive(screen_power_mutex_);
+    }
+
+    static void ScreenOffTimerCb(void* arg) {
+        static_cast<StackChanBoard*>(arg)->ScreenOffTimerTick();
+    }
+
+    void InitializeScreenOffTimer() {
+        Settings settings(STACKCHAN_SCREEN_OFF_NVS_NAMESPACE, false);
+        int timeout_seconds = settings.GetInt(
+            STACKCHAN_SCREEN_OFF_NVS_KEY,
+            STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS);
+        if (timeout_seconds < 0 ||
+            timeout_seconds > STACKCHAN_SCREEN_OFF_MAX_TIMEOUT_SECONDS) {
+            ESP_LOGW(TAG,
+                     "Ignoring invalid persisted screen-off timeout %d; using default %d",
+                     timeout_seconds,
+                     STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS);
+            timeout_seconds = STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS;
+        }
+        screen_off_timeout_seconds_.store(timeout_seconds,
+                                          std::memory_order_release);
+
+        screen_power_mutex_ = xSemaphoreCreateMutex();
+        if (screen_power_mutex_ == nullptr) {
+            ESP_LOGW(TAG, "Failed to create screen power mutex; screen-off disabled");
+            return;
+        }
+
+        const esp_timer_create_args_t timer_args = {
+            .callback = &StackChanBoard::ScreenOffTimerCb,
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "screen_off",
+            .skip_unhandled_events = true,
+        };
+        esp_err_t err = esp_timer_create(&timer_args, &screen_off_timer_);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to create screen-off timer: %s",
+                     esp_err_to_name(err));
+            return;
+        }
+
+        if (xSemaphoreTake(screen_power_mutex_, portMAX_DELAY) == pdTRUE) {
+            ArmScreenOffTimerLocked();
+            xSemaphoreGive(screen_power_mutex_);
+        }
+        ESP_LOGI(TAG, "Screen-off timeout: %d seconds%s", timeout_seconds,
+                 timeout_seconds == 0 ? " (disabled)" : "");
+    }
+
+    void HandleScreenActivity() {
+        if (screen_power_mutex_ == nullptr ||
+            xSemaphoreTake(screen_power_mutex_, portMAX_DELAY) != pdTRUE) {
+            return;
+        }
+        WakeScreenLocked();
+        ArmScreenOffTimerLocked();
+        xSemaphoreGive(screen_power_mutex_);
+    }
+
+    bool SetScreenOffTimeoutSeconds(int timeout_seconds) {
+        if (timeout_seconds < 0 ||
+            timeout_seconds > STACKCHAN_SCREEN_OFF_MAX_TIMEOUT_SECONDS) {
+            return false;
+        }
+
+        {
+            Settings settings(STACKCHAN_SCREEN_OFF_NVS_NAMESPACE, true);
+            settings.SetInt(STACKCHAN_SCREEN_OFF_NVS_KEY, timeout_seconds);
+        }
+
+        if (screen_power_mutex_ == nullptr ||
+            xSemaphoreTake(screen_power_mutex_, portMAX_DELAY) != pdTRUE) {
+            screen_off_timeout_seconds_.store(timeout_seconds,
+                                              std::memory_order_release);
+            return true;
+        }
+
+        screen_off_timeout_seconds_.store(timeout_seconds,
+                                          std::memory_order_release);
+        if (timeout_seconds == 0) {
+            WakeScreenLocked();
+        }
+        ArmScreenOffTimerLocked();
+        xSemaphoreGive(screen_power_mutex_);
+        return true;
+    }
+
+    cJSON* GetScreenOffTimeoutJson(bool applied = true) const {
+        int timeout_seconds =
+            screen_off_timeout_seconds_.load(std::memory_order_acquire);
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", applied);
+        cJSON_AddBoolToObject(root, "applied", applied);
+        cJSON_AddNumberToObject(root, "timeout_seconds", timeout_seconds);
+        cJSON_AddBoolToObject(root, "persistent", true);
+        cJSON_AddStringToObject(root, "persistence", "nvs");
+        cJSON_AddBoolToObject(
+            root, "enabled",
+            timeout_seconds != 0 && screen_off_timer_ != nullptr);
+        cJSON_AddBoolToObject(
+            root, "screen_off",
+            screen_is_off_.load(std::memory_order_acquire));
+        return root;
+    }
+
     void InitializeI2c() {
         // Initialize I2C peripheral
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -2493,6 +2828,9 @@ private:
 
         ft6336_->UpdateTouchPoint();
         auto& touch_point = ft6336_->GetTouchPoint();
+        if (touch_point.num > 0) {
+            HandleScreenActivity();
+        }
 
         // 检测触摸开始
         if (touch_point.num > 0 && !was_touched) {
@@ -2636,6 +2974,8 @@ private:
         esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
         esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
 
+        lcd_panel_io_ = panel_io;
+        lcd_panel_ = panel;
         display_ = new SpiLcdDisplay(panel_io, panel,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
@@ -4137,6 +4477,9 @@ private:
         last_zone_snapshot_[2] = s.zone[2];
 
         bool any_pressed = s.zone[0] || s.zone[1] || s.zone[2];
+        if (any_pressed) {
+            HandleScreenActivity();
+        }
 
         // Asymmetric debounce:
         //   press   confirm = 2 samples ( 200 ms) — fast tap detection
@@ -5328,6 +5671,31 @@ private:
     void RegisterMcpTools() {
         auto& mcp_server = McpServer::GetInstance();
         ESP_LOGI(TAG, "Registering StackChan MCP tools...");
+
+        mcp_server.AddTool(
+            "self.screen.set_off_timeout",
+            "Set the StackChan idle screen-off timeout in seconds. The value "
+            "is saved to NVS and applied immediately. Use 0 to disable idle "
+            "screen-off and wake the screen if it is currently off. Valid "
+            "range: 0..86400 seconds.",
+            PropertyList({
+                Property("seconds", kPropertyTypeInteger, 0,
+                         STACKCHAN_SCREEN_OFF_MAX_TIMEOUT_SECONDS)
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int timeout_seconds = properties["seconds"].value<int>();
+                bool applied = SetScreenOffTimeoutSeconds(timeout_seconds);
+                return GetScreenOffTimeoutJson(applied);
+            });
+
+        mcp_server.AddTool(
+            "self.screen.get_off_timeout",
+            "Get the effective NVS-backed StackChan idle screen-off timeout, "
+            "whether it is enabled, and whether the screen is currently off.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                return GetScreenOffTimeoutJson();
+            });
 
         mcp_server.AddTool(
             "self.gateway_config.get",
@@ -7080,6 +7448,7 @@ public:
         InitializeCamera();
         InitializeFt6336TouchPad();
         GetBacklight()->RestoreBrightness();
+        InitializeScreenOffTimer();
         InitializeIOExpander();
         InitializeServo();
         InitializeTouchSettings();
@@ -7133,6 +7502,10 @@ public:
             power_save_timer_->WakeUp();
         }
         WifiBoard::SetPowerSaveLevel(level);
+    }
+
+    virtual void OnUserActivity() override {
+        HandleScreenActivity();
     }
 
     // Phase 4 audio (Issue #76): drive avatar mouth animation alongside TTS

@@ -583,6 +583,10 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     auto& app = Application::GetInstance();
     app.Schedule([this, id, tool_iter, arguments = std::move(arguments)]() {
         try {
+            // A valid tool call is user activity regardless of which tool it
+            // targets. Board implementations may use this to wake a display;
+            // the default Board hook is a no-op.
+            Board::GetInstance().OnUserActivity();
             ReplyResult(id, (*tool_iter)->Call(arguments));
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "tools/call: %s", e.what());

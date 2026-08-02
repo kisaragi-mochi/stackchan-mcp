@@ -1037,6 +1037,14 @@ async def _dispatch_mcp_tool(
             "self.screen.set_brightness",
             arguments,
         ),
+        "set_off_timeout": (
+            "self.screen.set_off_timeout",
+            arguments,
+        ),
+        "get_off_timeout": (
+            "self.screen.get_off_timeout",
+            {},
+        ),
         "move_head": (
             "self.robot.set_head_angles",
             arguments,

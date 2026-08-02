@@ -30,12 +30,22 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- Added a persistent StackChan screen-off timeout (300 seconds by default,
+  `0` to disable) with touch, voice-session, and MCP wake paths plus
+  `self.screen.set_off_timeout` / `self.screen.get_off_timeout` controls.
+
 ### Gateway
 
 - `get_status` now reports the WebSocket `session_id` alongside the
   connection flags. The id changes on every (re)connection, so a polling
   host can detect a device reboot even when the reconnect lands between
   polls and `connected` never reads false.
+- Dispatch `set_off_timeout` / `get_off_timeout` MCP calls through to the
+  device's `self.screen.set_off_timeout` / `self.screen.get_off_timeout`
+  tools, so the new firmware screen-off timeout is reachable over the
+  gateway.
 
 ## [0.17.0] - 2026-07-12
 
