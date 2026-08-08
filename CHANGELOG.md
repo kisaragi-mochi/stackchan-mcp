@@ -30,6 +30,17 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- New `fish-audio` TTS engine backed by the hosted
+  [Fish Audio](https://fish.audio) API, selectable per call with
+  `say(voice="fish-audio")` or globally via
+  `STACKCHAN_TTS_ENGINE=fish-audio`. It requests 16-bit mono PCM at the
+  device's own 16 kHz, so unlike Irodori it needs no decoder and unlike
+  Edge TTS no `ffmpeg` — the `tts-fish-audio` extra is a no-op alias over
+  `[tts]`. Configured through `STACKCHAN_FISH_AUDIO_KEY` (required) plus
+  optional `_MODEL`, `_BACKEND`, and `_URL` overrides.
+
 ## [0.18.0] - 2026-10-03
 
 ### Gateway
