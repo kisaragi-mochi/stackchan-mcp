@@ -80,6 +80,17 @@ WebsocketProtocol::WebsocketProtocol() {
         ESP_LOGE(TAG, "Failed to create reconnect timer; auto reconnect will not be available");
         reconnect_timer_ = nullptr;
     }
+
+    // Create keepalive timer (25s interval) to prevent 40s idle disconnect
+    esp_timer_create_args_t keepalive_timer_args = {
+        .callback = OnKeepaliveTimer,
+        .arg = this,
+        .name = "ws_keepalive",
+    };
+    if (esp_timer_create(&keepalive_timer_args, &keepalive_timer_) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create keepalive timer");
+        keepalive_timer_ = nullptr;
+    }
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
@@ -90,9 +101,14 @@ WebsocketProtocol::~WebsocketProtocol() {
         current_notify_disconnect_->store(false);
     }
     StopReconnectTimer();
+    StopKeepalive();
     if (reconnect_timer_ != nullptr) {
         esp_timer_delete(reconnect_timer_);
         reconnect_timer_ = nullptr;
+    }
+    if (keepalive_timer_ != nullptr) {
+        esp_timer_delete(keepalive_timer_);
+        keepalive_timer_ = nullptr;
     }
     websocket_.reset();
     if (event_group_handle_ != nullptr) {
@@ -248,6 +264,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
     // intentional_close_ once the server hello has been acked.
     audio_channel_open_.store(false);
     transport_connected_.store(false);
+    StopKeepalive();
     intentional_close_.store(true);
     if (current_notify_disconnect_) {
         current_notify_disconnect_->store(false);
@@ -507,6 +524,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
         websocket_->OnDisconnected([this, notify_disconnect, disconnected_after_hello]() {
             audio_channel_open_.store(false);
             transport_connected_.store(false);
+            StopKeepalive();
             // notify_disconnect carries this socket's reconnect intent.
             // ParseServerHello() arms it (true) once the handshake
             // completes; intentional teardown paths (CloseAudioChannel,
@@ -621,6 +639,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
         intentional_close_.store(false);
         connected_url_ = candidate_url;
         transport_connected_.store(true);
+        StartKeepalive();
         reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
         StopReconnectTimer();
 
@@ -805,4 +824,27 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
     audio_channel_open_.store(arm_audio_channel);
     intentional_close_.store(false);
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
+}
+
+// --- keepalive: send periodic app-level ping from the ESP32 to prevent
+//     the 40s idle disconnect in the WebSocket transport layer ---
+
+void WebsocketProtocol::OnKeepaliveTimer(void* arg) {
+    auto* self = static_cast<WebsocketProtocol*>(arg);
+    if (self->transport_connected_.load() && self->websocket_ != nullptr) {
+        // Send a minimal app-level ping. Any outbound text frame resets
+        // the transport's idle timer and prevents the 40s disconnect.
+        self->SendText("{\"type\":\"ping\"}");
+    }
+}
+
+void WebsocketProtocol::StartKeepalive() {
+    if (keepalive_timer_ == nullptr) return;
+    // 25s interval — fires well before the 40s idle deadline
+    ESP_ERROR_CHECK(esp_timer_start_periodic(keepalive_timer_, 25'000'000));
+}
+
+void WebsocketProtocol::StopKeepalive() {
+    if (keepalive_timer_ == nullptr) return;
+    esp_timer_stop(keepalive_timer_);
 }

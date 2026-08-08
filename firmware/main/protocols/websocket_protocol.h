@@ -86,6 +86,14 @@ private:
     int reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
     int version_ = 1;
 
+    // Keepalive timer: sends periodic app-level pings FROM the ESP32 to
+    // prevent the 40s idle disconnect in the WebSocket transport layer.
+    // Started after successful transport connection, stopped on disconnect.
+    esp_timer_handle_t keepalive_timer_ = nullptr;
+    static void OnKeepaliveTimer(void* arg);
+    void StartKeepalive();
+    void StopKeepalive();
+
     void ParseServerHello(const cJSON* root,
                           const std::shared_ptr<std::atomic<bool>>& notify_disconnect,
                           bool arm_audio_channel);
