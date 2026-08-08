@@ -76,6 +76,13 @@ tts-irodori = [
     "stackchan-mcp[tts]",
     "miniaudio>=1.59",
 ]
+# Fish Audio is a hosted HTTP synthesis service. It can return 16-bit mono
+# PCM/WAV at 16 kHz — the device's own rate — so unlike Irodori it needs no
+# decoder and unlike Edge TTS no ffmpeg. This is therefore a no-op alias over
+# `[tts]` (httpx + opuslib), provided so users can declare intent explicitly.
+tts-fish-audio = [
+    "stackchan-mcp[tts]",
+]
 
 # Phase 4 STT — see Issue #91.
 # The base `stt` extra carries `opuslib` for decoding the device's
