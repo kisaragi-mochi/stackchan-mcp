@@ -35,13 +35,26 @@ documented-only.
 - Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
   frame-geometry consistency, full-frame exports from layered sources,
   the avatar-set fetch window, and blink cadence tuning.
-  
+
 ### Gateway
 
 - `get_status` now reports the WebSocket `session_id` alongside the
   connection flags. The id changes on every (re)connection, so a polling
   host can detect a device reboot even when the reconnect lands between
   polls and `connected` never reads false.
+- Added a `show_caption` tool that relays to the new
+  `self.display.show_caption` device tool, for showing an utterance as an
+  on-screen subtitle in silent operation.
+
+### Firmware
+
+- Added a `self.display.show_caption` device tool: a translucent bottom
+  subtitle band (small white text over the avatar, at most two lines with
+  ellipsis truncation) that fades out automatically after a configurable
+  duration. Font size (14/16/20 px Montserrat, ASCII-only) and band
+  opacity are per-call arguments so the look can be tuned without
+  reflashing. Intended for silent-mode operation where speech is shown
+  instead of spoken.
 
 ## [0.17.0] - 2026-07-12
 
