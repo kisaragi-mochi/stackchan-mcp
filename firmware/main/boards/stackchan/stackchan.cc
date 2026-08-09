@@ -2482,7 +2482,8 @@ private:
                      (int)now_ms, (int)LISTEN_TIMEOUT_MS);
         }
         was_listening = is_listening;
-        if (is_listening && listening_started_ms != 0 &&
+        if (is_listening && app.IsManualListeningSession() &&
+            listening_started_ms != 0 &&
             (now_ms - listening_started_ms) > LISTEN_TIMEOUT_MS) {
             ESP_LOGI(TAG, "Listening timeout reached (%d ms) -> StopListening",
                      (int)(now_ms - listening_started_ms));
@@ -2532,10 +2533,19 @@ private:
                 // は AudioTesting を扱わない)。 StartListening にだけ分岐すると
                 // タッチで設定モードに復帰できなくなるので、 AudioTesting だけ
                 // は従来通り ToggleChatState() に流して状態機械任せにする。
+                TouchPttState ptt_state = TouchPttState::kOther;
                 if (app.GetDeviceState() == kDeviceStateAudioTesting) {
-                    app.ToggleChatState();
-                    return;
+                    ptt_state = TouchPttState::kAudioTesting;
+                } else if (app.GetDeviceState() == kDeviceStateListening) {
+                    ptt_state = TouchPttState::kListening;
                 }
+                auto ptt_action = DecideTouchPttAction(
+#if CONFIG_STACKCHAN_TOUCH_PTT
+                    true,
+#else
+                    false,
+#endif
+                    ptt_state);
                 // listening 中の2回目タッチは Application::HandleToggleChatEvent
                 // の既定経路 (CloseAudioChannel = WS 切断 → gateway の recording
                 // slot が aborted_mid_capture として buffer 破棄) ではなく
@@ -2544,12 +2554,18 @@ private:
                 // audio_input_hook) が listen.stop を受けて buffer を Ogg 化 +
                 // 外部 hook へ POST できる。Vessel UX として「タッチで listen
                 // 開始 → 発話 → タッチで送信」を成立させるための fork 専用分岐。
-                if (app.GetDeviceState() == kDeviceStateListening) {
+                // LCD touch is an explicit user-owned PTT boundary. It may
+                // start or stop a manual turn, but it never advances an
+                // automatic AI.AGENT/Xiaozhi conversational turn by itself.
+                if (ptt_action == TouchPttAction::kToggleAudioTesting) {
+                    app.ToggleChatState();
+                    return;
+                } else if (ptt_action == TouchPttAction::kStopListening) {
                     // 録音終了のフィードバック (= 全 LED 消灯)。 デバッグ目的、
                     // MCP self.led.set_* 経由で上書き可能。
                     SetAllRgbLeds(0, 0, 0);
                     app.StopListening();
-                } else {
+                } else if (ptt_action == TouchPttAction::kStartListening) {
                     // listening 開始は ToggleChatState ではなく StartListening
                     // を使う。 ToggleChatState 経由は SetListeningMode に
                     // GetDefaultListeningMode() (= AutoStop) を渡すため、
@@ -2568,6 +2584,8 @@ private:
                     // 非同期処理。 タッチが取れたかどうかの体感を優先。
                     SetAllRgbLeds(0, 32, 0);
                     app.StartListening();
+                } else {
+                    ESP_LOGI(TAG, "Display touch PTT disabled by build configuration");
                 }
             }
         }
@@ -4601,6 +4619,13 @@ private:
         esp_timer_create_args_t timer_args = {
             .callback = [](void* arg) {
                 StackChanBoard* board = static_cast<StackChanBoard*>(arg);
+                // Keep the Wi-Fi configuration / activation screens visible
+                // until AI.AGENT has reached its normal idle state. The timer
+                // is intentionally a retry rather than a blocking wait: the
+                // board constructor runs before the LVGL screen tree exists.
+                if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
+                    return;
+                }
                 if (board->SetAvatarExpression("idle")) {
                     ESP_LOGI(TAG, "Initial avatar (idle) installed");
                     if (board->avatar_init_timer_ != nullptr) {
@@ -7085,9 +7110,10 @@ public:
         InitializeTouchSettings();
         InitializeSi12tTouch();
         I2cDetect();
-        // Avatar auto-display disabled: WiFi config UI needs to be visible.
-        // Avatar is shown on-demand via MCP set_avatar command.
-        // InitializeAvatar();
+        // Kimito is the single Agent UI. The deferred initializer waits until
+        // activation reaches idle, so first-boot Wi-Fi configuration remains
+        // usable before the avatar overlay is installed.
+        InitializeAvatar();
         InitializeMouthSequenceTask();
         RegisterMcpTools();
     }
@@ -7144,6 +7170,58 @@ public:
 
     virtual void OnTtsStop() override {
         StopTtsLipSync();
+    }
+
+    // AI.AGENT state-to-Kimito presentation bridge. The application still
+    // owns the microphone, speaker and session state; this hook only queues
+    // the local face/head feedback on the existing Kimito motion path. The
+    // mapping is deliberately small and deterministic so an LLM cannot send
+    // arbitrary servo commands through an emotion string.
+    virtual void OnAgentStateChanged(const char* state) override {
+        if (state == nullptr) return;
+        if (strcmp(state, "idle") == 0) {
+            SetAvatarExpressionIfActive("idle");
+        } else if (strcmp(state, "listening") == 0) {
+            SetAvatarExpressionIfActive("thinking");
+            WriteHeadAngles(-8, 48, 300);
+        } else if (strcmp(state, "speaking") == 0) {
+            SetAvatarExpressionIfActive("happy");
+            WriteHeadAngles(8, 45, 300);
+        }
+    }
+
+    virtual void OnAgentEmotion(const char* emotion) override {
+        if (emotion == nullptr) return;
+        // Start from a safe idle pose, then override it for known labels.
+        // Unknown labels are rendered as idle instead of being interpreted as
+        // a motion instruction; future model vocabulary is therefore safe.
+        const char* face = "idle";
+        int yaw = 0;
+        int pitch = 45;
+        if (strcmp(emotion, "happy") == 0) {
+            face = "happy";
+            yaw = -12;
+        } else if (strcmp(emotion, "sad") == 0) {
+            face = "sad";
+            yaw = 12;
+            pitch = 52;
+        } else if (strcmp(emotion, "thinking") == 0) {
+            face = "thinking";
+            yaw = -8;
+            pitch = 48;
+        } else if (strcmp(emotion, "surprised") == 0) {
+            face = "surprised";
+            pitch = 38;
+        } else if (strcmp(emotion, "embarrassed") == 0) {
+            face = "embarrassed";
+            yaw = 10;
+            pitch = 48;
+        } else if (strcmp(emotion, "neutral") != 0 &&
+                   strcmp(emotion, "angry") != 0) {
+            ESP_LOGD(TAG, "Unknown AI emotion '%s'; using neutral presentation", emotion);
+        }
+        SetAvatarExpressionIfActive(face);
+        WriteHeadAngles(yaw, pitch, 300);
     }
 
     // Phase 4.5 avatar (saiverse-stackchan-addon): handle the gateway's

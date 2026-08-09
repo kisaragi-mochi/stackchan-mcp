@@ -13,9 +13,11 @@
 #include <atomic>
 
 #include "protocol.h"
+#include "protocols/mcp_action_client.h"
 #include "ota.h"
 #include "audio_service.h"
 #include "listening_profile.h"
+#include "voice_interaction.h"
 #include "device_state.h"
 #include "device_state_machine.h"
 
@@ -67,6 +69,10 @@ public:
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
+    VoiceInteractionMode GetVoiceInteractionMode() const;
+    bool IsManualListeningSession() const {
+        return listening_mode_ == kListeningModeManualStop;
+    }
     std::string GetConnectedGatewayUrl() const {
         return protocol_ ? protocol_->GetConnectedUrl() : "";
     }
@@ -139,6 +145,15 @@ private:
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
     std::unique_ptr<Protocol> protocol_;
+
+    // The action channel is deliberately kept as a second client instead of
+    // replacing `protocol_`. `protocol_` owns the AI.AGENT/Xiaozhi voice
+    // session (wake word, audio upload, TTS and conversation state). The
+    // action client only forwards MCP requests for Kimito-style presentation
+    // and hardware actions. Keeping the clients separate prevents a tool
+    // response or a reconnect on the action channel from changing the voice
+    // session state.
+    std::unique_ptr<McpActionClient> action_mcp_client_;
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;

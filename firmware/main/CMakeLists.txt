@@ -29,10 +29,15 @@ set(SOURCES "audio/audio_codec.cc"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
+            # Optional second WebSocket used for Kimito action MCP. The
+            # primary AI.AGENT/Xiaozhi protocol remains in protocol.cc and
+            # continues to own all audio/session behavior.
+            "protocols/mcp_action_client.cc"
             "protocols/mdns_gateway_discovery.cc"
             "mcp_server.cc"
             "system_info.cc"
             "listening_profile.cc"
+            "voice_interaction.cc"
             "application.cc"
             "ota.cc"
             "settings.cc"

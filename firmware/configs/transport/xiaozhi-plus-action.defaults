@@ -1,0 +1,8 @@
+# Primary protocol remains the official Xiaozhi voice/session transport.
+# OTA/NVS supplies its URL and activation token; the local gateway is moved
+# to CONFIG_STACKCHAN_MCP_ACTION_GATEWAY_* by configure_stackchan.py.
+# CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG is not set
+# CONFIG_FORCE_DEFAULT_WEBSOCKET_URL is not set
+CONFIG_DEFAULT_WEBSOCKET_URL=""
+CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL=""
+CONFIG_DEFAULT_WEBSOCKET_TOKEN=""

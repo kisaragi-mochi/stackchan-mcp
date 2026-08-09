@@ -41,6 +41,7 @@ firmware/dependencies.lock
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/sdkconfig.defaults.local
+firmware/xiaozhi-agent.local.json
 firmware/main/boards/stackchan/avatar_images.local.cc
 firmware/main/boards/stackchan/avatar_images.local.h
 

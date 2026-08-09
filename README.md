@@ -316,6 +316,41 @@ Both `python ./scripts/release.py <board>` and plain `idf.py build` will read
 this file when it exists. The file is ignored by git, so personal settings
 cannot be added accidentally with `git add -A`.
 
+#### Reproducible voice, language, and transport profiles
+
+`firmware/scripts/configure_stackchan.py` keeps the PC-side configuration
+step explicit while preserving unrelated board and network settings. The
+recommended conversational profile keeps the official Xiaozhi connection in
+charge of audio and session state, and uses a second WebSocket only for local
+StackChan action MCP calls:
+
+```bash
+cd firmware
+python ./scripts/configure_stackchan.py \
+  --voice-mode xiaozhi-conversational \
+  --audio-profile wakenet \
+  --transport-profile xiaozhi-plus-action \
+  --language zh-cn \
+  --agent-language zh \
+  --local-gateway-url ws://<your-lan-ip>:8765/
+```
+
+The command updates only the managed block in the gitignored
+`sdkconfig.defaults.local`, synchronizes those selected values into an
+existing `sdkconfig`, and records the separate cloud-Agent language policy in
+the gitignored `xiaozhi-agent.local.json`. It does not flash the device.
+
+Additional `audio_ab` profiles keep WakeNet, custom MultiNet, device AEC, and
+server AEC available for controlled comparisons. They are diagnostic build
+profiles rather than a requirement for normal cloud Chinese recognition.
+
+For a no-flash build matrix, run `python ./scripts/build_stackchan_ab.py` to
+print the plan, then rerun it with `--execute` from an ESP-IDF 5.5 PowerShell.
+`build_consistency_report.py` binds the selected configuration, packaged
+speech models, firmware hashes, and device-reported ELF identity into one
+report. `device_ab_session.py` is plan-only by default and requires explicit
+backup and approved hashes before it can write an inactive OTA slot.
+
 ### 2. Start the gateway
 
 The gateway can either be installed as the published PyPI package
