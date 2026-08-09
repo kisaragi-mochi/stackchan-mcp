@@ -30,11 +30,11 @@ documented-only.
 
 ## [Unreleased]
 
-### Firmware
+### Docs
 
-- Added a persistent StackChan screen-off timeout (300 seconds by default,
-  `0` to disable) with touch, voice-session, and MCP wake paths plus
-  `self.screen.set_off_timeout` / `self.screen.get_off_timeout` controls.
+- Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
+  frame-geometry consistency, full-frame exports from layered sources,
+  the avatar-set fetch window, and blink cadence tuning.
 
 ### Gateway
 
@@ -46,6 +46,12 @@ documented-only.
   device's `self.screen.set_off_timeout` / `self.screen.get_off_timeout`
   tools, so the new firmware screen-off timeout is reachable over the
   gateway.
+
+### Firmware
+
+- Added a persistent StackChan screen-off timeout (300 seconds by default,
+  `0` to disable) with touch, voice-session, and MCP wake paths plus
+  `self.screen.set_off_timeout` / `self.screen.get_off_timeout` controls.
 
 ## [0.17.0] - 2026-07-12
 
