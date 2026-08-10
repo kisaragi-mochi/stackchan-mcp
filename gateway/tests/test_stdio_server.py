@@ -109,7 +109,7 @@ async def test_get_head_angles_relays_to_esp32(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_list_tools_includes_charge_protection_tools():
-    """Charge protection set/get tools expose boolean and empty schemas."""
+    """Charge protection tools expose toggle, query, and threshold schemas."""
     server = create_server()
 
     result = await server.request_handlers[ListToolsRequest](
@@ -119,6 +119,7 @@ async def test_list_tools_includes_charge_protection_tools():
     tools = {tool.name: tool for tool in result.root.tools}
     assert "set_charge_protection" in tools
     assert "get_charge_protection" in tools
+    assert "set_charge_thresholds" in tools
 
     set_tool = tools["set_charge_protection"]
     assert set_tool.inputSchema == {
@@ -127,19 +128,39 @@ async def test_list_tools_includes_charge_protection_tools():
             "enabled": {
                 "type": "boolean",
                 "description": (
-                    "True for persistent 30%-70% protection; false to allow "
+                    "True for persistent threshold protection; false to allow "
                     "charging to the PMIC's full-charge termination."
                 ),
             },
         },
         "required": ["enabled"],
     }
-    assert "defaults on" in set_tool.description
+    assert "opt-in" in set_tool.description
     assert "going out" in set_tool.description
 
     get_tool = tools["get_charge_protection"]
     assert get_tool.inputSchema == {"type": "object", "properties": {}}
     assert "persistent and effective" in get_tool.description
+
+    thresholds_tool = tools["set_charge_thresholds"]
+    assert thresholds_tool.inputSchema == {
+        "type": "object",
+        "properties": {
+            "on_below": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Enable charging at or below this percentage.",
+            },
+            "off_above": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Disable charging at or above this percentage.",
+            },
+        },
+        "required": ["on_below", "off_above"],
+    }
 
 
 @pytest.mark.asyncio
@@ -157,6 +178,12 @@ async def test_list_tools_includes_charge_protection_tools():
             {},
             "self.power.get_charge_protection",
             {},
+        ),
+        (
+            "set_charge_thresholds",
+            {"on_below": 35, "off_above": 75},
+            "self.power.set_charge_thresholds",
+            {"on_below": 35, "off_above": 75},
         ),
     ],
 )
@@ -214,7 +241,7 @@ async def test_charge_protection_tools_relay_and_preserve_response(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "gateway_tool",
-    ["set_charge_protection", "get_charge_protection"],
+    ["set_charge_protection", "get_charge_protection", "set_charge_thresholds"],
 )
 async def test_charge_protection_tools_propagate_device_error(
     monkeypatch, gateway_tool
@@ -238,9 +265,13 @@ async def test_charge_protection_tools_propagate_device_error(
             method="tools/call",
             params={
                 "name": gateway_tool,
-                "arguments": {"enabled": False}
-                if gateway_tool == "set_charge_protection"
-                else {},
+                "arguments": (
+                    {"enabled": False}
+                    if gateway_tool == "set_charge_protection"
+                    else {"on_below": 35, "off_above": 75}
+                    if gateway_tool == "set_charge_thresholds"
+                    else {}
+                ),
             },
         )
     )

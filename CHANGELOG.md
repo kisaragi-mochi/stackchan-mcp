@@ -39,7 +39,7 @@ documented-only.
 
 ### Firmware
 
-- Added compile-time configurable AXP2101 charge hysteresis for StackChan: charging turns on at 30% or below and off at 70% or above, with `self.power.set_charge_enabled` and `self.power.get_charge_state` MCP tools for manual control and state inspection.
+- Added opt-in AXP2101 charge protection for StackChan. Charging starts enabled at boot, protection disables it at the persisted upper threshold (70% by default), resumes it at the persisted lower threshold (30% by default), and fails safe to charging enabled when the fuel gauge is unreadable. The NVS-backed `charge_protection` toggle defaults off, its thresholds are runtime-configurable, and MCP tools expose persistent configuration, manual control, and state inspection.
 
 ## [0.17.0] - 2026-07-12
 

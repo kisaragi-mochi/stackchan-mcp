@@ -61,21 +61,18 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 
 #define TAG "StackChanBoard"
 
-// Charge-control boot default used when automatic control is disabled
-// (AXP2101 reg 0x18 bit1, see class Pmic below). Undefined/0 keeps charging
-// disabled at every boot. Override at build time (e.g.
-// -DSTACKCHAN_DEFAULT_CHARGE_ENABLED=1) to restore the AXP2101 factory
-// default (charge enabled). Automatic mode always starts OFF, then applies
-// its battery-based startup decision.
+// Charge-control boot default (AXP2101 reg 0x18 bit1, see class Pmic below).
+// Keep the AXP2101 reset default and the pre-feature firmware behaviour unless
+// a build explicitly overrides it.
 #ifndef STACKCHAN_DEFAULT_CHARGE_ENABLED
-#define STACKCHAN_DEFAULT_CHARGE_ENABLED 0
+#define STACKCHAN_DEFAULT_CHARGE_ENABLED 1
 #endif
 
 // Automatic charge hysteresis. These values may be overridden with compiler
 // -D options. The existing one-second status-bar battery poll drives the
 // decision at a 60-second cadence; no dedicated timer or task is created.
 #ifndef STACKCHAN_CHARGE_AUTO
-#define STACKCHAN_CHARGE_AUTO 1
+#define STACKCHAN_CHARGE_AUTO 0
 #endif
 
 #ifndef STACKCHAN_CHARGE_ON_BELOW
@@ -103,6 +100,8 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 // charge_protection; only its physical NVS key is shortened.
 #define STACKCHAN_CHARGE_PROTECTION_NVS_NAMESPACE "stackchan"
 #define STACKCHAN_CHARGE_PROTECTION_NVS_KEY "chg_protect"
+#define STACKCHAN_CHARGE_ON_BELOW_NVS_KEY "chg_on_below"
+#define STACKCHAN_CHARGE_OFF_ABOVE_NVS_KEY "chg_off_above"
 
 class Pmic : public Axp2101 {
 public:
@@ -125,18 +124,10 @@ public:
         // Power Init write above. This preserves the established PMIC
         // initialization order and changes charging only after all other
         // controls are configured.
-#if STACKCHAN_CHARGE_AUTO
-        // Protection starts from the safe OFF state. When protection was
-        // persistently disabled, allow charging immediately instead. The
-        // board performs its first battery-based decision after this
-        // constructor completes when protection is enabled.
-        SetChargeEnabled(!charge_protection_enabled);
-#else
         SetChargeEnabled(
             charge_protection_enabled
                 ? (STACKCHAN_DEFAULT_CHARGE_ENABLED != 0)
                 : true);
-#endif
     }
 
     // AXP2101 reg 0x18 bit1 = Cell Battery charge enable (datasheet
@@ -165,7 +156,7 @@ public:
     // Read the same AXP2101 fuel-gauge register used by
     // Axp2101::GetBatteryLevel(), but return a failure instead of aborting the
     // firmware on an I2C error. Values outside the percentage range are also
-    // treated as unavailable so automatic control keeps its current state.
+    // treated as unavailable so automatic control can fail safe to charging.
     bool TryGetBatteryLevel(int* level) {
         uint8_t reg = 0xA4;
         uint8_t value = 0;
@@ -640,13 +631,14 @@ private:
         kEnabledLowBattery,
         kDisabledHighBattery,
         kKeptBetweenThresholds,
-        kStartupDisabledAboveOnThreshold,
-        kSkippedBatteryReadFailed,
+        kEnabledBatteryReadFailed,
         kProtectionDisabled,
         kAutoDisabled,
     };
     static constexpr uint32_t CHARGE_AUTO_INTERVAL_MS = 60 * 1000;
-    std::atomic<bool> charge_protection_{true};
+    std::atomic<bool> charge_protection_{STACKCHAN_CHARGE_AUTO != 0};
+    std::atomic<int> charge_on_below_{STACKCHAN_CHARGE_ON_BELOW};
+    std::atomic<int> charge_off_above_{STACKCHAN_CHARGE_OFF_ABOVE};
     std::atomic<ChargeAutoDecision> last_charge_auto_decision_{
         (STACKCHAN_CHARGE_AUTO != 0)
             ? ChargeAutoDecision::kNotRun
@@ -2429,10 +2421,8 @@ private:
                 return "disabled_high_battery";
             case ChargeAutoDecision::kKeptBetweenThresholds:
                 return "kept_between_thresholds";
-            case ChargeAutoDecision::kStartupDisabledAboveOnThreshold:
-                return "startup_disabled_above_on_threshold";
-            case ChargeAutoDecision::kSkippedBatteryReadFailed:
-                return "skipped_battery_read_failed";
+            case ChargeAutoDecision::kEnabledBatteryReadFailed:
+                return "enabled_battery_read_failed";
             case ChargeAutoDecision::kProtectionDisabled:
                 return "charge_protection_disabled";
             case ChargeAutoDecision::kAutoDisabled:
@@ -2448,21 +2438,15 @@ private:
     }
 
     bool IsChargeProtectionEffective() const {
-        return STACKCHAN_CHARGE_AUTO != 0 &&
-               charge_protection_.load(std::memory_order_acquire);
+        return charge_protection_.load(std::memory_order_acquire);
     }
 
-    // Apply the automatic policy to a battery sample. At startup, the
-    // startup OFF state is kept for every valid sample above the lower
-    // threshold; subsequent checks use full hysteresis and leave reg 0x18
-    // untouched between thresholds.
-    void ApplyAutomaticChargePolicy(int level, bool level_available,
-                                    bool startup) {
+    // Charging is the resting state at startup; protection engages only at
+    // the persisted upper threshold.
+    void ApplyAutomaticChargePolicy(int level, bool level_available) {
         if (!IsChargeProtectionEffective()) {
             last_charge_auto_decision_.store(
-                STACKCHAN_CHARGE_AUTO != 0
-                    ? ChargeAutoDecision::kProtectionDisabled
-                    : ChargeAutoDecision::kAutoDisabled,
+                ChargeAutoDecision::kProtectionDisabled,
                 std::memory_order_release);
             return;
         }
@@ -2471,28 +2455,22 @@ private:
             level_available ? level : -1, std::memory_order_relaxed);
 
         if (!level_available) {
+            pmic_->SetChargeEnabled(true);
             last_charge_auto_decision_.store(
-                ChargeAutoDecision::kSkippedBatteryReadFailed,
+                ChargeAutoDecision::kEnabledBatteryReadFailed,
                 std::memory_order_release);
             ESP_LOGW(TAG,
-                     "Automatic charge check skipped: battery level unavailable; "
-                     "charge state unchanged");
+                     "Battery level unavailable; charging enabled as fail-safe");
             return;
         }
 
+        int on_below = charge_on_below_.load(std::memory_order_acquire);
+        int off_above = charge_off_above_.load(std::memory_order_acquire);
         ChargeAutoDecision decision;
-        if (level <= STACKCHAN_CHARGE_ON_BELOW) {
+        if (level <= on_below) {
             pmic_->SetChargeEnabled(true);
             decision = ChargeAutoDecision::kEnabledLowBattery;
-        } else if (startup) {
-            // Explicitly retain the safe startup state even if the legacy
-            // STACKCHAN_DEFAULT_CHARGE_ENABLED build option is enabled.
-            pmic_->SetChargeEnabled(false);
-            decision =
-                (level >= STACKCHAN_CHARGE_OFF_ABOVE)
-                    ? ChargeAutoDecision::kDisabledHighBattery
-                    : ChargeAutoDecision::kStartupDisabledAboveOnThreshold;
-        } else if (level >= STACKCHAN_CHARGE_OFF_ABOVE) {
+        } else if (level >= off_above) {
             pmic_->SetChargeEnabled(false);
             decision = ChargeAutoDecision::kDisabledHighBattery;
         } else {
@@ -2533,7 +2511,7 @@ private:
                 last_ms, now_ms, std::memory_order_relaxed));
         }
 
-        ApplyAutomaticChargePolicy(level, level_available, startup);
+        ApplyAutomaticChargePolicy(level, level_available);
     }
 
     void ApplyChargeProtectionSetting(bool enabled) {
@@ -2555,19 +2533,11 @@ private:
             return;
         }
 
-        if (STACKCHAN_CHARGE_AUTO == 0) {
-            last_charge_auto_decision_.store(
-                ChargeAutoDecision::kAutoDisabled,
-                std::memory_order_release);
-            return;
-        }
-
-        // Re-evaluate immediately without startup semantics. In the
-        // hysteresis band the current PMIC state is intentionally retained;
-        // <=30% enables and >=70% disables charging at once.
+        // Re-evaluate immediately. In the hysteresis band the current PMIC
+        // state is intentionally retained.
         int level = -1;
         bool level_available = ReadBatteryLevel(&level);
-        ApplyAutomaticChargePolicy(level, level_available, false);
+        ApplyAutomaticChargePolicy(level, level_available);
     }
 
     esp_err_t SetChargeProtection(bool enabled) {
@@ -2588,6 +2558,43 @@ private:
         return ESP_OK;
     }
 
+    static bool AreChargeThresholdsValid(int on_below, int off_above) {
+        return on_below >= 0 && off_above <= 100 &&
+               on_below < off_above;
+    }
+
+    esp_err_t SetChargeThresholds(int on_below, int off_above) {
+        if (!AreChargeThresholdsValid(on_below, off_above)) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        esp_err_t err;
+        {
+            Settings settings(
+                STACKCHAN_CHARGE_PROTECTION_NVS_NAMESPACE, true);
+            err = settings.SetIntPairAndCommit(
+                STACKCHAN_CHARGE_ON_BELOW_NVS_KEY, on_below,
+                STACKCHAN_CHARGE_OFF_ABOVE_NVS_KEY, off_above);
+        }
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to persist charge thresholds: %s",
+                     esp_err_to_name(err));
+            return err;
+        }
+
+        charge_on_below_.store(on_below, std::memory_order_release);
+        charge_off_above_.store(off_above, std::memory_order_release);
+        if (IsChargeProtectionEffective()) {
+            int level = -1;
+            bool level_available = ReadBatteryLevel(&level);
+            ApplyAutomaticChargePolicy(level, level_available);
+            last_charge_auto_check_ms_.store(
+                static_cast<uint32_t>(esp_timer_get_time() / 1000),
+                std::memory_order_relaxed);
+        }
+        return ESP_OK;
+    }
+
     cJSON* GetChargeProtectionJson(bool saved,
                                    esp_err_t error = ESP_OK) {
         bool configured =
@@ -2603,16 +2610,23 @@ private:
                               pmic_->IsChargeEnabled());
         cJSON_AddBoolToObject(root, "persistent", true);
         cJSON_AddStringToObject(root, "persistence", "nvs");
-        cJSON_AddBoolToObject(root, "default", true);
+        cJSON_AddBoolToObject(root, "default",
+                              STACKCHAN_CHARGE_AUTO != 0);
         cJSON_AddStringToObject(
             root, "nvs_namespace",
             STACKCHAN_CHARGE_PROTECTION_NVS_NAMESPACE);
         cJSON_AddStringToObject(root, "nvs_key",
                                 STACKCHAN_CHARGE_PROTECTION_NVS_KEY);
-        cJSON_AddNumberToObject(root, "on_below",
-                                STACKCHAN_CHARGE_ON_BELOW);
-        cJSON_AddNumberToObject(root, "off_above",
-                                STACKCHAN_CHARGE_OFF_ABOVE);
+        cJSON_AddNumberToObject(
+            root, "on_below",
+            charge_on_below_.load(std::memory_order_acquire));
+        cJSON_AddNumberToObject(
+            root, "off_above",
+            charge_off_above_.load(std::memory_order_acquire));
+        cJSON_AddStringToObject(root, "on_below_nvs_key",
+                                STACKCHAN_CHARGE_ON_BELOW_NVS_KEY);
+        cJSON_AddStringToObject(root, "off_above_nvs_key",
+                                STACKCHAN_CHARGE_OFF_ABOVE_NVS_KEY);
         cJSON_AddStringToObject(root, "takes_effect", "immediate");
         if (error != ESP_OK) {
             cJSON_AddStringToObject(root, "error", esp_err_to_name(error));
@@ -2625,24 +2639,38 @@ private:
         Settings settings(
             STACKCHAN_CHARGE_PROTECTION_NVS_NAMESPACE, false);
         bool protection_enabled = settings.GetBool(
-            STACKCHAN_CHARGE_PROTECTION_NVS_KEY, true);
+            STACKCHAN_CHARGE_PROTECTION_NVS_KEY,
+            STACKCHAN_CHARGE_AUTO != 0);
+        int on_below = settings.GetInt(
+            STACKCHAN_CHARGE_ON_BELOW_NVS_KEY,
+            STACKCHAN_CHARGE_ON_BELOW);
+        int off_above = settings.GetInt(
+            STACKCHAN_CHARGE_OFF_ABOVE_NVS_KEY,
+            STACKCHAN_CHARGE_OFF_ABOVE);
+        if (!AreChargeThresholdsValid(on_below, off_above)) {
+            ESP_LOGW(TAG,
+                     "Ignoring invalid persisted charge thresholds %d/%d; using defaults %d/%d",
+                     on_below, off_above, STACKCHAN_CHARGE_ON_BELOW,
+                     STACKCHAN_CHARGE_OFF_ABOVE);
+            on_below = STACKCHAN_CHARGE_ON_BELOW;
+            off_above = STACKCHAN_CHARGE_OFF_ABOVE;
+        }
         charge_protection_.store(protection_enabled,
                                  std::memory_order_release);
+        charge_on_below_.store(on_below, std::memory_order_release);
+        charge_off_above_.store(off_above, std::memory_order_release);
 
         pmic_ = new Pmic(i2c_bus_, 0x34, protection_enabled);
-        if (STACKCHAN_CHARGE_AUTO != 0 && protection_enabled) {
+        if (protection_enabled) {
             int level = -1;
             bool level_available = ReadBatteryLevel(&level);
             MaybeApplyAutomaticChargePolicy(level, level_available, true);
-        } else if (STACKCHAN_CHARGE_AUTO != 0) {
+        } else {
             last_charge_auto_decision_.store(
                 ChargeAutoDecision::kProtectionDisabled,
                 std::memory_order_release);
             ESP_LOGI(TAG,
                      "Charge protection disabled by persisted setting; charging allowed");
-        } else {
-            ESP_LOGI(TAG,
-                     "Automatic charge control disabled at build time");
         }
     }
 
@@ -7406,8 +7434,9 @@ private:
         mcp_server.AddTool(
             "self.power.set_charge_protection",
             "Persist and immediately apply StackChan battery charge "
-            "protection. enabled=true (the default when NVS has no value) "
-            "uses the existing 30%-70% automatic hysteresis. "
+            "protection. The unset NVS default follows the compile-time "
+            "STACKCHAN_CHARGE_AUTO default (off unless overridden). "
+            "enabled=true uses the persisted ON/OFF thresholds. "
             "enabled=false bypasses that policy and enables the AXP2101 "
             "charger so its own full-charge termination can finish a full "
             "charge. Switching protection back on immediately re-evaluates "
@@ -7425,12 +7454,29 @@ private:
         mcp_server.AddTool(
             "self.power.get_charge_protection",
             "Get the NVS-backed and effective StackChan charge_protection "
-            "setting, current AXP2101 charge-enable state, and the 30%-70% "
-            "thresholds. An unset NVS value is reported as enabled because "
-            "protection defaults on.",
+            "setting, current AXP2101 charge-enable state, and the persisted "
+            "ON/OFF thresholds. An unset NVS value follows the compile-time "
+            "STACKCHAN_CHARGE_AUTO default.",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
                 return GetChargeProtectionJson(true);
+            });
+
+        mcp_server.AddTool(
+            "self.power.set_charge_thresholds",
+            "Persist and immediately apply the battery percentages used by "
+            "charge protection. on_below must be lower than off_above. "
+            "Values are stored together in NVS; invalid pairs are rejected "
+            "without changing the active thresholds.",
+            PropertyList({
+                Property("on_below", kPropertyTypeInteger, 0, 100),
+                Property("off_above", kPropertyTypeInteger, 0, 100),
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int on_below = properties["on_below"].value<int>();
+                int off_above = properties["off_above"].value<int>();
+                esp_err_t err = SetChargeThresholds(on_below, off_above);
+                return GetChargeProtectionJson(err == ESP_OK, err);
             });
 
         mcp_server.AddTool(
@@ -7486,7 +7532,7 @@ private:
             "register 0xA4. The response also reports whether automatic "
             "control is enabled, its inclusive ON/OFF thresholds, and the "
             "last automatic decision (including threshold-band hold and "
-            "battery-read-failure skip results). Manual charge changes may "
+            "battery-read-failure fail-safe results). Manual charge changes may "
             "be overwritten by a later automatic decision while auto is "
             "enabled. Battery voltage/current are intentionally not "
             "reported because this implementation does not have confirmed "
@@ -7512,10 +7558,12 @@ private:
                 cJSON_AddBoolToObject(
                     root, "charge_protection",
                     charge_protection_.load(std::memory_order_acquire));
-                cJSON_AddNumberToObject(root, "auto_on_below",
-                                        STACKCHAN_CHARGE_ON_BELOW);
-                cJSON_AddNumberToObject(root, "auto_off_above",
-                                        STACKCHAN_CHARGE_OFF_ABOVE);
+                cJSON_AddNumberToObject(
+                    root, "auto_on_below",
+                    charge_on_below_.load(std::memory_order_acquire));
+                cJSON_AddNumberToObject(
+                    root, "auto_off_above",
+                    charge_off_above_.load(std::memory_order_acquire));
                 cJSON_AddNumberToObject(root, "auto_interval_seconds", 60);
                 ChargeAutoDecision last_decision =
                     last_charge_auto_decision_.load(

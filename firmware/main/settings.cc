@@ -67,6 +67,28 @@ void Settings::SetInt(const std::string& key, int32_t value) {
     }
 }
 
+esp_err_t Settings::SetIntPairAndCommit(const std::string& first_key,
+                                        int32_t first_value,
+                                        const std::string& second_key,
+                                        int32_t second_value) {
+    if (!read_write_ || nvs_handle_ == 0) {
+        ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = nvs_set_i32(nvs_handle_, first_key.c_str(), first_value);
+    if (err == ESP_OK) {
+        err = nvs_set_i32(nvs_handle_, second_key.c_str(), second_value);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs_handle_);
+    }
+    // The explicit caller owns error handling. Avoid a destructor commit
+    // after either a successful commit or a failed staged write.
+    dirty_ = false;
+    return err;
+}
+
 bool Settings::GetBool(const std::string& key, bool default_value) {
     if (nvs_handle_ == 0) {
         return default_value;
