@@ -50,8 +50,10 @@ documented-only.
 ### Firmware
 
 - Added a persistent StackChan screen-off timeout (300 seconds by default,
-  `0` to disable) with touch, voice-session, and MCP wake paths plus
-  `self.screen.set_off_timeout` / `self.screen.get_off_timeout` controls.
+  `0` to disable) with touch, voice-session (including gateway `say`), avatar,
+  emotion, and MCP wake paths. Activity resets both screen-off and system
+  power-save deadlines. Includes `self.screen.set_off_timeout` /
+  `self.screen.get_off_timeout` controls.
 
 ## [0.17.0] - 2026-07-12
 

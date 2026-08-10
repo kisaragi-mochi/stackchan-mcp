@@ -541,6 +541,7 @@ void Application::InitializeProtocol() {
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this, &board]() {
                     aborted_ = false;
+                    board.OnUserActivity();
                     SetDeviceState(kDeviceStateSpeaking);
                     // Phase 4 audio (Issue #76): drive avatar mouth animation
                     // for the lifetime of this TTS utterance. Default no-op
@@ -639,7 +640,8 @@ void Application::InitializeProtocol() {
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
-                Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
+                Schedule([display, &board, emotion_str = std::string(emotion->valuestring)]() {
+                    board.OnUserActivity();
                     display->SetEmotion(emotion_str.c_str());
                 });
             }
@@ -675,6 +677,7 @@ void Application::InitializeProtocol() {
             // current board for HTTP fetch + SHA256 verify + AvatarSet adoption.
             // Non-stackchan boards default to a no-op (Board::OnAvatarSetFetch).
             // See docs/intent/stackchan_avatar_pipeline.md §C-3 (SAIVerse).
+            board.OnUserActivity();
             board.OnAvatarSetFetch(root);
 #if CONFIG_RECEIVE_CUSTOM_MESSAGE
         } else if (strcmp(type->valuestring, "custom") == 0) {

@@ -7505,6 +7505,7 @@ public:
     }
 
     virtual void OnUserActivity() override {
+        power_save_timer_->WakeUp();
         HandleScreenActivity();
     }
 
