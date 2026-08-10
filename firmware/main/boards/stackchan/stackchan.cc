@@ -61,21 +61,18 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 
 #define TAG "StackChanBoard"
 
-// Charge-control boot default used when automatic control is disabled
-// (AXP2101 reg 0x18 bit1, see class Pmic below). Undefined/0 keeps charging
-// disabled at every boot. Override at build time (e.g.
-// -DSTACKCHAN_DEFAULT_CHARGE_ENABLED=1) to restore the AXP2101 factory
-// default (charge enabled). Automatic mode always starts OFF, then applies
-// its battery-based startup decision.
+// Charge-control boot default (AXP2101 reg 0x18 bit1, see class Pmic below).
+// Keep the AXP2101 reset default and the pre-feature firmware behaviour unless
+// a build explicitly overrides it.
 #ifndef STACKCHAN_DEFAULT_CHARGE_ENABLED
-#define STACKCHAN_DEFAULT_CHARGE_ENABLED 0
+#define STACKCHAN_DEFAULT_CHARGE_ENABLED 1
 #endif
 
 // Automatic charge hysteresis. These values may be overridden with compiler
 // -D options. The existing one-second status-bar battery poll drives the
 // decision at a 60-second cadence; no dedicated timer or task is created.
 #ifndef STACKCHAN_CHARGE_AUTO
-#define STACKCHAN_CHARGE_AUTO 1
+#define STACKCHAN_CHARGE_AUTO 0
 #endif
 
 #ifndef STACKCHAN_CHARGE_ON_BELOW
@@ -117,14 +114,7 @@ public:
         // Power Init write above. This preserves the established PMIC
         // initialization order and changes charging only after all other
         // controls are configured.
-#if STACKCHAN_CHARGE_AUTO
-        // Automatic mode always starts from the safe OFF state. The
-        // board performs its first battery-based decision immediately after
-        // this constructor (and all existing PMIC initialization) completes.
-        SetChargeEnabled(false);
-#else
         SetChargeEnabled(STACKCHAN_DEFAULT_CHARGE_ENABLED != 0);
-#endif
     }
 
     // AXP2101 reg 0x18 bit1 = Cell Battery charge enable (datasheet
@@ -153,7 +143,7 @@ public:
     // Read the same AXP2101 fuel-gauge register used by
     // Axp2101::GetBatteryLevel(), but return a failure instead of aborting the
     // firmware on an I2C error. Values outside the percentage range are also
-    // treated as unavailable so automatic control keeps its current state.
+    // treated as unavailable so automatic control can fail safe to charging.
     bool TryGetBatteryLevel(int* level) {
         uint8_t reg = 0xA4;
         uint8_t value = 0;
@@ -628,8 +618,7 @@ private:
         kEnabledLowBattery,
         kDisabledHighBattery,
         kKeptBetweenThresholds,
-        kStartupDisabledAboveOnThreshold,
-        kSkippedBatteryReadFailed,
+        kEnabledBatteryReadFailed,
         kAutoDisabled,
     };
     static constexpr uint32_t CHARGE_AUTO_INTERVAL_MS = 60 * 1000;
@@ -2415,10 +2404,8 @@ private:
                 return "disabled_high_battery";
             case ChargeAutoDecision::kKeptBetweenThresholds:
                 return "kept_between_thresholds";
-            case ChargeAutoDecision::kStartupDisabledAboveOnThreshold:
-                return "startup_disabled_above_on_threshold";
-            case ChargeAutoDecision::kSkippedBatteryReadFailed:
-                return "skipped_battery_read_failed";
+            case ChargeAutoDecision::kEnabledBatteryReadFailed:
+                return "enabled_battery_read_failed";
             case ChargeAutoDecision::kAutoDisabled:
                 return "auto_disabled";
             case ChargeAutoDecision::kNotRun:
@@ -2431,22 +2418,19 @@ private:
         return pmic_ != nullptr && pmic_->TryGetBatteryLevel(level);
     }
 
-    // Apply the automatic policy to a battery sample. At startup, the
-    // startup OFF state is kept for every valid sample above the lower
-    // threshold; subsequent checks use full hysteresis and leave reg 0x18
-    // untouched between thresholds.
-    void ApplyAutomaticChargePolicy(int level, bool level_available,
-                                    bool startup) {
+    // Apply the automatic policy to a battery sample. Charging is the resting
+    // state at startup; protection engages only at the upper threshold.
+    void ApplyAutomaticChargePolicy(int level, bool level_available) {
         last_charge_auto_battery_level_.store(
             level_available ? level : -1, std::memory_order_relaxed);
 
         if (!level_available) {
+            pmic_->SetChargeEnabled(true);
             last_charge_auto_decision_.store(
-                ChargeAutoDecision::kSkippedBatteryReadFailed,
+                ChargeAutoDecision::kEnabledBatteryReadFailed,
                 std::memory_order_release);
             ESP_LOGW(TAG,
-                     "Automatic charge check skipped: battery level unavailable; "
-                     "charge state unchanged");
+                     "Battery level unavailable; charging enabled as fail-safe");
             return;
         }
 
@@ -2454,14 +2438,6 @@ private:
         if (level <= STACKCHAN_CHARGE_ON_BELOW) {
             pmic_->SetChargeEnabled(true);
             decision = ChargeAutoDecision::kEnabledLowBattery;
-        } else if (startup) {
-            // Explicitly retain the safe startup state even if the legacy
-            // STACKCHAN_DEFAULT_CHARGE_ENABLED build option is enabled.
-            pmic_->SetChargeEnabled(false);
-            decision =
-                (level >= STACKCHAN_CHARGE_OFF_ABOVE)
-                    ? ChargeAutoDecision::kDisabledHighBattery
-                    : ChargeAutoDecision::kStartupDisabledAboveOnThreshold;
         } else if (level >= STACKCHAN_CHARGE_OFF_ABOVE) {
             pmic_->SetChargeEnabled(false);
             decision = ChargeAutoDecision::kDisabledHighBattery;
@@ -2503,7 +2479,7 @@ private:
                 last_ms, now_ms, std::memory_order_relaxed));
         }
 
-        ApplyAutomaticChargePolicy(level, level_available, startup);
+        ApplyAutomaticChargePolicy(level, level_available);
     }
 
     void InitializeAxp2101() {
@@ -7329,7 +7305,7 @@ private:
             "register 0xA4. The response also reports whether automatic "
             "control is enabled, its inclusive ON/OFF thresholds, and the "
             "last automatic decision (including threshold-band hold and "
-            "battery-read-failure skip results). Manual charge changes may "
+            "battery-read-failure fail-safe results). Manual charge changes may "
             "be overwritten by a later automatic decision while auto is "
             "enabled. Battery voltage/current are intentionally not "
             "reported because this implementation does not have confirmed "
