@@ -55,7 +55,7 @@ def _pcm_16k(n_samples: int = 480) -> bytes:
 
 
 def _build_engine(captured: list[dict], *, status: int = 200, body: bytes | None = None,
-                  json_body: dict | None = None, **kwargs):
+                  json_body: dict | None = None, headers: dict | None = None, **kwargs):
     """Construct an engine wired to a mock transport recording requests."""
     if body is None and json_body is None:
         body = _pcm_16k()
@@ -71,7 +71,7 @@ def _build_engine(captured: list[dict], *, status: int = 200, body: bytes | None
         )
         if json_body is not None:
             return httpx.Response(status, json=json_body)
-        return httpx.Response(status, content=body)
+        return httpx.Response(status, content=body, headers=headers)
 
     kwargs.setdefault("api_key", _API_KEY)
     return FishAudioEngine(transport=httpx.MockTransport(handler), **kwargs)
@@ -281,14 +281,64 @@ async def test_pcm_response_passed_through_unchanged():
 
 
 @pytest.mark.asyncio
-async def test_odd_length_pcm_is_trimmed():
-    """A truncated trailing byte must not desynchronise 16-bit framing."""
+async def test_odd_length_pcm_is_rejected():
+    """A short read is a truncated utterance, not something to repair.
+
+    Trimming the stray byte would realign the framing and return audio
+    that is quietly missing its tail, reported as a success. The caller
+    cannot tell that from a complete response, so the truncation has to
+    surface as an error instead.
+    """
     engine = _build_engine([], body=_pcm_16k(10) + b"\x01")
 
-    result = await engine.synthesize("hello")
+    with pytest.raises(RuntimeError, match="odd PCM byte count"):
+        await engine.synthesize("hello")
 
-    assert len(result) % 2 == 0
-    assert result == _pcm_16k(10)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content_type", "body"),
+    [
+        ("text/html; charset=utf-8", b"<html><body>Sign in to continue</body></html>"),
+        ("application/json", b'{"error": "quota exceeded"}'),
+    ],
+)
+async def test_non_audio_200_is_rejected(content_type: str, body: bytes):
+    """A 200 that is not audio must never reach the speaker.
+
+    This engine carries no decoder -- that is its whole appeal -- so
+    nothing downstream would reject a captive portal's login page. It
+    would be handed to the device as PCM and played as noise.
+    """
+    engine = _build_engine([], body=body, headers={"content-type": content_type})
+
+    with pytest.raises(RuntimeError, match="not audio"):
+        await engine.synthesize("hello")
+
+
+@pytest.mark.asyncio
+async def test_truncated_wav_is_rejected():
+    """A RIFF header promising more audio than arrived is a short read.
+
+    ``wave.readframes`` returns what it has rather than raising, so
+    without this check a clipped download plays as a clipped utterance
+    and still reports success.
+    """
+    wav = make_wav_bytes(sample_rate=DEVICE_SAMPLE_RATE, samples=[0] * 320)
+    engine = _build_engine([], body=wav[: len(wav) - 200], response_format="wav")
+
+    with pytest.raises(RuntimeError, match="truncated WAV"):
+        await engine.synthesize("hello")
+
+
+@pytest.mark.asyncio
+async def test_wav_body_when_pcm_was_requested_is_rejected():
+    """Its RIFF header would otherwise be played as a burst of noise."""
+    wav = make_wav_bytes(sample_rate=DEVICE_SAMPLE_RATE, samples=[0] * 320)
+    engine = _build_engine([], body=wav)  # default format is pcm
+
+    with pytest.raises(RuntimeError, match="WAV body despite format='pcm'"):
+        await engine.synthesize("hello")
 
 
 @pytest.mark.asyncio

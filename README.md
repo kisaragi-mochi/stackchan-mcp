@@ -614,6 +614,12 @@ English voices and user-trainable voice models, which makes it a
 practical alternative to VOICEVOX (Japanese-only by default) for English
 deployments.
 
+It is a **third-party cloud service**: the text passed to `say` leaves
+this machine and is sent to Fish Audio's servers to be synthesised.
+Review [Fish Audio's terms and pricing](https://fish.audio) before
+sending anything you would not want to share with them, and prefer a
+local engine such as VOICEVOX for sensitive utterances.
+
 Unlike Irodori, this engine needs **no audio decoder**: the Fish Audio
 API returns 16-bit mono PCM/WAV at a caller-chosen sample rate, and the
 engine asks for 16 kHz — exactly what the device's Opus decoder expects.
@@ -627,6 +633,14 @@ pip install 'stackchan-mcp[tts-fish-audio]'
 The `mp3` and `opus` response formats are deliberately unsupported —
 consuming them would pull in a decoder purely to undo an encode we never
 needed.
+
+Carrying no decoder also means nothing downstream would notice a reply
+that is not audio, so the engine checks that itself: a `200` whose
+content type is not audio, or whose body is not the format that was
+requested, is rejected rather than played, and a response shorter than
+its own WAV header promises — or a `pcm` body that is not a whole number
+of samples — is reported as truncated instead of quietly returning a
+clipped utterance.
 
 Configure via environment variables (the API key is read from the
 environment only — never commit it):
