@@ -62,8 +62,10 @@ Configuration (environment variables):
 
 from __future__ import annotations
 
+import io
 import logging
 import os
+import wave
 from typing import Any
 
 from .audio_utils import (
@@ -103,6 +105,14 @@ DEFAULT_FISH_AUDIO_FORMAT = "pcm"
 #: synthesis is an LLM-style generation whose latency scales with text
 #: length, and a cold model can add several seconds on the first call.
 DEFAULT_HTTP_TIMEOUT_SECONDS = 60.0
+
+#: Content types a 200 may carry and still be audio. Fish Audio labels
+#: its bodies ``audio/*``; ``application/octet-stream`` is allowed
+#: because headerless ``pcm`` has no type of its own and proxies
+#: commonly relabel it. Everything else on a 200 -- ``text/html`` from a
+#: captive portal, ``application/json`` from an error-shaped success --
+#: is the failure this check exists to catch.
+_AUDIO_CONTENT_TYPES = ("audio/", "application/octet-stream", "binary/octet-stream")
 
 
 class FishAudioEngine(TTSEngine):
@@ -316,6 +326,7 @@ class FishAudioEngine(TTSEngine):
             resp = await client.post(self.url, json=payload, headers=headers)
             if resp.status_code != 200:
                 raise RuntimeError(self._describe_error(resp))
+            content_type = resp.headers.get("content-type", "")
             audio = resp.content
 
         if not audio:
@@ -324,6 +335,8 @@ class FishAudioEngine(TTSEngine):
                 "accepted but produced no audio — check that the voice model "
                 f"ID ({reference_id or 'default voice'}) is valid."
             )
+
+        self._assert_audio_response(content_type, audio, response_format)
 
         pcm, sample_rate = self._to_pcm16_mono(audio, response_format)
 
@@ -362,25 +375,79 @@ class FishAudioEngine(TTSEngine):
         return self.default_model
 
     @staticmethod
+    def _assert_audio_response(
+        content_type: str, audio: bytes, response_format: str
+    ) -> None:
+        """Reject a 200 whose body is not the audio we asked for.
+
+        Every other engine gets this for free: VOICEVOX and Irodori push
+        their responses through a decoder, which fails on anything that
+        is not audio. The appeal of this engine is that it carries no
+        decoder, and that is exactly what removes the layer implicitly
+        validating the body -- so the check has to be explicit here.
+
+        Without it a captive portal or a proxy answering 200 with HTML or
+        JSON is handed to the device as PCM and played as noise, which is
+        both alarming and hard to trace back to a network problem.
+        """
+        kind = content_type.split(";", 1)[0].strip().lower()
+        if kind and not kind.startswith(_AUDIO_CONTENT_TYPES):
+            raise RuntimeError(
+                f"Fish Audio returned HTTP 200 with Content-Type {kind!r}, "
+                "which is not audio. A proxy or captive portal most likely "
+                "answered instead of the API; the body was not played."
+            )
+
+        # The declared format has to match what was asked for: a WAV body
+        # handed back as headerless `pcm` would play its own RIFF header
+        # as several milliseconds of noise.
+        looks_like_wav = audio[:4] == b"RIFF" and audio[8:12] == b"WAVE"
+        if response_format == "wav" and not looks_like_wav:
+            raise RuntimeError(
+                "Fish Audio returned a body that is not RIFF/WAVE despite "
+                "format='wav' being requested; the body was not played."
+            )
+        if response_format == "pcm" and looks_like_wav:
+            raise RuntimeError(
+                "Fish Audio returned a WAV body despite format='pcm' being "
+                "requested; its header would be played as noise."
+            )
+
+    @staticmethod
     def _to_pcm16_mono(audio: bytes, response_format: str) -> tuple[bytes, int]:
         """Normalise a response body to ``(pcm, sample_rate)``.
 
         ``wav`` is parsed with the stdlib reader (which also downmixes
-        stereo and reports the true rate). ``pcm`` is already the target
-        representation; it only gets an even-length guard so a truncated
-        trailing byte cannot desynchronise the 16-bit sample framing.
+        stereo and reports the true rate), then checked against the frame
+        count its own header declares. ``pcm`` is already the target
+        representation and only has to be a whole number of samples.
+
+        Both checks reject rather than repair. A response that is short
+        of what it promised is a truncated utterance, and playing it
+        while reporting success turns a network fault into a wrong answer
+        the caller cannot see.
         """
         if response_format == "wav":
+            with wave.open(io.BytesIO(audio), "rb") as wav:
+                declared = (
+                    wav.getnframes() * wav.getnchannels() * wav.getsampwidth()
+                )
+                actual = len(wav.readframes(wav.getnframes()))
+            if actual < declared:
+                raise RuntimeError(
+                    "Fish Audio returned a truncated WAV: its header declares "
+                    f"{declared} bytes of audio but only {actual} arrived. "
+                    "The response was cut short in transit."
+                )
             sample_rate, pcm = wav_to_pcm16_mono(audio)
             return pcm, sample_rate
 
         if len(audio) % 2:
-            logger.warning(
-                "Fish Audio returned an odd PCM byte count (%d); dropping the "
-                "trailing byte to keep 16-bit sample alignment.",
-                len(audio),
+            raise RuntimeError(
+                f"Fish Audio returned an odd PCM byte count ({len(audio)}), "
+                "which cannot be a whole number of 16-bit samples. The "
+                "response was truncated in transit."
             )
-            audio = audio[:-1]
         return audio, DEVICE_SAMPLE_RATE
 
     @staticmethod
