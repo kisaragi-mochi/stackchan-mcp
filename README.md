@@ -2,6 +2,8 @@
 
 # stackchan-mcp
 
+[![MCP Toplist](https://mcptoplist.com/badge/pulsemcp%2Fkisaragi-mochi-stackchan.svg)](https://mcptoplist.com/server/pulsemcp%2Fkisaragi-mochi-stackchan)
+
 An MCP (Model Context Protocol) bridge for the **M5Stack official [StackChan](https://docs.m5stack.com/ja/StackChan)** (2025 Kickstarter shipping kit), letting any LLM client drive the device.
 
 > Born out of the [stack-chan project](https://github.com/stack-chan/stack-chan) community (originated by Shinya Ishikawa in 2021). This repository targets the M5Stack official StackChan kit that grew out of that lineage.
