@@ -42,6 +42,15 @@ documented-only.
   connection flags. The id changes on every (re)connection, so a polling
   host can detect a device reboot even when the reconnect lands between
   polls and `connected` never reads false.
+- The gateway now holds multiple concurrent ESP32 connections keyed by
+  the `Device-Id` header instead of a single connection slot. A new
+  optional `device_id` argument on `say`, `listen`, `load_avatar_set`,
+  and every hardware-relay tool selects which unit a call targets; two
+  new tools, `list_devices` and `set_default_device`, list the
+  currently connected units and change the default routing target.
+  Existing callers that omit `device_id` are unaffected: the default
+  target is the first device that connects, matching prior
+  single-device behavior.
 
 ## [0.17.0] - 2026-07-12
 

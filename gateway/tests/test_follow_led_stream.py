@@ -51,6 +51,8 @@ class _FakeESP32:
         self,
         method: str,
         args: dict[str, Any],
+        *,
+        device_id: str | None = None,
     ) -> tuple[Any, Any]:
         self.calls.append((method, args))
         if self._exc.get(method):

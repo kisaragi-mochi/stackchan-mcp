@@ -29,7 +29,11 @@ from .stdio_server import _dispatch_mcp_tool, create_server
 
 # Follower lifecycle operations must remain callable when the ESP32 is
 # disconnected so HTTP clients can supervise the background task.
-BYPASS_TOOLS = frozenset({"get_status", "stackchan_follow_pose_stream"})
+# Device registry tools must also work with zero devices connected, since
+# showing an empty device list is part of their contract.
+BYPASS_TOOLS = frozenset(
+    {"get_status", "stackchan_follow_pose_stream", "list_devices", "set_default_device"}
+)
 MCP_HTTP_ALLOWED_HOSTS_ENV = "MCP_HTTP_ALLOWED_HOSTS"
 AUTH_FAILURE_MESSAGE = "Unauthorized: missing or invalid bearer token"
 HOST_FAILURE_MESSAGE = "Forbidden: invalid Host header"
