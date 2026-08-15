@@ -40,6 +40,17 @@ documented-only.
   Edge TTS no `ffmpeg` — the `tts-fish-audio` extra is a no-op alias over
   `[tts]`. Configured through `STACKCHAN_FISH_AUDIO_KEY` (required) plus
   optional `_MODEL`, `_BACKEND`, and `_URL` overrides.
+- The gateway now holds multiple concurrent ESP32 connections keyed by
+  the `Device-Id` header instead of a single connection slot. An optional
+  `device_id` argument on `say`, `listen`, `load_avatar_set`, and every
+  hardware-relay tool selects which unit a call targets, and is declared in
+  each of those tools' published schemas. Two new tools, `list_devices` and
+  `set_default_device`, list the connected units and change the default
+  target. Callers that omit `device_id` are unaffected: the default target
+  is the first device that connects, as before. Audio recording (`listen`
+  and device-driven capture) is still one gateway-wide slot: while one unit
+  is recording, a `listen` on another unit waits for the slot instead of
+  running in parallel.
 - Expose `set_charge_protection(enabled)`, `get_charge_protection`, and
   `set_charge_thresholds(on_below, off_above)` in `tools/list` and relay them
   to the device's `self.power.*` tools. Requires a firmware that includes the

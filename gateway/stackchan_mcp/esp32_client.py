@@ -61,6 +61,21 @@ _TOOL_LANES = {
     "self.get_device_status": "status",
 }
 
+_TOOL_LANE_NAMES = (
+    "servo",
+    "wifi",
+    "led",
+    "port_b",
+    "port_c",
+    "avatar",
+    "display",
+    "audio",
+    "camera",
+    "touch",
+    "status",
+    "default",
+)
+
 
 def _hardware_lane(tool_name: str) -> str:
     """Return the hardware lane used for per-peripheral dispatch ordering."""
@@ -68,6 +83,11 @@ def _hardware_lane(tool_name: str) -> str:
         if tool_name.startswith(prefix):
             return lane
     return "default"
+
+
+def _make_tool_lane_locks() -> dict[str, asyncio.Lock]:
+    """Create a fresh per-lane lock map for one device connection."""
+    return {name: asyncio.Lock() for name in _TOOL_LANE_NAMES}
 
 
 def _retrieve_future_exception(future: asyncio.Future[Any]) -> None:
@@ -147,6 +167,19 @@ class ESP32Connection:
         # payload). v2/v3 add a BinaryProtocol header that this gateway
         # does not yet wrap — see Issue follow-up to #70.
         self.protocol_version: int = 1
+        # Wall-clock time when this connection was registered (hello).
+        # Used by list_devices; None until the manager registers us.
+        self.connected_at: float | None = None
+        # Per-device serialisation for TTS / STT audio path. Concurrent
+        # ``say()`` / ``listen()`` on the same device must not interleave
+        # frames or yank the firmware out of speaking mid-utterance.
+        # See ESP32Manager docstring history: locks live on the
+        # connection so multi-device routing isolates audio paths.
+        self._tts_lock = asyncio.Lock()
+        self._listen_lock = self._tts_lock
+        # Per-hardware-lane locks: calls on different peripherals may
+        # overlap; same-lane calls stay ordered.
+        self._tool_lane_locks = _make_tool_lane_locks()
 
     @property
     def connected(self) -> bool:
@@ -163,6 +196,20 @@ class ESP32Connection:
     @property
     def avatar_render_sent(self) -> bool:
         return self._avatar_render_sent
+
+    @property
+    def tts_lock(self) -> asyncio.Lock:
+        """Lock guarding the TTS send sequence for this device."""
+        return self._tts_lock
+
+    @property
+    def listen_lock(self) -> asyncio.Lock:
+        """Lock guarding the STT capture sequence for this device.
+
+        Shares the TTS lock: the firmware aborts in-flight TTS on
+        listen.start, so the audio path is one serialised resource.
+        """
+        return self._listen_lock
 
     def _next_id(self) -> int:
         self._request_id += 1
@@ -448,10 +495,22 @@ class ESP32Manager:
     """Manages ESP32 device connections.
 
     Runs a WebSocket server that ESP32 devices connect to.
-    Currently supports a single device connection.
+    Holds multiple concurrent connections keyed by Device-Id, with
+    optional default-device routing for callers that omit device_id.
     """
 
     def __init__(self, notify_config: NotifyConfig | None = None):
+        # Active connections keyed by Device-Id header (MAC from firmware).
+        self._connections: dict[str, ESP32Connection] = {}
+        # Default routing target when tool callers omit device_id.
+        # Initially the first device that completes hello; changeable via
+        # set_default_device.
+        self._default_device_id: str | None = None
+        # Mirror of the default connection for backward-compatible
+        # single-device call sites (orchestrators, older tests that assign
+        # ``mgr._connection`` directly). Always kept in sync with the
+        # registry when connections are registered/removed through
+        # manager APIs.
         self._connection: ESP32Connection | None = None
         self._server: Any = None
         self._lock = asyncio.Lock()
@@ -459,16 +518,10 @@ class ESP32Manager:
         self._init_tasks: list[asyncio.Task] = []
         self._vision_url: str = ""
         self._vision_token: str = ""
-        # Per-device serialisation for TTS send sequences. Acquired by
-        # the orchestrator around the entire start → frames → stop
-        # block so concurrent ``say()`` invocations cannot interleave
-        # their Opus frames on the same WebSocket or overlap their
-        # ``tts.start``/``tts.stop`` notifications (which would yank
-        # the firmware out of ``kDeviceStateSpeaking`` mid-utterance
-        # and silently drop the remaining audio). The lock is scoped
-        # to the manager because the manager owns the device today —
-        # if multi-device support lands later, the lock should move
-        # onto :class:`ESP32Connection` instead.
+        # Fallback audio-path locks used when no device is connected
+        # (or a test fake lacks per-connection locks). Real devices use
+        # :attr:`ESP32Connection._tts_lock` / ``_listen_lock`` so each
+        # unit serialises its own audio path independently.
         self._tts_lock = asyncio.Lock()
         # Inbound STT capture (Issue #91) shares the TTS lock rather
         # than running on a separate one. The firmware's
@@ -477,13 +530,9 @@ class ESP32Manager:
         # ``kDeviceStateSpeaking`` → ``AbortSpeaking`` →
         # ``SetListeningMode(kListeningModeManualStop)``), so two
         # operations on the same device's audio path would
-        # otherwise step on each other: a ``listen()`` could yank a
-        # ``say()`` out of speaking mid-utterance, or a ``say()``
-        # could start streaming TTS frames into the buffer a
-        # concurrent ``listen()`` is capturing. Treating the audio
-        # path as a single resource makes the device's state machine
-        # observable from gateway code; if a full-duplex contract
-        # ever lands later the lock can split again.
+        # otherwise step on each other. Per-device locks live on
+        # :class:`ESP32Connection`; this manager-level pair is only
+        # the no-device fallback for property access.
         self._listen_lock = self._tts_lock
         # Device-driven listen capture (= wake word / button / LCD touch
         # paths on the firmware side that call ToggleChatState /
@@ -504,52 +553,246 @@ class ESP32Manager:
         # session (e.g., a fresh reconnection or an MCP-driven listen()
         # that already took the slot).
         self._device_driven_session_id: str | None = None
-        self._tool_lane_locks = {
-            "servo": asyncio.Lock(),
-            "wifi": asyncio.Lock(),
-            "led": asyncio.Lock(),
-            "port_b": asyncio.Lock(),
-            "port_c": asyncio.Lock(),
-            "avatar": asyncio.Lock(),
-            "display": asyncio.Lock(),
-            "audio": asyncio.Lock(),
-            "camera": asyncio.Lock(),
-            "touch": asyncio.Lock(),
-            "status": asyncio.Lock(),
-            "default": asyncio.Lock(),
-        }
+        # Fallback lane locks for test fakes that inject connections
+        # without a per-device ``_tool_lane_locks`` map. Real
+        # ESP32Connection instances carry their own locks.
+        self._tool_lane_locks = _make_tool_lane_locks()
 
     def set_notify_config(self, notify_config: NotifyConfig) -> None:
         """Replace the startup notification config used for future events."""
         self._notify_config = notify_config
 
+    def _sync_default_connection(self) -> None:
+        """Refresh ``_connection`` from ``_default_device_id`` / registry."""
+        if self._default_device_id is not None:
+            conn = self._connections.get(self._default_device_id)
+            if conn is not None:
+                self._connection = conn
+                return
+        # Default id missing or stale — pick first remaining, if any.
+        if self._connections:
+            self._default_device_id = next(iter(self._connections))
+            self._connection = self._connections[self._default_device_id]
+        else:
+            self._default_device_id = None
+            self._connection = None
+
+    def _register_connection(
+        self, connection: ESP32Connection, device_id: str
+    ) -> None:
+        """Register or replace a connection for ``device_id``.
+
+        Same device_id replaces the previous socket; different device_ids
+        coexist. First registered device becomes the default when none is set.
+        Caller must hold ``self._lock`` or accept races only in tests.
+        """
+        connection.device_id = device_id
+        if connection.connected_at is None:
+            connection.connected_at = time.time()
+        existing = self._connections.get(device_id)
+        if existing is not None and existing is not connection and existing.connected:
+            logger.warning(
+                "Replacing existing ESP32 connection for device=%s", device_id
+            )
+            existing.disconnect()
+        self._connections[device_id] = connection
+        if self._default_device_id is None:
+            self._default_device_id = device_id
+        if self._default_device_id == device_id:
+            self._connection = connection
+
+    def _unregister_connection(
+        self, connection: ESP32Connection, device_id: str
+    ) -> None:
+        """Drop ``connection`` from the registry if it is still current."""
+        current = self._connections.get(device_id)
+        if current is connection:
+            del self._connections[device_id]
+            if self._default_device_id == device_id:
+                self._sync_default_connection()
+            elif self._connection is connection:
+                self._connection = None
+
+    def list_devices(self) -> list[dict[str, Any]]:
+        """Return connected device_ids with connection metadata."""
+        devices: list[dict[str, Any]] = []
+        for device_id, conn in self._connections.items():
+            if not conn.connected:
+                continue
+            devices.append(
+                {
+                    "device_id": device_id,
+                    "connected_at": conn.connected_at,
+                    "session_id": conn.session_id,
+                    "initialized": conn.initialized,
+                    "is_default": device_id == self._default_device_id,
+                }
+            )
+        return devices
+
+    def set_default_device(self, device_id: str) -> dict[str, Any]:
+        """Switch the default routing target to ``device_id``.
+
+        Returns a result dict; never raises for unknown ids.
+        """
+        conn = self._connections.get(device_id)
+        if conn is None or not conn.connected:
+            return {
+                "ok": False,
+                "error": f"Unknown or disconnected device_id: {device_id}",
+            }
+        self._default_device_id = device_id
+        self._connection = conn
+        return {"ok": True, "default_device_id": device_id}
+
+    def _resolve_connection(
+        self, device_id: str | None
+    ) -> tuple[ESP32Connection | None, dict[str, Any] | None]:
+        """Pick a connected, initialized target for a tool call.
+
+        ``device_id is None`` → default destination (backward compatible).
+        Unknown / disconnected ids return an error dict, never raise.
+        """
+        if device_id is not None:
+            conn = self._connections.get(device_id)
+            if conn is None or not conn.connected:
+                return None, {
+                    "code": -32000,
+                    "message": f"Unknown or disconnected device_id: {device_id}",
+                }
+            if not conn.initialized:
+                return None, {"code": -32000, "message": "ESP32 not initialized"}
+            return conn, None
+
+        conn = self._connection
+        if conn is None or not conn.connected:
+            # Registry may have devices even if _connection was cleared
+            # by a legacy assignment; try default id / first live one.
+            if self._default_device_id:
+                conn = self._connections.get(self._default_device_id)
+            if conn is None or not conn.connected:
+                for candidate in self._connections.values():
+                    if candidate.connected:
+                        conn = candidate
+                        break
+            if conn is None or not conn.connected:
+                return None, {
+                    "code": -32000,
+                    "message": "No ESP32 device connected",
+                }
+        if not conn.initialized:
+            return None, {"code": -32000, "message": "ESP32 not initialized"}
+        return conn, None
+
+    def _lane_lock_for(
+        self, connection: ESP32Connection, lane: str
+    ) -> asyncio.Lock:
+        """Return the lane lock for ``connection``, with manager fallback."""
+        locks = getattr(connection, "_tool_lane_locks", None)
+        if isinstance(locks, dict) and lane in locks:
+            return locks[lane]
+        return self._tool_lane_locks[lane]
+
     @property
     def device_connected(self) -> bool:
-        return self._connection is not None and self._connection.connected
+        if self._connection is not None and self._connection.connected:
+            return True
+        return any(c.connected for c in self._connections.values())
 
     @property
     def connection(self) -> ESP32Connection | None:
         return self._connection
 
     @property
-    def tts_lock(self) -> asyncio.Lock:
-        """Per-device lock guarding the TTS send sequence.
+    def default_device_id(self) -> str | None:
+        return self._default_device_id
 
-        See :attr:`_tts_lock` for the rationale; the orchestrator wraps
-        the start → frames → stop block in ``async with`` on this lock.
+    @property
+    def tts_lock(self) -> asyncio.Lock:
+        """Lock guarding the TTS send sequence for the default device.
+
+        Proxies to the default connection's lock when one is present so
+        multi-device audio paths stay isolated; falls back to the
+        manager-level lock when no device is attached.
         """
+        conn = self._connection
+        if conn is not None:
+            lock = getattr(conn, "tts_lock", None)
+            if lock is not None:
+                return lock
         return self._tts_lock
 
     @property
     def listen_lock(self) -> asyncio.Lock:
-        """Per-device lock guarding the STT capture sequence.
+        """Lock guarding the STT capture sequence for the default device.
 
-        See :attr:`_listen_lock` for the rationale; the orchestrator
-        wraps the entire ``listen.start`` → wait → ``listen.stop``
-        block in ``async with`` on this lock so two concurrent
-        ``listen()`` calls cannot share the inbound recording slot.
+        Shares the default device's TTS lock (see
+        :class:`ESP32Connection`); falls back to the manager-level pair
+        when no device is attached.
         """
+        conn = self._connection
+        if conn is not None:
+            lock = getattr(conn, "listen_lock", None)
+            if lock is not None:
+                return lock
         return self._listen_lock
+
+    def connection_for(self, device_id: str | None = None) -> ESP32Connection | None:
+        """Return the connection for ``device_id`` (default device when None).
+
+        ``device_id=None`` returns exactly what the ``connection``
+        property returns today. An explicit id returns the matching
+        connected connection, or ``None`` if unknown/disconnected —
+        never raises.
+        """
+        if device_id is None:
+            return self._connection
+        conn = self._connections.get(device_id)
+        return conn if conn is not None and conn.connected else None
+
+    def tts_lock_for(self, device_id: str | None = None) -> asyncio.Lock:
+        """Return the TTS lock for ``device_id`` (default device when None).
+
+        Two different connected devices always get two different
+        ``asyncio.Lock`` objects; the same device consistently gets the
+        same lock.
+        """
+        conn = self.connection_for(device_id)
+        if conn is not None:
+            lock = getattr(conn, "tts_lock", None)
+            if lock is not None:
+                return lock
+        return self._tts_lock
+
+    def listen_lock_for(self, device_id: str | None = None) -> asyncio.Lock:
+        """Return the STT lock for ``device_id`` (default device when None)."""
+        conn = self.connection_for(device_id)
+        if conn is not None:
+            lock = getattr(conn, "listen_lock", None)
+            if lock is not None:
+                return lock
+        return self._listen_lock
+
+    def _target_connection(self, device_id: str | None) -> ESP32Connection:
+        """Resolve a send target, raising ``ConnectionError`` cleanly.
+
+        ``device_id=None`` reproduces the exact pre-phase2 no-arg
+        behaviour (checks only ``self._connection``). An explicit id
+        goes through :meth:`_resolve_connection`'s phase1 semantics and
+        never lets an unknown/unconnected id crash the caller with an
+        uncaught exception — it raises a plain ``ConnectionError``
+        instead, which orchestrator call sites already translate to a
+        clean ``RuntimeError``.
+        """
+        if device_id is None:
+            if not self._connection or not self._connection.connected:
+                raise ConnectionError("No ESP32 device connected")
+            return self._connection
+        conn, error = self._resolve_connection(device_id)
+        if error is not None:
+            raise ConnectionError(str(error.get("message", error)))
+        assert conn is not None
+        return conn
 
     async def start(
         self,
@@ -694,12 +937,10 @@ class ESP32Manager:
                     resp = HelloResponse(session_id=session_id)
                     await ws.send(resp.model_dump_json())
 
-                    # Register connection
+                    # Register connection. Multiple device_ids coexist;
+                    # only the same device_id replaces its previous socket.
                     async with self._lock:
-                        if self._connection and self._connection.connected:
-                            logger.warning("Replacing existing ESP32 connection")
-                            self._connection.disconnect()
-                        self._connection = connection
+                        self._register_connection(connection, device_id)
 
                     # Start initialization as a separate task so the read loop
                     # continues to pump messages (responses to initialize/tools_list)
@@ -851,8 +1092,7 @@ class ESP32Manager:
                 self._device_driven_session_id = None
             connection.disconnect()
             async with self._lock:
-                if self._connection is connection:
-                    self._connection = None
+                self._unregister_connection(connection, device_id)
 
     async def _init_device(self, connection: ESP32Connection, device_id: str) -> None:
         """Initialize MCP session with a newly connected device."""
@@ -1025,13 +1265,29 @@ class ESP32Manager:
                 )
 
     async def call_tool(
-        self, name: str, arguments: dict[str, Any]
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        device_id: str | None = None,
     ) -> ToolCallResult:
-        """Call a tool on the connected ESP32 device."""
-        result = await self.call_tools([(name, arguments)])
+        """Call a tool on a connected ESP32 device.
+
+        ``device_id`` selects the target connection. When omitted, the
+        default destination is used (first connected device, or the one
+        chosen via :meth:`set_default_device`).
+        """
+        result = await self.call_tools(
+            [(name, arguments)], device_id=device_id
+        )
         return result[0]
 
-    async def call_tools(self, calls: Sequence[ToolCall]) -> list[ToolCallResult]:
+    async def call_tools(
+        self,
+        calls: Sequence[ToolCall],
+        *,
+        device_id: str | None = None,
+    ) -> list[ToolCallResult]:
         """Call multiple ESP32 tools while preserving per-hardware ordering.
 
         Existing single-tool callers should continue to use ``call_tool``.
@@ -1039,21 +1295,17 @@ class ESP32Manager:
         hardware-independent peripherals, such as servo + LEDs + avatar.
         Calls sharing the same hardware lane are serialized; calls on
         different lanes are dispatched concurrently.
+
+        All calls in one batch target the same device (``device_id`` or
+        the default destination).
         """
         if not calls:
             return []
-        if not self._connection or not self._connection.connected:
-            return [
-                (None, {"code": -32000, "message": "No ESP32 device connected"})
-                for _ in calls
-            ]
-        if not self._connection.initialized:
-            return [
-                (None, {"code": -32000, "message": "ESP32 not initialized"})
-                for _ in calls
-            ]
+        connection, error = self._resolve_connection(device_id)
+        if error is not None:
+            return [(None, error) for _ in calls]
 
-        connection = self._connection
+        assert connection is not None
         return list(
             await asyncio.gather(
                 *(
@@ -1070,9 +1322,27 @@ class ESP32Manager:
         arguments: dict[str, Any],
     ) -> ToolCallResult:
         lane = _hardware_lane(name)
-        lock = self._tool_lane_locks[lane]
+        lock = self._lane_lock_for(connection, lane)
         async with lock:
-            if connection is not self._connection or not connection.connected:
+            if not connection.connected:
+                return None, {"code": -32000, "message": "ESP32 not connected"}
+            # Reject if this connection was replaced for its device_id.
+            did = getattr(connection, "device_id", None)
+            if did is not None and did in self._connections:
+                if self._connections[did] is not connection:
+                    return None, {
+                        "code": -32000,
+                        "message": "ESP32 not connected",
+                    }
+            elif self._connections and connection not in self._connections.values():
+                return None, {"code": -32000, "message": "ESP32 not connected"}
+            elif (
+                not self._connections
+                and self._connection is not None
+                and connection is not self._connection
+            ):
+                # Legacy single-connection path (tests inject via
+                # ``mgr._connection`` without populating the registry).
                 return None, {"code": -32000, "message": "ESP32 not connected"}
             return await connection.call_tool(name, arguments)
 
@@ -1084,62 +1354,88 @@ class ESP32Manager:
         checksum: str,
         expected_size: int,
         timeout: float = 60.0,
+        device_id: str | None = None,
     ) -> dict[str, Any]:
         """Forward an avatar_set_fetch to the device and await the reply.
 
         Phase 4.5 avatar (saiverse-stackchan-addon). Returns a dict with
         keys {ok, checksum, error}; ok=False is returned with a synthetic
         error when no device is connected (rather than raising) so the
-        MCP tool surfaces a clean error JSON to the caller.
+        MCP tool surfaces a clean error JSON to the caller. ``device_id``
+        selects the target device using phase1's ``_resolve_connection``
+        semantics; omitted (None) reproduces the exact pre-phase2
+        default-connection behaviour.
         """
-        if not self._connection or not self._connection.connected:
-            return {"ok": False, "checksum": checksum, "error": "no_device"}
-        return await self._connection.send_avatar_set_fetch(
+        if device_id is None:
+            if not self._connection or not self._connection.connected:
+                return {"ok": False, "checksum": checksum, "error": "no_device"}
+            return await self._connection.send_avatar_set_fetch(
+                url, token, mode, checksum, expected_size, timeout
+            )
+        conn, error = self._resolve_connection(device_id)
+        if error is not None:
+            return {
+                "ok": False,
+                "checksum": checksum,
+                "error": str(error.get("message", error)),
+            }
+        assert conn is not None
+        return await conn.send_avatar_set_fetch(
             url, token, mode, checksum, expected_size, timeout
         )
 
-    async def send_audio_frame(self, opus_frame: bytes) -> None:
+    async def send_audio_frame(
+        self, opus_frame: bytes, device_id: str | None = None
+    ) -> None:
         """Push a single Opus frame to the connected device.
 
         Used by the TTS pipeline to deliver synthesised audio. Raises
-        :class:`ConnectionError` if no device is currently attached so
-        the orchestrator can surface a clean error to the MCP client
-        instead of silently dropping audio.
+        :class:`ConnectionError` if the target device is not currently
+        attached so the orchestrator can surface a clean error to the
+        MCP client instead of silently dropping audio. ``device_id``
+        selects the target; omitted (None) reproduces the exact
+        pre-phase2 default-connection behaviour.
         """
-        if not self._connection or not self._connection.connected:
-            raise ConnectionError("No ESP32 device connected")
-        await self._connection.send_audio_frame(opus_frame)
+        connection = self._target_connection(device_id)
+        await connection.send_audio_frame(opus_frame)
 
-    async def send_tts_state(self, state: str) -> None:
+    async def send_tts_state(self, state: str, device_id: str | None = None) -> None:
         """Send a TTS state notification (``start`` / ``stop`` / ...).
 
         Required around audio frame egress so the device transitions
         into ``kDeviceStateSpeaking`` and back; see
         :meth:`ESP32Connection.send_tts_state` for the full rationale.
+        ``device_id`` selects the target; omitted (None) reproduces the
+        exact pre-phase2 default-connection behaviour.
         """
-        if not self._connection or not self._connection.connected:
-            raise ConnectionError("No ESP32 device connected")
-        await self._connection.send_tts_state(state)
+        connection = self._target_connection(device_id)
+        await connection.send_tts_state(state)
 
     async def send_listen_state(
         self,
         state: str,
         mode: str = "manual",
         profile: str = "voice",
+        device_id: str | None = None,
     ) -> None:
         """Send a listen state notification to put the device into /
         out of listening mode (Issue #91).
 
         See :meth:`ESP32Connection.send_listen_state` for the wire
-        format and the firmware-side dispatch.
+        format and the firmware-side dispatch. ``device_id`` selects the
+        target; omitted (None) reproduces the exact pre-phase2
+        default-connection behaviour.
         """
-        if not self._connection or not self._connection.connected:
-            raise ConnectionError("No ESP32 device connected")
-        await self._connection.send_listen_state(state, mode=mode, profile=profile)
+        connection = self._target_connection(device_id)
+        await connection.send_listen_state(state, mode=mode, profile=profile)
 
     def get_status(self) -> dict[str, Any]:
-        """Get current connection status."""
-        if not self._connection or not self._connection.connected:
+        """Get current connection status for the default device.
+
+        Multi-device inventory is available via :meth:`list_devices`.
+        """
+        conn = self._connection
+        if conn is None or not conn.connected:
             return {
                 "connected": False,
                 "device_id": None,
@@ -1147,12 +1443,12 @@ class ESP32Manager:
             }
         return {
             "connected": True,
-            "device_id": self._connection.device_id,
+            "device_id": conn.device_id,
             # Changes on every WebSocket (re)connection. Lets pollers detect
             # a device reboot even when the reconnect lands between polls and
             # the connected flag never reads false (e.g. a firmware reflash).
-            "session_id": self._connection.session_id,
-            "initialized": self._connection.initialized,
-            "tools_count": len(self._connection.tools),
-            "tools": [t.get("name", "") for t in self._connection.tools],
+            "session_id": conn.session_id,
+            "initialized": conn.initialized,
+            "tools_count": len(conn.tools),
+            "tools": [t.get("name", "") for t in conn.tools],
         }

@@ -34,7 +34,9 @@ class FakeESP32:
             "device": "fake-stackchan",
         }
 
-    async def call_tool(self, name: str, arguments: dict) -> tuple[dict, None]:
+    async def call_tool(
+        self, name: str, arguments: dict, *, device_id: str | None = None
+    ) -> tuple[dict, None]:
         self.calls.append((name, arguments))
         return {
             "content": [
@@ -467,7 +469,14 @@ def test_bypass_tools_include_status_and_follow_pose_stream() -> None:
 
 @pytest.mark.asyncio
 async def test_bypass_tool_get_status_does_not_enter_dispatcher() -> None:
-    assert BYPASS_TOOLS == frozenset({"get_status", "stackchan_follow_pose_stream"})
+    assert BYPASS_TOOLS == frozenset(
+        {
+            "get_status",
+            "stackchan_follow_pose_stream",
+            "list_devices",
+            "set_default_device",
+        }
+    )
     queue = CommandQueue(capacity=2)
 
     async def dispatch(_item: QueueItem):

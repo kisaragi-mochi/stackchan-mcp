@@ -77,7 +77,7 @@ async def test_get_head_angles_relays_to_esp32(monkeypatch):
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, name, arguments):
+        async def call_tool(self, name, arguments, *, device_id=None):
             calls.append((name, arguments))
             return {
                 "content": [
@@ -370,7 +370,7 @@ async def test_gateway_config_get_relays_to_esp32(monkeypatch):
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, name, arguments):
+        async def call_tool(self, name, arguments, *, device_id=None):
             calls.append((name, arguments))
             return {
                 "content": [
@@ -414,7 +414,7 @@ async def test_gateway_config_set_relays_optional_strings(monkeypatch):
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, name, arguments):
+        async def call_tool(self, name, arguments, *, device_id=None):
             calls.append((name, arguments))
             return {
                 "content": [
@@ -500,7 +500,7 @@ async def test_set_touch_sensor_enabled_relays_to_esp32(monkeypatch):
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, name, arguments):
+        async def call_tool(self, name, arguments, *, device_id=None):
             calls.append((name, arguments))
             return {
                 "content": [
@@ -545,7 +545,7 @@ async def test_get_touch_sensor_enabled_relays_to_esp32(monkeypatch):
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, name, arguments):
+        async def call_tool(self, name, arguments, *, device_id=None):
             calls.append((name, arguments))
             return {
                 "content": [
@@ -844,7 +844,7 @@ async def test_set_mouth_sequence_relays_steps_as_json_string(monkeypatch):
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, name, arguments):
+        async def call_tool(self, name, arguments, *, device_id=None):
             calls.append((name, arguments))
             return {
                 "content": [
@@ -1021,7 +1021,7 @@ async def test_i2c_read_relays_scl_speed_hz_to_firmware(monkeypatch):
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, tool_name, arguments):
+        async def call_tool(self, tool_name, arguments, *, device_id=None):
             calls.append((tool_name, arguments))
             return {
                 "content": [
@@ -1058,7 +1058,7 @@ def _make_ws2812_fake_gateway(monkeypatch):
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, tool_name, arguments):
+        async def call_tool(self, tool_name, arguments, *, device_id=None):
             calls.append((tool_name, arguments))
             return {
                 "content": [
@@ -1362,7 +1362,7 @@ def _make_fake_gateway(monkeypatch):
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, tool_name, arguments):
+        async def call_tool(self, tool_name, arguments, *, device_id=None):
             calls.append((tool_name, arguments))
             return {
                 "content": [
