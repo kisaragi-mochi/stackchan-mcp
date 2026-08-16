@@ -982,7 +982,7 @@ See [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80) for the low
 ## Known issues
 
 - The servo bus may hang on large-angle abrupt reversals (e.g. +60° → -60°). A fix is in progress via Motion::update_task interpolation.
-- The touch sensor (Si12T) occasionally drops tap events. Sensitivity register tuning has room to improve here.
+- The touch sensor (Si12T) reads three head zones whose shell coupling varies by unit; if touch feels off, check the `sens12/sens34` values in the boot log and adjust the per-channel thresholds in `stackchan.cc`.
 
 ## License
 
