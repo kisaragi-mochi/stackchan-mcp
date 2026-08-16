@@ -39,6 +39,7 @@ from typing import Any
 
 from .audio_utils import (
     DEVICE_SAMPLE_RATE,
+    _decode_mp3_to_pcm16_mono,
     resample_pcm16_linear,
 )
 from .base import TTSEngine
@@ -59,36 +60,6 @@ DEFAULT_IRODORI_STEPS = "24"
 #: Synthesis on a cold backend can take several seconds, so this errs on
 #: the generous side (matching the VOICEVOX engine's default).
 DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
-
-
-def _decode_mp3_to_pcm16_mono(mp3_bytes: bytes) -> tuple[int, bytes]:
-    """Decode an MP3 blob into ``(sample_rate, raw_pcm)``.
-
-    The PCM is returned as signed 16-bit little-endian mono. ``miniaudio``
-    is imported lazily here so the rest of the TTS framework — and the
-    Irodori module itself — stays importable when the ``[tts-irodori]``
-    extra is not installed; the failure only surfaces when synthesis is
-    actually attempted. Callers get a clear ``RuntimeError`` that points
-    at the right install command.
-
-    miniaudio decodes natively to interleaved signed-16-bit samples, so
-    we ask for mono directly and let it downmix; only the sample rate may
-    differ from the device's, which the caller resamples.
-    """
-    try:
-        import miniaudio  # type: ignore[import-not-found]
-    except ImportError as exc:  # pragma: no cover - exercised via integration
-        raise RuntimeError(
-            "miniaudio is not installed. Install with "
-            "'pip install stackchan-mcp[tts-irodori]' to enable Irodori support."
-        ) from exc
-
-    decoded = miniaudio.decode(
-        mp3_bytes,
-        output_format=miniaudio.SampleFormat.SIGNED16,
-        nchannels=1,
-    )
-    return decoded.sample_rate, decoded.samples.tobytes()
 
 
 class IrodoriEngine(TTSEngine):

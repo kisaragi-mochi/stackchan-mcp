@@ -2296,7 +2296,8 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         "voice": {
                             "type": "string",
                             "description": (
-                                "Engine identifier (e.g. 'voicevox', 'irodori'). "
+                                "Engine identifier (e.g. 'voicevox', 'irodori', "
+                                "'elevenlabs'). "
                                 "Default 'voicevox'."
                             ),
                             "default": "voicevox",

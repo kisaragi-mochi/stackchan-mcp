@@ -76,6 +76,13 @@ tts-irodori = [
     "stackchan-mcp[tts]",
     "miniaudio>=1.59",
 ]
+# ElevenLabs is a cloud HTTP synthesis service that returns MP3. Same
+# dependency shape as Irodori: the base `[tts]` extra (httpx + opuslib)
+# plus `miniaudio` to decode the MP3 response to PCM.
+tts-elevenlabs = [
+    "stackchan-mcp[tts]",
+    "miniaudio>=1.59",
+]
 
 # Phase 4 STT — see Issue #91.
 # The base `stt` extra carries `opuslib` for decoding the device's

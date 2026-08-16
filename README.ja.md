@@ -543,6 +543,43 @@ export STACKCHAN_TTS_ENGINE=irodori
 `STACKCHAN_TTS_ENGINE` 未設定なら VOICEVOX がデフォルトのままで、
 明示的な `voice` 引数は常にデフォルトを上書きします。
 
+#### 別エンジン: ElevenLabs
+
+ElevenLabs はクラウド TTS エンジンで、同じ `say` パイプラインに
+差し込めます（MP3 応答を 16 kHz モノラル PCM にデコードし、Opus に
+エンコード）。VOICEVOX/Irodori と違い自前ホストは不要 —
+[ElevenLabs](https://elevenlabs.io/) のアカウントと API キーが必要で、
+`say` のたびに ElevenLabs のクォータを消費します。
+
+extra をインストール:
+
+```bash
+pip install 'stackchan-mcp[tts-elevenlabs]'
+```
+
+環境変数で設定（キーは環境変数からのみ読み取り — コミット厳禁）:
+
+| 環境変数 | デフォルト | 備考 |
+|---|---|---|
+| `ELEVENLABS_API_KEY` | _(必須)_ | ElevenLabs の API キー。`STACKCHAN_ELEVENLABS_KEY` も受け付け、両方あれば後者が優先 |
+| `STACKCHAN_ELEVEN_VOICE_<NAME>` | _(なし)_ | ボイス表: 変数 1 つが話者 1 人。例 `STACKCHAN_ELEVEN_VOICE_RACHEL=<voice id>` で `speaker_name="rachel"` が使える |
+| `STACKCHAN_ELEVEN_DEFAULT_SPEAKER` | _(なし)_ | `speaker_name` 省略時の話者。未設定でボイスが 1 つだけならそれがデフォルト |
+| `STACKCHAN_ELEVEN_MODEL` | `eleven_v3` | ElevenLabs のモデル ID |
+
+呼び出しごとに ElevenLabs を選択 — 話者の指定は文字列の
+`speaker_name`（数値の `speaker_id` は VOICEVOX 形）。生の
+ElevenLabs voice ID もそのまま通ります:
+
+```
+say(text="Hello!", voice="elevenlabs", speaker_name="rachel")
+```
+
+またはデフォルトエンジンに:
+
+```bash
+export STACKCHAN_TTS_ENGINE=elevenlabs
+```
+
 ### 5. オプション: STT セットアップ (faster-whisper)
 
 デバイスに聞いてもらうには、`[stt-*]` extras のどれかをインストール
