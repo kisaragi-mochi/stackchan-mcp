@@ -553,6 +553,26 @@ public:
         if (!SafeReadReg(REG_CTRL, &ctrl)) {
             return false;
         }
+        // This driver never configured the sensitivity registers, so the
+        // chip always ran its power-on default thresholds — through the
+        // head shell that leaves the pads nearly unresponsive (a 20 s
+        // continuous stroke registered a single hit on a stock unit).
+        // TSM12-compatible mapping (TSM12 datasheet;
+        // GPTechinno/TSM12-Arduino-Library): registers 0x02..0x07 hold
+        // two channels each, 4 bits per channel = HL << 3 | M, where M
+        // picks the trigger threshold (0 = 0.50 % most sensitive …
+        // 7 = 3.55 % least). Only TS1..TS3 are wired on this board.
+        // Tuned on production hardware: CH1 sits under the rear-top of
+        // the shell where the coupling noise floor is higher — at 0.50 %
+        // it false-fires continuously with nobody touching (20/20 idle
+        // samples), while 1.20 % misses light taps, so it gets 0.90 %;
+        // the other channels are quiet at the most sensitive 0.50 %.
+        if (!SafeWriteReg(REG_SENS_CH12, 0x02)) {
+            return false;
+        }
+        if (!SafeWriteReg(REG_SENS_CH34, 0x00)) {
+            return false;
+        }
         // CTRL bit1 = SLEEP. Clear it; bit1:0 must hold 1 per datasheet
         // ("CTRL Bit1, Bit0 = 1 1" reset value), so write 0b00000011.
         if (!SafeWriteReg(REG_CTRL, 0x03)) {
@@ -568,7 +588,16 @@ public:
             ESP_LOGW("Si12T", "Output1 read 0xFF (likely no device)");
             return false;
         }
-        ESP_LOGI("Si12T", "init OK: ctrl=0x%02X out1=0x%02X (sleep cleared)", ctrl, out1);
+        // Read the sensitivity registers back so module/clone variation
+        // shows up in the boot log instead of only as "touch feels off".
+        uint8_t sens12 = 0;
+        uint8_t sens34 = 0;
+        SafeReadReg(REG_SENS_CH12, &sens12);
+        SafeReadReg(REG_SENS_CH34, &sens34);
+        ESP_LOGI("Si12T",
+                 "init OK: ctrl=0x%02X out1=0x%02X sens12=0x%02X sens34=0x%02X "
+                 "(sleep cleared)",
+                 ctrl, out1, sens12, sens34);
         return true;
     }
 
@@ -591,6 +620,10 @@ public:
 private:
     static constexpr uint8_t REG_CTRL    = 0x09;  // CTRL, SLEEP bit etc.
     static constexpr uint8_t REG_OUTPUT1 = 0x10;  // CH1..CH4 packed (2bpp)
+    // Sensitivity registers (TSM12-compatible): two channels per
+    // register, low nibble = lower-numbered channel.
+    static constexpr uint8_t REG_SENS_CH12 = 0x02;  // CH1 (low 4 bit) + CH2
+    static constexpr uint8_t REG_SENS_CH34 = 0x03;  // CH3 (low 4 bit) + CH4
 
     bool SafeReadReg(uint8_t reg, uint8_t* out) {
         esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, out, 1, 100);
@@ -796,11 +829,11 @@ private:
     // Phase 7: Si12T head-touch sensing.
     // Polling every TOUCH_POLL_MS samples Output1 (CH1..CH3 -> 3 head zones).
     // Edge detection on the OR of the three zones produces TAP / STROKE
-    // gestures based on hold duration:
-    //   duration <  TAP_MAX_MS (400 ms)  -> TAP    -> face=surprised
-    //   duration >= STROKE_MIN_MS (600 ms) -> STROKE -> face=embarrassed + servo wobble
-    //   400 <= duration < 600 ms         -> treated as TAP (greyzone)
-    // Reactions auto-revert to "idle" after REACTION_HOLD_MS (3 s). A
+    // gestures based on hold duration (measured between the first samples
+    // of the press and release states, not the debounce-confirmed edges):
+    //   duration <  STROKE_MIN_MS (400 ms) -> TAP    -> face=surprised
+    //   duration >= STROKE_MIN_MS (400 ms) -> STROKE -> face=embarrassed + servo wobble
+    // Reactions auto-revert to "idle" after REACTION_HOLD_MS. A
     // post-reaction COOLDOWN_MS lock-out prevents one head-pat from firing
     // a chain of events.
     enum class TouchEvent : uint8_t {
@@ -808,7 +841,7 @@ private:
         TAP,
         STROKE,
     };
-    static constexpr int TOUCH_POLL_MS    = 100;  // 100 Hz polling
+    static constexpr int TOUCH_POLL_MS    = 100;  // 10 Hz polling (100 ms period)
     static constexpr int TAP_MAX_MS       = 400;
     static constexpr int STROKE_MIN_MS    = 400;  // was 600; lowered because
                                                   // finger-glide between zones
@@ -816,12 +849,23 @@ private:
                                                   // inject brief "all-false"
                                                   // gaps that cut a real stroke
                                                   // short of 600 ms.
-    static constexpr int REACTION_HOLD_MS = 3000;
-    static constexpr int COOLDOWN_MS      = 800;  // post-reaction noise gate
-    // With 2-sample debounce this gives ~200 ms confirm latency, fast enough
-    // to catch a quick "pon" (~200 ms press) while still rejecting single-
-    // sample jitter. Was 200 ms polling -> 400 ms confirm, which silently
-    // dropped most short taps.
+    static constexpr int REACTION_HOLD_MS = 1200;  // was 3000; snap back fast
+                                                   // enough that the face
+                                                   // tracks repeated touches.
+                                                   // The 4-step stroke wobble
+                                                   // (~1400 ms) may finish
+                                                   // just after the face
+                                                   // reverts — intentional,
+                                                   // responsiveness wins.
+    static constexpr int COOLDOWN_MS      = 250;  // was 800; a gate that long
+                                                  // swallowed the second tap
+                                                  // of a quick tap-tap-tap
+                                                  // sequence outright
+    // Press confirm is 1 sample (100 ms): a quick "pon" tap can be shorter
+    // than two polls, and the previous 2-sample confirm silently dropped it
+    // (issue #2). Release keeps the 4-sample debounce, so Si12T
+    // auto-recalibration blips and finger-glide gaps still cannot cut a
+    // stroke short.
     static constexpr int SERVO_WOBBLE_STEP_MS = 350;  // was 200; SCS0009 needs
                                                        // ~125 ms to physically
                                                        // travel ±20°, plus the
@@ -841,7 +885,9 @@ private:
     bool touch_pressed_prev_ = false;          // last sample (debounced)
     bool touch_pressed_pending_ = false;       // candidate awaiting confirm
     int  touch_pending_count_ = 0;             // consecutive samples matching
-    uint64_t touch_press_start_us_ = 0;        // when pressed_prev_ went true
+    uint64_t touch_press_start_us_ = 0;        // first sample of the press
+    uint64_t touch_pending_since_us_ = 0;      // first sample of current pending state
+    bool touch_press_suppressed_ = false;      // press began during cooldown
     uint64_t cooldown_until_us_ = 0;           // ignore press until this ts
 
     // Last reported event for MCP get_touch_state.
@@ -4650,8 +4696,9 @@ private:
         Application::GetInstance().SendStackChanEvent("touch", "stroke", duration_ms);
     }
 
-    // 200 ms periodic poll. Reads the sensor, applies a 2-sample debounce on
-    // the OR of the three head zones, and emits TAP/STROKE on falling edges.
+    // 100 ms periodic poll. Reads the sensor, applies an asymmetric
+    // 1-sample press / 4-sample release debounce on the OR of the three
+    // head zones, and emits TAP/STROKE on falling edges.
     static void TouchPollCb(void* arg) {
         StackChanBoard* self = static_cast<StackChanBoard*>(arg);
         self->TouchPollTick();
@@ -4677,7 +4724,7 @@ private:
         }
 
         // Asymmetric debounce:
-        //   press   confirm = 2 samples ( 200 ms) — fast tap detection
+        //   press   confirm = 1 sample  ( 100 ms) — fast tap detection
         //   release confirm = 4 samples ( 400 ms) — bridges Si12T recalibration
         //                                            and finger-glide gaps that
         //                                            otherwise cut a stroke
@@ -4688,10 +4735,53 @@ private:
         if (any_pressed == touch_pressed_pending_) {
             touch_pending_count_++;
         } else {
+            const uint64_t flip_us = esp_timer_get_time();
+            if (any_pressed && touch_pressed_prev_ && touch_pending_count_ >= 2) {
+                // Re-press after a >=2-sample gap while the release was
+                // still awaiting its 4-sample confirmation. A 1-sample gap
+                // is Si12T recalibration / finger-glide noise (stay sticky,
+                // strokes must not be cut short), but a longer gap means
+                // the user really let go — without this branch two quick
+                // taps merge into one long press and classify as a stroke.
+                // If the pre-gap segment was tap-shaped, emit that tap now
+                // and start a new gesture at this press. A tolerated
+                // >=2-sample blip inside a real (>=STROKE_MIN_MS) stroke
+                // still merges — with a 10 Hz binary OR'd signal the two
+                // cases are indistinguishable, and cutting strokes short
+                // is the worse failure.
+                uint64_t segment_ms =
+                    (touch_pending_since_us_ - touch_press_start_us_) / 1000ULL;
+                if (segment_ms < STROKE_MIN_MS) {
+                    // Evaluate against the cooldown as it stood before this
+                    // emit — the fresh cooldown set below must not count
+                    // against the new press we are about to start.
+                    const bool in_old_cooldown = flip_us < cooldown_until_us_;
+                    if (!touch_press_suppressed_ && !in_old_cooldown) {
+                        HandleTap(segment_ms);
+                        cooldown_until_us_ =
+                            flip_us + (uint64_t)COOLDOWN_MS * 1000ULL;
+                    }
+                    touch_press_suppressed_ = in_old_cooldown;
+                    touch_press_start_us_ = flip_us;
+                    press_start_zones_[0] = s.zone[0];
+                    press_start_zones_[1] = s.zone[1];
+                    press_start_zones_[2] = s.zone[2];
+                    press_start_output1_raw_ = s.output1_raw;
+                }
+            }
             touch_pending_count_ = 1;
             touch_pressed_pending_ = any_pressed;
+            // First sample of the new state. Gesture duration is measured
+            // between these candidate timestamps rather than the
+            // debounce-confirmed edges: the 4-sample release confirm
+            // would otherwise inflate every gesture by ~400 ms, pushing
+            // even the quickest tap past STROKE_MIN_MS.
+            touch_pending_since_us_ = flip_us;
         }
-        const int needed = touch_pressed_pending_ ? 2 : 4;
+        const int needed = touch_pressed_pending_ ? 1 : 4;  // press 1 sample
+                                                            // (see constants
+                                                            // above), release
+                                                            // stays 4
         if (touch_pending_count_ < needed) {
             return;  // not yet debounced
         }
@@ -4717,24 +4807,34 @@ private:
             press_start_output1_raw_ = s.output1_raw;
             if (now_us < cooldown_until_us_) {
                 // Suppress press event while in post-reaction cooldown.
+                // The flag (not a later cooldown comparison) marks the
+                // gesture as dropped: the 4-sample release confirm can
+                // land after the cooldown expires, so checking the clock
+                // at release time would let a suppressed press emit.
+                touch_press_suppressed_ = true;
                 touch_pressed_prev_ = now;
-                touch_press_start_us_ = now_us;
+                touch_press_start_us_ = touch_pending_since_us_;
                 return;
             }
+            touch_press_suppressed_ = false;
             touch_pressed_prev_ = true;
-            touch_press_start_us_ = now_us;
+            touch_press_start_us_ = touch_pending_since_us_;
         } else {
-            // Falling edge: classify by hold duration.
+            // Falling edge: classify by hold duration. The press ended at
+            // the first no-touch sample (touch_pending_since_us_), not at
+            // this confirmation point ~300-400 ms later — use the former
+            // so a quick tap measures as a tap.
             touch_pressed_prev_ = false;
-            uint64_t duration_ms = (now_us - touch_press_start_us_) / 1000ULL;
-            if (now_us < cooldown_until_us_) {
-                // We were in cooldown when pressed — drop the release event too.
+            uint64_t duration_ms =
+                (touch_pending_since_us_ - touch_press_start_us_) / 1000ULL;
+            if (touch_press_suppressed_) {
+                // The press began during cooldown — drop its release too.
+                touch_press_suppressed_ = false;
                 return;
             }
             if (duration_ms >= STROKE_MIN_MS) {
                 HandleStroke(duration_ms);
             } else {
-                // Treat the 400-600 ms grey zone as TAP.
                 HandleTap(duration_ms);
             }
             cooldown_until_us_ = now_us + (uint64_t)COOLDOWN_MS * 1000ULL;
