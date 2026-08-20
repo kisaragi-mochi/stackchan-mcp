@@ -629,6 +629,7 @@ async def listen_and_transcribe(
                 motion,
                 motion_saved_angles,
                 succeeded=succeeded,
+                device_id=device_id,
             )
             if cleanup_error is not None:
                 if primary_exc is not None:
