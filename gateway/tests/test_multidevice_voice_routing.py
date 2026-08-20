@@ -253,6 +253,17 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _assert_no_device_traffic(
+    testcase: unittest.TestCase, conn: _RecordingConnection, *, label: str
+) -> None:
+    """Fail unless *conn* received no tool/send traffic (non-target device)."""
+    testcase.assertEqual(conn.calls, [], msg=f"{label}.calls")
+    testcase.assertEqual(conn.tts_states, [], msg=f"{label}.tts_states")
+    testcase.assertEqual(conn.listen_states, [], msg=f"{label}.listen_states")
+    testcase.assertEqual(conn.audio_frames, [], msg=f"{label}.audio_frames")
+    testcase.assertEqual(conn.avatar_fetches, [], msg=f"{label}.avatar_fetches")
+
+
 # ---------------------------------------------------------------------------
 # ESP32Manager primitives
 # ---------------------------------------------------------------------------
@@ -442,8 +453,7 @@ class TestSynthesizeAndSendDeviceRouting(unittest.TestCase):
             self.assertTrue(result["spoke"])
             self.assertEqual(b.tts_states, ["start", "stop"])
             self.assertEqual(b.audio_frames, [b"op1", b"op2"])
-            self.assertEqual(a.tts_states, [])
-            self.assertEqual(a.audio_frames, [])
+            _assert_no_device_traffic(self, a, label="non-target a")
 
         _run(scenario())
 
@@ -466,13 +476,14 @@ class TestSynthesizeAndSendDeviceRouting(unittest.TestCase):
                 tts_orchestrator.encode_opus_frames = original_encode
 
             self.assertEqual(a.tts_states, ["start", "stop"])
-            self.assertEqual(b.tts_states, [])
+            self.assertEqual(a.audio_frames, [b"op1"])
+            _assert_no_device_traffic(self, b, label="non-target b")
 
         _run(scenario())
 
     def test_say_pipeline_unknown_device_id_raises_runtime_error(self) -> None:
         async def scenario() -> None:
-            mgr, _a, _b = _two_device_manager()
+            mgr, a, b = _two_device_manager()
             gateway = _FakeGateway(mgr)
             registry = TTSRegistry()
             registry.register(_FakeTTSEngine())
@@ -483,6 +494,8 @@ class TestSynthesizeAndSendDeviceRouting(unittest.TestCase):
                     registry=registry,
                     device_id="no-such-device",
                 )
+            _assert_no_device_traffic(self, a, label="connected a")
+            _assert_no_device_traffic(self, b, label="connected b")
 
         _run(scenario())
 
@@ -508,13 +521,13 @@ class TestListenAndTranscribeDeviceRouting(unittest.TestCase):
                 stt_orchestrator.decode_opus_frames = original_decode
 
             self.assertEqual(b.listen_states, [("start", "manual"), ("stop", "manual")])
-            self.assertEqual(a.listen_states, [])
+            _assert_no_device_traffic(self, a, label="non-target a")
 
         _run(scenario())
 
     def test_listen_pipeline_unknown_device_id_raises_runtime_error(self) -> None:
         async def scenario() -> None:
-            mgr, _a, _b = _two_device_manager()
+            mgr, a, b = _two_device_manager()
             gateway = _FakeGateway(mgr)
             registry = STTRegistry()
             registry.register(_FakeSTTEngine())
@@ -525,6 +538,40 @@ class TestListenAndTranscribeDeviceRouting(unittest.TestCase):
                     registry=registry,
                     device_id="no-such-device",
                 )
+            _assert_no_device_traffic(self, a, label="connected a")
+            _assert_no_device_traffic(self, b, label="connected b")
+
+        _run(scenario())
+
+    def test_listen_pipeline_face_motion_targets_only_the_explicit_device(self) -> None:
+        """face-only motion must not restore the idle face on the default unit."""
+
+        async def scenario() -> None:
+            mgr, a, b = _two_device_manager()
+            gateway = _FakeGateway(mgr)
+            registry = STTRegistry()
+            registry.register(_FakeSTTEngine())
+
+            original_decode = stt_orchestrator.decode_opus_frames
+            stt_orchestrator.decode_opus_frames = lambda frames: b""
+            try:
+                await stt_orchestrator.listen_and_transcribe(
+                    {"duration_ms": 100, "engine": "fakestt", "motion": "face-only"},
+                    gateway=gateway,
+                    registry=registry,
+                    device_id="dev-b",
+                )
+            finally:
+                stt_orchestrator.decode_opus_frames = original_decode
+
+            self.assertEqual(b.listen_states, [("start", "manual"), ("stop", "manual")])
+            self.assertEqual(
+                [name for name, _args in b.calls],
+                ["self.display.set_avatar", "self.display.set_avatar"],
+            )
+            self.assertEqual(b.calls[0][1], {"face": "thinking"})
+            self.assertEqual(b.calls[1][1], {"face": "idle"})
+            _assert_no_device_traffic(self, a, label="non-target a")
 
         _run(scenario())
 
