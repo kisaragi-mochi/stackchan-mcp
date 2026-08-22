@@ -30,6 +30,12 @@ documented-only.
 
 ## [Unreleased]
 
+### Docs
+
+- Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
+  frame-geometry consistency, full-frame exports from layered sources,
+  the avatar-set fetch window, and blink cadence tuning.
+  
 ### Gateway
 
 - `get_status` now reports the WebSocket `session_id` alongside the
