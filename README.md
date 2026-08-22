@@ -607,6 +607,67 @@ export STACKCHAN_TTS_ENGINE=irodori
 VOICEVOX remains the default when `STACKCHAN_TTS_ENGINE` is unset, and an
 explicit `voice` argument always overrides the default.
 
+#### Alternative engine: Fish Audio
+
+[Fish Audio](https://fish.audio) is a hosted TTS service with strong
+English voices and user-trainable voice models, which makes it a
+practical alternative to VOICEVOX (Japanese-only by default) for English
+deployments.
+
+It is a **third-party cloud service**: the text passed to `say` leaves
+this machine and is sent to Fish Audio's servers to be synthesised.
+Review [Fish Audio's terms and pricing](https://fish.audio) before
+sending anything you would not want to share with them, and prefer a
+local engine such as VOICEVOX for sensitive utterances.
+
+Unlike Irodori, this engine needs **no audio decoder**: the Fish Audio
+API returns 16-bit mono PCM/WAV at a caller-chosen sample rate, and the
+engine asks for 16 kHz — exactly what the device's Opus decoder expects.
+So there is no `miniaudio` (Irodori) and no `ffmpeg` (Edge TTS)
+dependency, and the extra is a convenience alias over `[tts]`:
+
+```bash
+pip install 'stackchan-mcp[tts-fish-audio]'
+```
+
+The `mp3` and `opus` response formats are deliberately unsupported —
+consuming them would pull in a decoder purely to undo an encode we never
+needed.
+
+Carrying no decoder also means nothing downstream would notice a reply
+that is not audio, so the engine checks that itself: a `200` whose
+content type is not audio, or whose body is not the format that was
+requested, is rejected rather than played, and a response shorter than
+its own WAV header promises — or a `pcm` body that is not a whole number
+of samples — is reported as truncated instead of quietly returning a
+clipped utterance.
+
+Configure via environment variables (the API key is read from the
+environment only — never commit it):
+
+| Environment variable | Default | Notes |
+|---|---|---|
+| `STACKCHAN_FISH_AUDIO_KEY` | _(required)_ | API key, sent as `Authorization: Bearer <key>`. Unset → the engine still lists but `say(voice="fish-audio")` returns a clear error. |
+| `STACKCHAN_FISH_AUDIO_MODEL` | _(none)_ | Default voice model ID (the API's `reference_id`). When unset the request omits it and Fish Audio uses its own default voice. |
+| `STACKCHAN_FISH_AUDIO_BACKEND` | `s2.1-pro` | Synthesis backend, sent as the `model` header. One of `s1`, `s2-pro`, `s2.1-pro`, `s2.1-pro-free`. |
+| `STACKCHAN_FISH_AUDIO_URL` | `https://api.fish.audio/v1/tts` | Endpoint override, for a proxy or a compatible self-hosted deployment. |
+
+Select Fish Audio per call:
+
+```
+say(text="Nice to meet you!", voice="fish-audio")
+```
+
+Or make it the default engine for every `say` call that omits `voice`:
+
+```bash
+export STACKCHAN_TTS_ENGINE=fish-audio
+```
+
+A per-call `speaker_name` overrides `STACKCHAN_FISH_AUDIO_MODEL`, so a
+single deployment can switch between trained voices without restarting
+the gateway.
+
 ### 5. Optional: STT setup (faster-whisper)
 
 To let the device hear, install one of the `[stt-*]` extras and pair
