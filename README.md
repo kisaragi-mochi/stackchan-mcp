@@ -48,7 +48,7 @@ This repository is a monorepo.
 |---|---|---|
 | `get_status` | Gateway connection state | ✅ |
 | `get_device_info` | ESP32 device state (battery / volume / WiFi / etc.) | ✅ |
-| `take_photo(question?)` | Capture a frame, save as JPEG, return the path | ✅ |
+| `take_photo(question?)` | Capture a frame, save as JPEG, return the path + inline image block | ✅ |
 | `set_volume(volume)` | Speaker volume (0-100) | ✅ |
 | `set_brightness(brightness)` | Screen brightness (0-100) | ✅ |
 | `move_head(yaw, pitch, speed?)` | Move the neck (servos). `pitch` is constrained to `5..85` — the M5Stack-recommended operating range. For the wider firmware hard clamp (`0..88`), use the firmware-side `set_head_angles` device tool instead. | ✅ |
