@@ -113,13 +113,63 @@ def _resolve_default_engine() -> str:
     return DEFAULT_VOICE
 
 
+async def _call_tool_for_device(
+    esp32: Any, name: str, arguments: dict[str, Any], device_id: str | None
+) -> tuple[Any, dict[str, Any] | None]:
+    """``esp32.call_tool``, routed to ``device_id`` when given.
+
+    Omitting ``device_id`` (None) makes the exact same 2-arg call as
+    before phase2, so existing test doubles that don't accept a
+    ``device_id`` keyword keep working unchanged.
+    """
+    if device_id is None:
+        return await esp32.call_tool(name, arguments)
+    return await esp32.call_tool(name, arguments, device_id=device_id)
+
+
+async def _send_tts_state_for_device(
+    esp32: Any, state: str, device_id: str | None
+) -> None:
+    """``esp32.send_tts_state``, routed to ``device_id`` when given."""
+    if device_id is None:
+        await esp32.send_tts_state(state)
+    else:
+        await esp32.send_tts_state(state, device_id=device_id)
+
+
+async def _send_audio_frame_for_device(
+    esp32: Any, frame: bytes, device_id: str | None
+) -> None:
+    """``esp32.send_audio_frame``, routed to ``device_id`` when given."""
+    if device_id is None:
+        await esp32.send_audio_frame(frame)
+    else:
+        await esp32.send_audio_frame(frame, device_id=device_id)
+
+
+def _tts_lock_for_device(esp32: Any, device_id: str | None) -> Any:
+    """Resolve the TTS lock for ``device_id`` with defensive fallbacks.
+
+    Prefers the new :meth:`ESP32Manager.tts_lock_for` accessor; falls
+    back to the pre-phase2 ``tts_lock`` property for test doubles that
+    predate per-device locks (only reachable when ``device_id`` is None,
+    since callers only pass an explicit id once a real per-device
+    connection resolved it).
+    """
+    getter = getattr(esp32, "tts_lock_for", None)
+    if getter is not None:
+        return getter(device_id)
+    return getattr(esp32, "tts_lock", None)
+
+
 async def _try_set_avatar_face(
     gateway: "Gateway",
     face: str,
+    device_id: str | None = None,
 ) -> tuple[bool, str | None]:
     try:
-        result, error = await gateway.esp32.call_tool(
-            "self.display.set_avatar", {"face": face}
+        result, error = await _call_tool_for_device(
+            gateway.esp32, "self.display.set_avatar", {"face": face}, device_id
         )
     except Exception as exc:
         logger.warning("say(): set_avatar(%s) failed: %s", face, exc)
@@ -144,12 +194,13 @@ async def _try_set_avatar_face(
 async def _try_set_avatar_face_with_tts_lock(
     gateway: "Gateway",
     face: str,
+    device_id: str | None = None,
 ) -> tuple[bool, str | None]:
-    tts_lock = getattr(gateway.esp32, "tts_lock", None)
+    tts_lock = _tts_lock_for_device(gateway.esp32, device_id)
     lock_ctx = tts_lock if tts_lock is not None else nullcontext()
 
     async with lock_ctx:
-        return await _try_set_avatar_face(gateway, face)
+        return await _try_set_avatar_face(gateway, face, device_id)
 
 
 async def synthesize_and_send(
@@ -157,6 +208,7 @@ async def synthesize_and_send(
     *,
     gateway: "Gateway | None" = None,
     registry: EngineRegistry | None = None,
+    device_id: str | None = None,
 ) -> dict[str, Any]:
     """Synthesise text via a registered engine and push it to the device.
 
@@ -238,10 +290,18 @@ async def synthesize_and_send(
             "without one."
         )
 
-    if not gateway.esp32.device_connected:
-        raise RuntimeError(
-            "No ESP32 device connected; cannot deliver synthesised audio."
-        )
+    if device_id is None:
+        if not gateway.esp32.device_connected:
+            raise RuntimeError(
+                "No ESP32 device connected; cannot deliver synthesised audio."
+            )
+    else:
+        connection_for = getattr(gateway.esp32, "connection_for", None)
+        target_conn = connection_for(device_id) if connection_for is not None else None
+        if target_conn is None:
+            raise RuntimeError(
+                f"No ESP32 device connected: device_id={device_id!r}"
+            )
 
     speaker_id = arguments.get("speaker_id")
     speaker_name = arguments.get("speaker_name")
@@ -267,6 +327,7 @@ async def synthesize_and_send(
             face_dispatched, face_error = await _try_set_avatar_face_with_tts_lock(
                 gateway,
                 face,
+                device_id,
             )
         logger.info(
             "say(): engine=%s speaker=%s speech skipped: text empty after "
@@ -303,7 +364,12 @@ async def synthesize_and_send(
     # without this check ``say()`` would still report success. Fail
     # fast with a clear, actionable error instead. BinaryProtocol
     # header wrapping is tracked as a follow-up to Issue #70.
-    connection = getattr(gateway.esp32, "connection", None)
+    connection_for = getattr(gateway.esp32, "connection_for", None)
+    connection = (
+        connection_for(device_id)
+        if connection_for is not None
+        else getattr(gateway.esp32, "connection", None)
+    )
     proto_version = getattr(connection, "protocol_version", 1)
     if proto_version != 1:
         raise RuntimeError(
@@ -346,6 +412,7 @@ async def synthesize_and_send(
             face_dispatched, face_error = await _try_set_avatar_face(
                 gateway,
                 face,
+                device_id,
             )
 
     async def redispatch_face_after_playback() -> None:
@@ -356,6 +423,7 @@ async def synthesize_and_send(
         face_redispatched, face_redispatch_error = await _try_set_avatar_face(
             gateway,
             face,
+            device_id,
         )
 
     # Hand the PCM off to the shared encode-and-push path. Engines that
@@ -373,6 +441,7 @@ async def synthesize_and_send(
             if should_redispatch_face_after_speech
             else None
         ),
+        device_id=device_id,
     )
 
     logger.info(
@@ -412,6 +481,7 @@ async def send_pcm_audio(
     source_label: str = "external",
     before_first_frame: Callable[[], Awaitable[None]] | None = None,
     after_playback_complete: Callable[[], Awaitable[None]] | None = None,
+    device_id: str | None = None,
 ) -> dict[str, Any]:
     """Encode mono PCM and push as Opus frames to the connected device.
 
@@ -481,15 +551,28 @@ async def send_pcm_audio(
             "frames; this call appears to be a validation probe without one."
         )
 
-    if not gateway.esp32.device_connected:
-        raise RuntimeError(
-            "No ESP32 device connected; cannot deliver audio."
-        )
+    if device_id is None:
+        if not gateway.esp32.device_connected:
+            raise RuntimeError(
+                "No ESP32 device connected; cannot deliver audio."
+            )
+    else:
+        connection_for = getattr(gateway.esp32, "connection_for", None)
+        target_conn = connection_for(device_id) if connection_for is not None else None
+        if target_conn is None:
+            raise RuntimeError(
+                f"No ESP32 device connected: device_id={device_id!r}"
+            )
 
     # WebSocket protocol version gate. The firmware decodes raw Opus
     # binary frames only on protocol v1; v2/v3 wrap each binary message
     # in a BinaryProtocol header that this gateway does not yet emit.
-    connection = getattr(gateway.esp32, "connection", None)
+    connection_for = getattr(gateway.esp32, "connection_for", None)
+    connection = (
+        connection_for(device_id)
+        if connection_for is not None
+        else getattr(gateway.esp32, "connection", None)
+    )
     proto_version = getattr(connection, "protocol_version", 1)
     if proto_version != 1:
         raise RuntimeError(
@@ -523,14 +606,14 @@ async def send_pcm_audio(
     # The whole start → frames → stop block runs under the device's
     # TTS lock so two concurrent pushes can't interleave their Opus
     # frames on the same WebSocket or overlap their state notifications.
-    tts_lock = getattr(gateway.esp32, "tts_lock", None)
+    tts_lock = _tts_lock_for_device(gateway.esp32, device_id)
     lock_ctx = tts_lock if tts_lock is not None else nullcontext()
 
     sent = 0
     push_error: ConnectionError | None = None
     async with lock_ctx:
         try:
-            await gateway.esp32.send_tts_state("start")
+            await _send_tts_state_for_device(gateway.esp32, "start", device_id)
         except ConnectionError as exc:
             raise RuntimeError(
                 f"Device disconnected before TTS start notification: {exc}"
@@ -562,7 +645,7 @@ async def send_pcm_audio(
                 if now < next_send_time:
                     await asyncio.sleep(next_send_time - now)
                 try:
-                    await gateway.esp32.send_audio_frame(frame)
+                    await _send_audio_frame_for_device(gateway.esp32, frame, device_id)
                 except ConnectionError as exc:
                     # Stop pushing on the first disconnect, but fall
                     # through to the stop notification (see finally) so
@@ -576,7 +659,7 @@ async def send_pcm_audio(
             playback_complete = push_error is None
         finally:
             try:
-                await gateway.esp32.send_tts_state("stop")
+                await _send_tts_state_for_device(gateway.esp32, "stop", device_id)
             except ConnectionError:
                 # If the device dropped, it'll return to idle on its
                 # own when the WebSocket close lands; nothing to do

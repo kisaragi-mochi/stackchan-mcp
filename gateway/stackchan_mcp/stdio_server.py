@@ -843,13 +843,59 @@ async def _dispatch_mcp_tool(
     gateway: Any,
 ) -> list[TextContent | ImageContent]:
     """Run one StackChan MCP tool against the provided gateway instance."""
+    # Optional multi-device routing key. Not declared on individual Tool
+    # inputSchemas (untyped optional); strip so it never reaches ESP32.
+    device_id = arguments.pop("device_id", None)
+    if device_id is not None and not isinstance(device_id, str):
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {"error": f"device_id must be a string (got {device_id!r})"}
+                ),
+            )
+        ]
+    if isinstance(device_id, str) and not device_id:
+        device_id = None
+
     if name == "get_status":
         status = gateway.esp32.get_status()
         return [TextContent(type="text", text=json.dumps(status, indent=2))]
 
+    if name == "list_devices":
+        devices = gateway.esp32.list_devices()
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "devices": devices,
+                        "default_device_id": gateway.esp32.default_device_id,
+                    },
+                    indent=2,
+                ),
+            )
+        ]
+
+    if name == "set_default_device":
+        target = arguments.get("device_id", device_id)
+        if not isinstance(target, str) or not target:
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {"ok": False, "error": "device_id is required"}
+                    ),
+                )
+            ]
+        result = gateway.esp32.set_default_device(target)
+        return [TextContent(type="text", text=json.dumps(result))]
+
     if name == "say":
         try:
-            result = await synthesize_and_send(arguments, gateway=gateway)
+            result = await synthesize_and_send(
+                arguments, gateway=gateway, device_id=device_id
+            )
         except (ValueError, NotImplementedError, RuntimeError) as exc:
             return [
                 TextContent(
@@ -861,7 +907,9 @@ async def _dispatch_mcp_tool(
 
     if name == "listen":
         try:
-            result = await listen_and_transcribe(arguments, gateway=gateway)
+            result = await listen_and_transcribe(
+                arguments, gateway=gateway, device_id=device_id
+            )
         except (ValueError, NotImplementedError, RuntimeError) as exc:
             return [
                 TextContent(
@@ -894,7 +942,9 @@ async def _dispatch_mcp_tool(
                     text=json.dumps({"ok": False, "error": f"unknown mode: {mode}"}),
                 )
             ]
-        result = await gateway.load_avatar_set(archive_path, mode, timeout)
+        result = await gateway.load_avatar_set(
+            archive_path, mode, timeout, device_id=device_id
+        )
         return [TextContent(type="text", text=json.dumps(result))]
 
     if name == "stackchan_follow_pose_stream":
@@ -1185,7 +1235,10 @@ async def _dispatch_mcp_tool(
         ]
 
     esp32_name, esp32_args = tool_map[name]
-    result, error = await gateway.esp32.call_tool(esp32_name, esp32_args)
+    # device_id was stripped above; route to the selected (or default) device.
+    result, error = await gateway.esp32.call_tool(
+        esp32_name, esp32_args, device_id=device_id
+    )
 
     if error:
         return [
@@ -1300,6 +1353,41 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 inputSchema={
                     "type": "object",
                     "properties": {},
+                },
+            ),
+            Tool(
+                name="list_devices",
+                description=(
+                    "List ESP32 devices currently connected to the gateway. "
+                    "Returns each device_id (from the Device-Id header), "
+                    "connection time, and which one is the default routing target. "
+                    "Use set_default_device to change the default; pass optional "
+                    "device_id on other tools to target a specific unit."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="set_default_device",
+                description=(
+                    "Set the default ESP32 destination used when tools omit "
+                    "device_id. Until set, the default is the first device that "
+                    "connected. Returns an error if the device_id is not connected."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "device_id": {
+                            "type": "string",
+                            "description": (
+                                "Device-Id of a currently connected ESP32 "
+                                "(see list_devices)."
+                            ),
+                        },
+                    },
+                    "required": ["device_id"],
                 },
             ),
             Tool(

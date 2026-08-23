@@ -121,12 +121,45 @@ def _validate_motion_args(
     return motion, look_up_pitch
 
 
+async def _call_tool_for_device(
+    esp32: Any, name: str, arguments: dict[str, Any], device_id: str | None
+) -> tuple[Any, dict[str, Any] | None]:
+    """``esp32.call_tool``, routed to ``device_id`` when given.
+
+    Omitting ``device_id`` (None) makes the exact same 2-arg call as
+    before phase2, so existing test doubles that don't accept a
+    ``device_id`` keyword keep working unchanged.
+    """
+    if device_id is None:
+        return await esp32.call_tool(name, arguments)
+    return await esp32.call_tool(name, arguments, device_id=device_id)
+
+
+async def _send_listen_state_for_device(
+    esp32: Any, state: str, device_id: str | None, **kwargs: Any
+) -> None:
+    """``esp32.send_listen_state``, routed to ``device_id`` when given."""
+    if device_id is None:
+        await esp32.send_listen_state(state, **kwargs)
+    else:
+        await esp32.send_listen_state(state, device_id=device_id, **kwargs)
+
+
+def _listen_lock_for_device(esp32: Any, device_id: str | None) -> Any:
+    """Resolve the STT lock for ``device_id`` with defensive fallbacks."""
+    getter = getattr(esp32, "listen_lock_for", None)
+    if getter is not None:
+        return getter(device_id)
+    return getattr(esp32, "listen_lock", None)
+
+
 async def _shield_listen_motion_cleanup(
     gateway: "Gateway",
     motion: Literal["none", "face-only", "look-up"],
     saved_angles: tuple[float, float] | None,
     *,
     succeeded: bool,
+    device_id: str | None = None,
 ) -> BaseException | None:
     """Wait for motion cleanup to complete even under cancellation.
 
@@ -152,6 +185,7 @@ async def _shield_listen_motion_cleanup(
             motion,
             saved_angles,
             succeeded=succeeded,
+            device_id=device_id,
         )
     )
 
@@ -187,8 +221,11 @@ async def _call_device_tool(
     gateway: "Gateway",
     name: str,
     arguments: dict[str, Any],
+    device_id: str | None = None,
 ) -> Any:
-    result, error = await gateway.esp32.call_tool(name, arguments)
+    result, error = await _call_tool_for_device(
+        gateway.esp32, name, arguments, device_id
+    )
     if error:
         message = error.get("message", error) if isinstance(error, dict) else error
         raise RuntimeError(f"Device tool '{name}' failed: {message}")
@@ -214,15 +251,22 @@ def _extract_head_angles(result: Any) -> tuple[float, float]:
     return float(yaw), float(pitch)
 
 
-async def _set_avatar(gateway: "Gateway", face: str) -> None:
-    await _call_device_tool(gateway, "self.display.set_avatar", {"face": face})
+async def _set_avatar(
+    gateway: "Gateway", face: str, device_id: str | None = None
+) -> None:
+    await _call_device_tool(
+        gateway, "self.display.set_avatar", {"face": face}, device_id
+    )
 
 
-async def _set_head_angles(gateway: "Gateway", *, yaw: float, pitch: float) -> None:
+async def _set_head_angles(
+    gateway: "Gateway", *, yaw: float, pitch: float, device_id: str | None = None
+) -> None:
     await _call_device_tool(
         gateway,
         "self.robot.set_head_angles",
         {"yaw": yaw, "pitch": pitch},
+        device_id,
     )
 
 
@@ -230,24 +274,28 @@ async def _begin_listen_motion(
     gateway: "Gateway",
     motion: Literal["none", "face-only", "look-up"],
     look_up_pitch: float,
+    device_id: str | None = None,
 ) -> tuple[float, float] | None:
     if motion == "none":
         return None
     if motion == "face-only":
-        await _set_avatar(gateway, LISTENING_FACE)
+        await _set_avatar(gateway, LISTENING_FACE, device_id)
         return None
 
-    result = await _call_device_tool(gateway, "self.robot.get_head_angles", {})
+    result = await _call_device_tool(
+        gateway, "self.robot.get_head_angles", {}, device_id
+    )
     yaw, pitch = _extract_head_angles(result)
     try:
-        await _set_head_angles(gateway, yaw=yaw, pitch=look_up_pitch)
-        await _set_avatar(gateway, LISTENING_FACE)
+        await _set_head_angles(gateway, yaw=yaw, pitch=look_up_pitch, device_id=device_id)
+        await _set_avatar(gateway, LISTENING_FACE, device_id)
     except Exception as forward_exc:
         cleanup_error = await _shield_listen_motion_cleanup(
             gateway,
             motion,
             (yaw, pitch),
             succeeded=False,
+            device_id=device_id,
         )
         if cleanup_error is not None:
             # Forward setup failed AND rollback also failed — the
@@ -266,24 +314,25 @@ async def _finish_listen_motion(
     saved_angles: tuple[float, float] | None,
     *,
     succeeded: bool,
+    device_id: str | None = None,
 ) -> None:
     if motion == "none":
         return
     if motion == "face-only":
-        await _set_avatar(gateway, IDLE_FACE)
+        await _set_avatar(gateway, IDLE_FACE, device_id)
         return
     if succeeded or saved_angles is None:
         return
 
     yaw, pitch = saved_angles
     try:
-        await _set_head_angles(gateway, yaw=yaw, pitch=pitch)
+        await _set_head_angles(gateway, yaw=yaw, pitch=pitch, device_id=device_id)
     finally:
         # Restore the avatar regardless of whether the pitch rollback
         # succeeded — otherwise a failed ``set_head_angles`` would
         # leave the device visibly stuck on the ``thinking`` face
         # even though the listen itself already failed.
-        await _set_avatar(gateway, IDLE_FACE)
+        await _set_avatar(gateway, IDLE_FACE, device_id)
 
 
 async def listen_and_transcribe(
@@ -291,6 +340,7 @@ async def listen_and_transcribe(
     *,
     gateway: "Gateway | None" = None,
     registry: EngineRegistry | None = None,
+    device_id: str | None = None,
 ) -> dict[str, Any]:
     """Capture a short utterance from the device and transcribe it.
 
@@ -364,10 +414,18 @@ async def listen_and_transcribe(
             "be a validation probe without one."
         )
 
-    if not gateway.esp32.device_connected:
-        raise RuntimeError(
-            "No ESP32 device connected; cannot capture audio for STT."
-        )
+    if device_id is None:
+        if not gateway.esp32.device_connected:
+            raise RuntimeError(
+                "No ESP32 device connected; cannot capture audio for STT."
+            )
+    else:
+        connection_for = getattr(gateway.esp32, "connection_for", None)
+        target_conn = connection_for(device_id) if connection_for is not None else None
+        if target_conn is None:
+            raise RuntimeError(
+                f"No ESP32 device connected: device_id={device_id!r}"
+            )
 
     # Protocol version gate, identical in spirit to the TTS side
     # (PR #75). The gateway's inbound binary handler decodes raw Opus
@@ -375,7 +433,12 @@ async def listen_and_transcribe(
     # BinaryProtocol header that this gateway does not yet parse on
     # the inbound side either, so the buffered frames would be
     # unusable.
-    connection = getattr(gateway.esp32, "connection", None)
+    connection_for = getattr(gateway.esp32, "connection_for", None)
+    connection = (
+        connection_for(device_id)
+        if connection_for is not None
+        else getattr(gateway.esp32, "connection", None)
+    )
     proto_version = getattr(connection, "protocol_version", 1)
     if proto_version != 1:
         raise RuntimeError(
@@ -390,7 +453,7 @@ async def listen_and_transcribe(
     # cannot interleave their capture windows. Same getattr fallback
     # pattern as the TTS orchestrator's ``tts_lock`` so test fakes that
     # don't expose the attribute keep working.
-    listen_lock = getattr(gateway.esp32, "listen_lock", None)
+    listen_lock = _listen_lock_for_device(gateway.esp32, device_id)
     lock_ctx = listen_lock if listen_lock is not None else nullcontext()
 
     if is_recording() and _is_beat_mode_owner(recording_owner()):
@@ -410,7 +473,12 @@ async def listen_and_transcribe(
     succeeded = False
 
     async with lock_ctx:
-        connection = gateway.esp32.connection
+        connection_for = getattr(gateway.esp32, "connection_for", None)
+        connection = (
+            connection_for(device_id)
+            if connection_for is not None
+            else gateway.esp32.connection
+        )
         session_id = getattr(connection, "session_id", "") if connection else ""
 
         # Symmetric ownership guard with the device-driven listen.start
@@ -438,7 +506,7 @@ async def listen_and_transcribe(
         primary_exc: BaseException | None = None
         try:
             motion_saved_angles = await _begin_listen_motion(
-                gateway, motion, look_up_pitch
+                gateway, motion, look_up_pitch, device_id
             )
 
             # Switch the audio_stream module into recording mode BEFORE
@@ -448,7 +516,9 @@ async def listen_and_transcribe(
             listen_start_sent = False
             try:
                 try:
-                    await gateway.esp32.send_listen_state("start", mode="manual")
+                    await _send_listen_state_for_device(
+                        gateway.esp32, "start", device_id, mode="manual"
+                    )
                     listen_start_sent = True
                 except ConnectionError as exc:
                     raise RuntimeError(
@@ -479,7 +549,9 @@ async def listen_and_transcribe(
                 if listen_start_sent:
                     try:
                         await asyncio.shield(
-                            gateway.esp32.send_listen_state("stop")
+                            _send_listen_state_for_device(
+                                gateway.esp32, "stop", device_id
+                            )
                         )
                     except (ConnectionError, asyncio.CancelledError):
                         # Device dropped, or our awaiter was cancelled
@@ -557,6 +629,7 @@ async def listen_and_transcribe(
                 motion,
                 motion_saved_angles,
                 succeeded=succeeded,
+                device_id=device_id,
             )
             if cleanup_error is not None:
                 if primary_exc is not None:

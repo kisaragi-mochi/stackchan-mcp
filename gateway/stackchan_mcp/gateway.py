@@ -240,6 +240,7 @@ class Gateway:
         archive_path: str,
         mode: str,
         timeout: float = 60.0,
+        device_id: str | None = None,
     ) -> dict:
         """Stage an avatar set + notify the device + await its reply.
 
@@ -247,6 +248,9 @@ class Gateway:
         repository for the protocol. ``archive_path`` is the path to a
         local file containing the raw RGB565 payload (gateway expects
         the addon to have already converted PNG/PIL output to RGB565).
+        ``device_id`` is forwarded to
+        :meth:`ESP32Manager.send_avatar_set_fetch`; omitted (None)
+        targets the default device exactly as before phase2.
         """
         if self._capture_app is None:
             return {"ok": False, "error": "gateway_not_started"}
@@ -277,14 +281,25 @@ class Gateway:
             return {"ok": False, "error": str(exc)}
 
         url = f"{self.avatar_set_base_url}/avatar_set/{short_id}"
-        result = await self.esp32.send_avatar_set_fetch(
-            url=url,
-            token=token,
-            mode=mode,
-            checksum=sha256,
-            expected_size=len(payload),
-            timeout=timeout,
-        )
+        if device_id is None:
+            result = await self.esp32.send_avatar_set_fetch(
+                url=url,
+                token=token,
+                mode=mode,
+                checksum=sha256,
+                expected_size=len(payload),
+                timeout=timeout,
+            )
+        else:
+            result = await self.esp32.send_avatar_set_fetch(
+                url=url,
+                token=token,
+                mode=mode,
+                checksum=sha256,
+                expected_size=len(payload),
+                timeout=timeout,
+                device_id=device_id,
+            )
         # Surface the staging metadata for caller-side observability.
         result.setdefault("checksum", sha256)
         result["bytes_transferred"] = len(payload) if result.get("ok") else 0
