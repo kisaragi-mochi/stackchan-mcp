@@ -65,9 +65,14 @@ The mapping lives in `gateway/stackchan_mcp/stdio_server.py`.
 2. Gateway forwards to ESP32 as `self.camera.take_photo`.
 3. ESP32 captures JPEG, POSTs to gateway's HTTP `/capture` (port 8766),
    multipart/form-data with `question` and `file` fields.
-4. Gateway saves JPEG to `~/.stackchan/captures/capture_<ms>.jpg`,
-   returns the file path to the MCP client.
-5. MCP client reads the file directly.
+4. Gateway saves JPEG to `~/.stackchan/captures/capture_<ms>.jpg` and
+   returns the text receipt (including the file path) plus the JPEG as an
+   inline `image/jpeg` MCP content block, so LLM clients see the frame
+   directly.
+5. MCP clients that cannot consume image blocks can still read the file
+   at the returned path. If inlining fails (file outside the capture
+   directory, not a JPEG, or larger than 200 KB), the gateway degrades
+   to the text-only receipt.
 
 The ESP32 needs to know the gateway's LAN IP to POST. Set `VISION_HOST` in
 `gateway/.env` to the LAN IP of the host running the gateway.

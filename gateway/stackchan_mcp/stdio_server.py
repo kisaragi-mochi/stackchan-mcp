@@ -2877,7 +2877,9 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
         ]
 
     @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
+    async def call_tool(
+        name: str, arguments: dict[str, Any] | None
+    ) -> list[TextContent | ImageContent]:
         """Handle a tool call by relaying to ESP32."""
         arguments = arguments or {}
         return await _dispatch_mcp_tool(name, arguments, get_gateway())

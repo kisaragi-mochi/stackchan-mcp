@@ -38,6 +38,11 @@ documented-only.
   
 ### Gateway
 
+- `take_photo` now returns the captured JPEG as an inline `image/jpeg`
+  MCP content block alongside the unchanged text receipt, so LLM clients
+  see the frame directly instead of only a file path. Inlining is limited
+  to JPEGs inside the capture directory and at most 200 KB; any failure
+  degrades to the original text-only receipt. (#373)
 - `get_status` now reports the WebSocket `session_id` alongside the
   connection flags. The id changes on every (re)connection, so a polling
   host can detect a device reboot even when the reconnect lands between
