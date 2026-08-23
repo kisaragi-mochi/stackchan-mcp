@@ -38,6 +38,12 @@ documented-only.
   
 ### Gateway
 
+- Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
+  alongside Irodori: official REST API with `eleven_v3` as the default
+  model, per-speaker voice ids via `STACKCHAN_ELEVEN_VOICE_<SPEAKER>`
+  environment variables, and MP3 decoding through the decoder path shared
+  with Irodori. The API key is read from the environment only and is never
+  persisted or logged. (#372)
 - `get_status` now reports the WebSocket `session_id` alongside the
   connection flags. The id changes on every (re)connection, so a polling
   host can detect a device reboot even when the reconnect lands between
