@@ -1,0 +1,8 @@
+# The local StackChan gateway owns the primary single-shot session.  The
+# concrete URL/token are supplied from the host's existing local defaults by
+# configure_stackchan.py; a second action socket would duplicate the same
+# gateway and is therefore disabled.
+CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG=y
+CONFIG_FORCE_DEFAULT_WEBSOCKET_URL=y
+CONFIG_STACKCHAN_MCP_ACTION_GATEWAY_URL=""
+CONFIG_STACKCHAN_MCP_ACTION_GATEWAY_TOKEN=""

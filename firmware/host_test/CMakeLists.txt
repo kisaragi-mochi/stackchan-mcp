@@ -41,6 +41,33 @@ add_executable(listening_profile_test
     ../main/listening_profile.cc
 )
 
+add_executable(voice_interaction_test
+    test_voice_interaction.cc
+    ../main/voice_interaction.cc
+)
+
+add_executable(mcp_action_reconnect_policy_test
+    test_mcp_action_reconnect_policy.cc
+)
+
+target_include_directories(mcp_action_reconnect_policy_test
+    PRIVATE
+        ../main/protocols
+)
+
+target_link_libraries(mcp_action_reconnect_policy_test
+    PRIVATE GTest::gtest_main
+)
+
+target_include_directories(voice_interaction_test
+    PRIVATE
+        ../main
+)
+
+target_link_libraries(voice_interaction_test
+    PRIVATE GTest::gtest_main
+)
+
 target_include_directories(listening_profile_test
     PRIVATE
         ../main
@@ -53,3 +80,5 @@ target_link_libraries(listening_profile_test
 include(GoogleTest)
 gtest_discover_tests(mdns_candidate_extract_test)
 gtest_discover_tests(listening_profile_test)
+gtest_discover_tests(voice_interaction_test)
+gtest_discover_tests(mcp_action_reconnect_policy_test)

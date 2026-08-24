@@ -88,6 +88,16 @@ public:
     // override these to drive lip-sync animation while TTS audio is playing.
     virtual void OnTtsStart() {}
     virtual void OnTtsStop() {}
+    // Agent runtime hooks. The application owns the voice/session state;
+    // boards only translate the resulting state/emotion into local display
+    // and motion feedback.
+    // Notification-only hooks from the AI.AGENT state machine. The base board
+    // implementation intentionally does nothing: audio/session ownership
+    // remains in Application and boards only decide how to present a state.
+    // StackChan overrides these hooks to update its avatar and head motion;
+    // other boards remain source-compatible without implementing a UI bridge.
+    virtual void OnAgentStateChanged(const char* state) { (void)state; }
+    virtual void OnAgentEmotion(const char* emotion) { (void)emotion; }
 
     // Phase 4.5 avatar (saiverse-stackchan-addon): dynamic avatar set fetch
     // notification dispatched from Application::OnIncomingJson. The cJSON

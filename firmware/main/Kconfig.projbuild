@@ -1,5 +1,55 @@
 menu "Xiaozhi Assistant"
 
+# The following two settings add an optional action-only MCP connection. Keep
+# them separate from the normal Xiaozhi endpoint: the latter carries voice
+# and conversation state, while this endpoint carries Kimito/device tools.
+
+config STACKCHAN_MCP_ACTION_GATEWAY_URL
+    string "Kimito action MCP gateway URL"
+    default ""
+    help
+        Optional second WebSocket connection used only for Kimito action tools.
+        The primary WebSocket remains the AI.AGENT/Xiaozhi voice connection.
+        Example: ws://192.168.1.100:8765/
+
+config STACKCHAN_MCP_ACTION_GATEWAY_TOKEN
+    string "Kimito action MCP gateway token"
+    default ""
+    help
+        Optional bearer token for the Kimito action MCP gateway.
+
+choice STACKCHAN_VOICE_MODE
+    prompt "StackChan voice interaction mode"
+    default STACKCHAN_VOICE_MODE_MCP_SINGLE_SHOT
+    depends on BOARD_TYPE_STACKCHAN
+    help
+        Select who advances the voice turn after TTS finishes. The choice is
+        intentionally build-time configurable so the same StackChan body can
+        be used with either an AI.AGENT/Xiaozhi conversational backend or the
+        local stackchan-mcp push-to-talk gateway.
+
+    config STACKCHAN_VOICE_MODE_XIAOZHI_CONVERSATIONAL
+        bool "XIAOZHI_CONVERSATIONAL (server-owned continuous conversation)"
+        help
+            Wake-word auto/realtime sessions return to listening after
+            tts.stop. Manual touch-PTT sessions still return to idle.
+
+    config STACKCHAN_VOICE_MODE_MCP_SINGLE_SHOT
+        bool "MCP_SINGLE_SHOT (explicit push-to-talk turns)"
+        help
+            Every tts.stop returns to idle. A new turn must be started by the
+            wake word, LCD touch PTT, or an explicit gateway listen.start.
+endchoice
+
+config STACKCHAN_TOUCH_PTT
+    bool "Enable LCD touch push-to-talk fallback"
+    default y
+    depends on BOARD_TYPE_STACKCHAN
+    help
+        A short LCD tap starts a manual listening turn while idle/speaking and
+        stops/submits the turn while listening. This is independent from the
+        Si12T head-touch companionship reactions.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"
@@ -914,7 +964,7 @@ config USE_AUDIO_PROCESSOR
 config USE_DEVICE_AEC
     bool "Enable Device-Side AEC"
     default n
-        depends on USE_AUDIO_PROCESSOR && (BOARD_TYPE_ESP_BOX_3 || BOARD_TYPE_ESP_BOX || BOARD_TYPE_ESP_BOX_LITE \
+        depends on USE_AUDIO_PROCESSOR && (BOARD_TYPE_STACKCHAN || BOARD_TYPE_ESP_BOX_3 || BOARD_TYPE_ESP_BOX || BOARD_TYPE_ESP_BOX_LITE \
         || BOARD_TYPE_LICHUANG_DEV_S3 || BOARD_TYPE_RYMCU_BIGSMART || BOARD_TYPE_ESP_KORVO2_V3 || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75|| BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75C || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_83\
         || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_2_06 || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_4B || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_4B || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_4_3 \
         || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_7B \

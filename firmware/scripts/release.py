@@ -300,7 +300,16 @@ def _read_local_sdkconfig_defaults(path: Path = Path("sdkconfig.defaults.local")
     with path.open(encoding="utf-8") as f:
         for lineno, raw_line in enumerate(f, start=1):
             line = raw_line.strip()
-            if not line or line.startswith("#"):
+            if not line:
+                continue
+            if re.fullmatch(r"# CONFIG_[A-Za-z0-9_]+ is not set", line):
+                # An explicit unset is semantically required when switching a
+                # Kconfig choice away from the value already present in the
+                # generated sdkconfig.  Dropping these lines made a requested
+                # Xiaozhi conversational build silently remain MCP single-shot.
+                lines.append(line)
+                continue
+            if line.startswith("#"):
                 continue
             if not line.startswith("CONFIG_") or "=" not in line:
                 print(
@@ -312,6 +321,14 @@ def _read_local_sdkconfig_defaults(path: Path = Path("sdkconfig.defaults.local")
     return lines
 
 
+def _sdkconfig_entry_key(entry: str) -> str:
+    """Return the CONFIG_* key for assignments and explicit-unset entries."""
+    unset = re.fullmatch(r"# (CONFIG_[A-Za-z0-9_]+) is not set", entry.strip())
+    if unset:
+        return unset.group(1)
+    return entry.split("=", 1)[0].strip()
+
+
 def _merge_sdkconfig_overrides(*groups: list[str]) -> list[str]:
     """Merge sdkconfig entries, letting later groups override earlier keys."""
     result: list[Optional[str]] = []
@@ -319,7 +336,7 @@ def _merge_sdkconfig_overrides(*groups: list[str]) -> list[str]:
 
     for group in groups:
         for entry in group:
-            key = entry.split("=", 1)[0].strip()
+            key = _sdkconfig_entry_key(entry)
             if key in positions:
                 result[positions[key]] = None
             positions[key] = len(result)

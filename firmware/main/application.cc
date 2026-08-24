@@ -11,6 +11,7 @@
 #include "settings.h"
 
 #include <cstring>
+#include <esp_app_desc.h>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
@@ -20,6 +21,33 @@
 #define TAG "Application"
 
 namespace {
+
+std::string AppElfSha256Hex() {
+    const auto* description = esp_app_get_description();
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string result(64, '0');
+    for (size_t i = 0; i < sizeof(description->app_elf_sha256); ++i) {
+        result[i * 2] = kHex[description->app_elf_sha256[i] >> 4];
+        result[i * 2 + 1] = kHex[description->app_elf_sha256[i] & 0x0f];
+    }
+    return result;
+}
+
+void LogAppIdentity() {
+    const auto* description = esp_app_get_description();
+    ESP_LOGI(TAG, "App identity: project=%s version=%s ELF SHA256=%s",
+             description->project_name,
+             description->version,
+             AppElfSha256Hex().c_str());
+}
+
+constexpr VoiceInteractionMode ConfiguredVoiceInteractionMode() {
+#if CONFIG_STACKCHAN_VOICE_MODE_XIAOZHI_CONVERSATIONAL
+    return VoiceInteractionMode::kXiaozhiConversational;
+#else
+    return VoiceInteractionMode::kMcpSingleShot;
+#endif
+}
 
 ListeningProfile ParseListenProfile(const cJSON* root) {
     auto profile = cJSON_GetObjectItem(root, "profile");
@@ -53,6 +81,14 @@ Application::Application() {
     aec_mode_ = kAecOff;
 #endif
 
+    ESP_LOGI(TAG, "Voice interaction mode: %s; LCD touch PTT: %s",
+             VoiceInteractionModeName(ConfiguredVoiceInteractionMode()),
+#if CONFIG_STACKCHAN_TOUCH_PTT
+             "enabled");
+#else
+             "disabled");
+#endif
+
     esp_timer_create_args_t clock_timer_args = {
         .callback = [](void* arg) {
             Application* app = (Application*)arg;
@@ -67,11 +103,19 @@ Application::Application() {
 }
 
 Application::~Application() {
+    // Destroy the optional action transport while the Application event queue
+    // is still alive. Its WebSocket close callback may otherwise race with
+    // member destruction and try to enqueue a reconnect after event_group_.
+    action_mcp_client_.reset();
     if (clock_timer_handle_ != nullptr) {
         esp_timer_stop(clock_timer_handle_);
         esp_timer_delete(clock_timer_handle_);
     }
     vEventGroupDelete(event_group_);
+}
+
+VoiceInteractionMode Application::GetVoiceInteractionMode() const {
+    return ConfiguredVoiceInteractionMode();
 }
 
 bool Application::SetDeviceState(DeviceState state) {
@@ -81,6 +125,7 @@ bool Application::SetDeviceState(DeviceState state) {
 void Application::Initialize() {
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
+    LogAppIdentity();
 
     // Setup the display
     auto display = board.GetDisplay();
@@ -491,6 +536,11 @@ void Application::CheckNewVersion() {
 }
 
 void Application::InitializeProtocol() {
+    // Repeat the build identity after OTA/activation work. Host capture can
+    // miss the earliest bootloader lines while USB CDC re-enumerates; this
+    // later device-originated line still binds the running image to the
+    // archived candidate's embedded ELF SHA256.
+    LogAppIdentity();
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
     auto codec = board.GetAudioCodec();
@@ -549,28 +599,24 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this, &board]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
-                        // stackchan-mcp is an MCP gateway, not a standalone
-                        // xiaozhi-style conversational agent. Listening must
-                        // be triggered explicitly — either by the user
-                        // (touch / button / external command) or by the
-                        // AI (gateway-issued StartListening). The upstream
-                        // xiaozhi behaviour of automatically re-entering
-                        // listening after every TTS utterance is a footgun
-                        // here: when the firmware's TTS pipeline stalls
-                        // (e.g. audio_input task watchdog timeouts during
-                        // long playback) the deferred tts.stop event lands
-                        // long after the user expected the conversation to
-                        // be quiescent, and the device then records ~30 s
-                        // of ambient room audio that the gateway happily
-                        // posts as a user utterance.
-                        //
-                        // Returning to Idle here forces the listening
-                        // boundary to be set explicitly by whoever wants
-                        // to continue the conversation (user touch,
-                        // gateway-driven push-to-talk, etc.). Loop-style
-                        // Listening→Speaking→Listening flows belong on
-                        // the gateway side, not in this firmware.
-                        SetDeviceState(kDeviceStateIdle);
+                        // AI.AGENT is the only owner of the turn boundary.
+                        // Manual-stop sessions close here; auto/realtime
+                        // sessions return to Listening and let server-side
+                        // VAD decide whether another turn exists. The device
+                        // must not start a second recorder from tts.stop.
+                        // Keep the official AI.AGENT turn boundary: manual
+                        // sessions return to idle, while wake-word sessions
+                        // continue in the configured auto/realtime mode. The
+                        // server/VAD is responsible for ending the next turn;
+                        // the device must not synthesize another turn here.
+                        auto transition = DecideTtsStopTransition(
+                            GetVoiceInteractionMode(),
+                            listening_mode_ == kListeningModeManualStop);
+                        if (transition == TtsStopTransition::kListening) {
+                            SetDeviceState(kDeviceStateListening);
+                        } else {
+                            SetDeviceState(kDeviceStateIdle);
+                        }
                     }
                     // Phase 4 audio (Issue #76): stop the avatar mouth
                     // animation unconditionally on tts.stop. A wake-word /
@@ -638,8 +684,12 @@ void Application::InitializeProtocol() {
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
-                Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
+                Schedule([display, &board, emotion_str = std::string(emotion->valuestring)]() {
                     display->SetEmotion(emotion_str.c_str());
+                    // The display keeps the generic upstream emotion state;
+                    // the board hook adds Kimito-specific face/head feedback.
+                    // It is notification-only and cannot change the session.
+                    board.OnAgentEmotion(emotion_str.c_str());
                 });
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
@@ -692,7 +742,17 @@ void Application::InitializeProtocol() {
         }
     });
     
+    // Start the primary AI.AGENT/Xiaozhi transport first. It owns all audio
+    // and conversation events. The optional action transport is started after
+    // it so a missing local gateway cannot prevent the voice service from
+    // booting.
     protocol_->Start();
+
+    // Keep the AI.AGENT/Xiaozhi voice transport as the primary connection.
+    // Kimito action tools use a separate MCP WebSocket so the two servers do
+    // not compete for audio/session state.
+    action_mcp_client_ = std::make_unique<McpActionClient>();
+    action_mcp_client_->Start();
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -956,8 +1016,14 @@ void Application::HandleWakeWordDetectedEvent() {
             });
             return;
         }
-        // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word, generation);
+        // The persistent WebSocket is normally already open after activation.
+        // ContinueWakeWordInvoke() requires the Connecting state, so enter it
+        // here too; otherwise later wake words are silently dropped. This is
+        // only a state-machine hand-off; it does not create another socket.
+        SetDeviceState(kDeviceStateConnecting);
+        Schedule([this, wake_word, generation]() {
+            ContinueWakeWordInvoke(wake_word, generation);
+        });
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
         // Clear send queue to avoid sending residues to server
@@ -1111,6 +1177,14 @@ void Application::HandleStateChangedEvent() {
             // Do nothing
             break;
     }
+
+    // AI.AGENT remains the owner of the voice/session state. The board only
+    // receives a state notification so Kimito can update its local face and
+    // motion feedback without taking over audio or the conversation. Keeping
+    // this notification at the end of the common handler makes every state
+    // transition visible to the board, while the base Board implementation
+    // remains a no-op for other hardware.
+    board.OnAgentStateChanged(DeviceStateMachine::GetStateName(new_state));
 }
 
 void Application::Schedule(std::function<void()>&& callback) {
@@ -1222,8 +1296,14 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
             });
             return;
         }
-        // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word, generation);
+        // The persistent WebSocket is normally already open after activation.
+        // ContinueWakeWordInvoke() requires the Connecting state, so enter it
+        // here too; otherwise later wake words are silently dropped. Keep the
+        // same guard in the public WakeWordInvoke path used by other callers.
+        SetDeviceState(kDeviceStateConnecting);
+        Schedule([this, wake_word, generation]() {
+            ContinueWakeWordInvoke(wake_word, generation);
+        });
     } else if (state == kDeviceStateSpeaking) {
         Schedule([this]() {
             AbortSpeaking(kAbortReasonNone);

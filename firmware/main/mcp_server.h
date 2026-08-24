@@ -426,6 +426,12 @@ public:
 
 class McpServer {
 public:
+    // A reply callback makes the MCP parser transport-agnostic. Legacy calls
+    // still default to Application::SendMcpMessage (the primary voice
+    // channel), while McpActionClient supplies a callback that wraps the
+    // response for the secondary action WebSocket.
+    using ReplyCallback = std::function<void(const std::string&)>;
+
     static McpServer& GetInstance() {
         static McpServer instance;
         return instance;
@@ -438,6 +444,12 @@ public:
     void AddUserOnlyTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
+    // These overloads preserve the original public API and add an explicit
+    // response route for multi-transport integrations. The JSON request is
+    // parsed once; only the destination of the generated JSON-RPC reply
+    // changes.
+    void ParseMessage(const cJSON* json, ReplyCallback reply);
+    void ParseMessage(const std::string& message, ReplyCallback reply);
 
 private:
     McpServer();
@@ -445,11 +457,13 @@ private:
 
     void ParseCapabilities(const cJSON* capabilities);
 
-    void ReplyResult(int id, const std::string& result);
-    void ReplyError(int id, const std::string& message);
+    void ReplyResult(int id, const std::string& result, const ReplyCallback& reply);
+    void ReplyError(int id, const std::string& message, const ReplyCallback& reply);
 
-    void GetToolsList(int id, const std::string& cursor, bool list_user_only_tools);
-    void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments);
+    void GetToolsList(int id, const std::string& cursor, bool list_user_only_tools,
+                      const ReplyCallback& reply);
+    void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments,
+                    ReplyCallback reply);
 
     std::vector<McpTool*> tools_;
 };
