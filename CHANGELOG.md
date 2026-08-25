@@ -35,9 +35,18 @@ documented-only.
 - Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
   frame-geometry consistency, full-frame exports from layered sources,
   the avatar-set fetch window, and blink cadence tuning.
-  
+
 ### Gateway
 
+- Added `read_imu`, a parameterless MCP wrapper for one on-board BMI270 +
+  BMM150 9-axis snapshot with physical units, raw samples, and data-ready
+  metadata.
+- Added `read_environment`, a parameterless MCP wrapper for one on-board
+  LTR-553ALS-WA ambient-light/proximity snapshot with ADC counts and status
+  flags.
+- Added `scan_nfc`, a parameterless MCP wrapper for a single ISO 14443A UID
+  or NFC-F (FeliCa) IDm/PMm scan using StackChan's body-mounted ST25R3916
+  reader. It performs no tag memory read/write, authentication, or emulation.
 - Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
   alongside Irodori: official REST API with `eleven_v3` as the default
   model, per-speaker voice ids via `STACKCHAN_ELEVEN_VOICE_<SPEAKER>`
@@ -56,6 +65,15 @@ documented-only.
 
 ### Firmware
 
+- Added the read-only `self.imu.read` tool for the StackChan board. It reads
+  the internal BMI270 accelerometer/gyroscope and the BMM150 connected through
+  BMI270 AUX without exposing the safety-critical internal I2C bus.
+- Added the read-only `self.environment.read` tool for the StackChan board. It
+  reads LTR-553ALS-WA ambient-light and proximity ADC values without exposing
+  the safety-critical internal I2C bus.
+- Added the `self.nfc.scan` tool for the StackChan board. It turns on the
+  ST25R3916 RF field only during a single ISO 14443A UID or NFC-F IDm/PMm
+  scan, then turns it off without reading or writing tag memory.
 - Added opt-in, compile-time configurable AXP2101 charge hysteresis for StackChan. The feature is disabled by default; when enabled, startup first allows charging, protection disables it at 70% or above, and charging resumes at 30% or below. An unreadable fuel gauge fails safe to charging enabled. `self.power.set_charge_enabled` and `self.power.get_charge_state` provide manual control and state inspection.
 
 ## [0.17.0] - 2026-07-12

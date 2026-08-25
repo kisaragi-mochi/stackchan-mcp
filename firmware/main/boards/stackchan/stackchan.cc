@@ -32,6 +32,9 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include "avatar_images.h"
 #include "avatar_set.h"
 #include "avatar_set_fetcher.h"
+#include "stackchan_environment.h"
+#include "stackchan_imu.h"
+#include "stackchan_nfc.h"
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
@@ -99,16 +102,25 @@ class Pmic : public Axp2101 {
 public:
     // Power Init
     Pmic(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : Axp2101(i2c_bus, addr) {
-        uint8_t data = ReadReg(0x90);
-        data |= 0b10110100;
-        WriteReg(0x90, data);
-        WriteReg(0x99, (0b11110 - 5));
-        WriteReg(0x97, (0b11110 - 2));
-        WriteReg(0x69, 0b00110101);
-        WriteReg(0x30, 0b111111);
+        // Match M5Unified's CoreS3/StackChan AXP2101 power setup.  The
+        // previous board-local sequence enabled ALDO3/4 but left ALDO1/2 and
+        // the PMU common/ADC configuration at unrelated values.  That still
+        // let the I2C devices acknowledge, but the BMI270 configuration
+        // engine never reached INTERNAL_STATUS=0x01.
         WriteReg(0x90, 0xBF);
+        WriteReg(0x92, 18 - 5);  // ALDO1: 1.8 V (AW88298)
+        WriteReg(0x93, 33 - 5);  // ALDO2: 3.3 V (ES7210)
         WriteReg(0x94, 33 - 5);
         WriteReg(0x95, 33 - 5);
+        WriteReg(0x27, 0x00);    // Power-key hold timings
+        WriteReg(0x69, 0x11);    // CHGLED setting
+        WriteReg(0x10, 0x30);    // PMU common configuration
+        WriteReg(0x30, 0x0F);    // ADC enabled
+
+        // StackChan's LCD backlight uses these PWM registers in addition to
+        // the common CoreS3 power rails above.
+        WriteReg(0x99, (0b11110 - 5));
+        WriteReg(0x97, (0b11110 - 2));
 
         // Apply the charge-control boot default last, after every other
         // Power Init write above. This preserves the established PMIC
@@ -231,7 +243,26 @@ public:
     }
 
     void UpdateTouchPoint() {
-        ReadRegs(0x02, read_buffer_, 6);
+        uint8_t reg = 0x02;
+        esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1,
+                                                    read_buffer_, 6, 100);
+        if (err != ESP_OK) {
+            // Long internal-bus transactions (notably the BMI270 firmware
+            // upload) can legitimately make a touch sample miss its 100 ms
+            // deadline. Do not abort the whole board from this best-effort
+            // polling task; report no touch for this sample and let the next
+            // tick retry after the I2C driver has recovered.
+            tp_ = TouchPoint_t{};
+            if (!read_failed_) {
+                ESP_LOGW(TAG, "FT6336 touch reads unavailable: %s", esp_err_to_name(err));
+                read_failed_ = true;
+            }
+            return;
+        }
+        if (read_failed_) {
+            ESP_LOGI(TAG, "FT6336 touch reads recovered");
+            read_failed_ = false;
+        }
         tp_.num = read_buffer_[0] & 0x0F;
         tp_.x = ((read_buffer_[1] & 0x0F) << 8) | read_buffer_[2];
         tp_.y = ((read_buffer_[3] & 0x0F) << 8) | read_buffer_[4];
@@ -243,6 +274,7 @@ public:
 
 private:
     uint8_t* read_buffer_ = nullptr;
+    bool read_failed_ = false;
     TouchPoint_t tp_;
 };
 
@@ -636,6 +668,9 @@ private:
     PowerSaveTimer* power_save_timer_;
     ScsBus scs_bus_;
     std::unique_ptr<Py32IoExpander> io_expander_;
+    std::unique_ptr<StackChanEnvironment> environment_;
+    std::unique_ptr<StackChanImu> imu_;
+    std::unique_ptr<StackChanNfc> nfc_;
 
     // Avatar overlay state. avatar_img_ is created lazily on the active LVGL
     // screen because the screen tree (container_, emoji_label_, ...) is built
@@ -2258,6 +2293,33 @@ private:
             },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
+    }
+
+    void InitializeImu() {
+        imu_ = std::make_unique<StackChanImu>(i2c_bus_);
+        esp_err_t err = imu_->Initialize();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "IMU startup initialization failed; self.imu.read will retry: %s",
+                     imu_->last_error().c_str());
+        }
+    }
+
+    void InitializeEnvironment() {
+        environment_ = std::make_unique<StackChanEnvironment>(i2c_bus_);
+        esp_err_t err = environment_->Initialize();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "LTR-553 startup initialization failed; self.environment.read will retry: %s",
+                     environment_->last_error().c_str());
+        }
+    }
+
+    void InitializeNfc() {
+        nfc_ = std::make_unique<StackChanNfc>(i2c_bus_);
+        esp_err_t err = nfc_->Initialize();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "ST25R3916 startup initialization failed; self.nfc.scan will retry: %s",
+                     nfc_->last_error().c_str());
+        }
     }
 
     void InitializePortAI2c() {
@@ -5657,6 +5719,241 @@ private:
             });
 
         mcp_server.AddTool(
+            "self.imu.read",
+            "Read one 9-axis IMU snapshot from the on-board BMI270 accelerometer/gyroscope "
+            "and its BMM150 auxiliary magnetometer. Returns physical units (g, degrees per "
+            "second, microtesla), signed raw samples, data-ready flags, monotonic sample time, "
+            "and magnetometer availability. This dedicated read-only tool does not expose the "
+            "shared internal I2C bus.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                if (!imu_) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "IMU driver unavailable");
+                    return root;
+                }
+
+                StackChanImuSnapshot sample;
+                esp_err_t err = imu_->Read(&sample);
+                if (err != ESP_OK) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", imu_->last_error().c_str());
+                    cJSON_AddNumberToObject(root, "error_code", static_cast<int>(err));
+                    ESP_LOGW(TAG, "self.imu.read failed: %s", imu_->last_error().c_str());
+                    return root;
+                }
+
+                auto add_float_axis = [](cJSON* parent, const char* key,
+                                         const StackChanImuAxisFloat& axis) {
+                    cJSON* value = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(value, "x", axis.x);
+                    cJSON_AddNumberToObject(value, "y", axis.y);
+                    cJSON_AddNumberToObject(value, "z", axis.z);
+                    cJSON_AddItemToObject(parent, key, value);
+                };
+                auto add_raw_axis = [](cJSON* parent, const char* key,
+                                       const StackChanImuAxisRaw& axis) {
+                    cJSON* value = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(value, "x", axis.x);
+                    cJSON_AddNumberToObject(value, "y", axis.y);
+                    cJSON_AddNumberToObject(value, "z", axis.z);
+                    cJSON_AddItemToObject(parent, key, value);
+                };
+
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddStringToObject(root, "sensor", "BMI270+BMM150");
+                cJSON_AddNumberToObject(root, "bmi270_i2c_address", sample.bmi270_i2c_address);
+                cJSON_AddNumberToObject(root, "sample_time_us", sample.sample_time_us);
+                cJSON_AddBoolToObject(root, "mag_available", sample.mag_available);
+                add_float_axis(root, "accel_g", sample.accel_g);
+                add_float_axis(root, "gyro_dps", sample.gyro_dps);
+                if (sample.mag_available) {
+                    add_float_axis(root, "mag_ut", sample.mag_ut);
+                } else {
+                    cJSON_AddNullToObject(root, "mag_ut");
+                }
+
+                cJSON* raw = cJSON_CreateObject();
+                add_raw_axis(raw, "accel", sample.accel_raw);
+                add_raw_axis(raw, "gyro", sample.gyro_raw);
+                if (sample.mag_available) {
+                    add_raw_axis(raw, "mag", sample.mag_raw);
+                } else {
+                    cJSON_AddNullToObject(raw, "mag");
+                }
+                cJSON_AddItemToObject(root, "raw", raw);
+
+                cJSON* ready = cJSON_CreateObject();
+                cJSON_AddBoolToObject(ready, "accel", sample.accel_data_ready);
+                cJSON_AddBoolToObject(ready, "gyro", sample.gyro_data_ready);
+                cJSON_AddBoolToObject(ready, "mag", sample.mag_data_ready);
+                cJSON_AddItemToObject(root, "data_ready", ready);
+
+                ESP_LOGD(TAG,
+                         "self.imu.read accel=(%.3f,%.3f,%.3f)g gyro=(%.2f,%.2f,%.2f)dps "
+                         "mag_available=%d",
+                         sample.accel_g.x, sample.accel_g.y, sample.accel_g.z,
+                         sample.gyro_dps.x, sample.gyro_dps.y, sample.gyro_dps.z,
+                         sample.mag_available ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.environment.read",
+            "Read one LTR-553ALS-WA ambient-light and proximity snapshot. Returns the two ambient-light "
+            "ADC channels and the proximity ADC value in raw counts, data-ready/valid/saturation flags, "
+            "sensor identity, and a monotonic sample time. This dedicated tool never exposes the shared "
+            "internal I2C bus.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                if (!environment_) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "LTR-553 driver unavailable");
+                    return root;
+                }
+
+                StackChanEnvironmentSnapshot sample;
+                esp_err_t err = environment_->Read(&sample);
+                if (err != ESP_OK) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", environment_->last_error().c_str());
+                    cJSON_AddNumberToObject(root, "error_code", static_cast<int>(err));
+                    ESP_LOGW(TAG, "self.environment.read failed: %s",
+                             environment_->last_error().c_str());
+                    return root;
+                }
+
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddStringToObject(root, "sensor", "LTR-553ALS-WA");
+                cJSON_AddNumberToObject(root, "i2c_address", 0x23);
+                cJSON_AddNumberToObject(root, "part_id", sample.part_id);
+                cJSON_AddNumberToObject(root, "manufacturer_id", sample.manufacturer_id);
+                cJSON_AddNumberToObject(root, "sample_time_us", sample.sample_time_us);
+
+                cJSON* ambient_light = cJSON_CreateObject();
+                cJSON_AddStringToObject(ambient_light, "unit", "adc_counts");
+                cJSON_AddNumberToObject(ambient_light, "channel0_visible_ir",
+                                         sample.ambient_light_channel0);
+                cJSON_AddNumberToObject(ambient_light, "channel1_ir",
+                                         sample.ambient_light_channel1);
+                cJSON_AddBoolToObject(ambient_light, "data_ready",
+                                      sample.ambient_light_data_ready);
+                cJSON_AddBoolToObject(ambient_light, "valid", sample.ambient_light_valid);
+                cJSON_AddItemToObject(root, "ambient_light", ambient_light);
+
+                cJSON* proximity = cJSON_CreateObject();
+                cJSON_AddStringToObject(proximity, "unit", "adc_counts");
+                cJSON_AddNumberToObject(proximity, "raw", sample.proximity);
+                cJSON_AddBoolToObject(proximity, "data_ready", sample.proximity_data_ready);
+                cJSON_AddBoolToObject(proximity, "saturated", sample.proximity_saturated);
+                cJSON_AddItemToObject(root, "proximity", proximity);
+
+                ESP_LOGD(TAG,
+                         "self.environment.read als_ch0=%u als_ch1=%u ps=%u ready=%d/%d valid=%d sat=%d",
+                         sample.ambient_light_channel0, sample.ambient_light_channel1,
+                         sample.proximity, sample.ambient_light_data_ready ? 1 : 0,
+                         sample.proximity_data_ready ? 1 : 0,
+                         sample.ambient_light_valid ? 1 : 0,
+                         sample.proximity_saturated ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.nfc.scan",
+            "Scan once for a single ISO 14443A or NFC-F (FeliCa) tag with the body-mounted "
+            "ST25R3916. Returns UID/ATQA/SAK for ISO 14443A or IDm/PMm for NFC-F only; it does "
+            "not read or write tag memory, authenticate, emulate a card, or leave the RF field "
+            "enabled after the call. If multiple ISO 14443A tags collide, reports the collision "
+            "without choosing a tag.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                if (!nfc_) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "ST25R3916 driver unavailable");
+                    return root;
+                }
+
+                StackChanNfcSnapshot sample;
+                esp_err_t err = nfc_->Scan(&sample);
+                if (err != ESP_OK) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", nfc_->last_error().c_str());
+                    cJSON_AddNumberToObject(root, "error_code", static_cast<int>(err));
+                    ESP_LOGW(TAG, "self.nfc.scan failed: %s", nfc_->last_error().c_str());
+                    return root;
+                }
+
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddStringToObject(root, "sensor", "ST25R3916");
+                cJSON_AddNumberToObject(root, "i2c_address", 0x50);
+                cJSON_AddNumberToObject(root, "sample_time_us", sample.sample_time_us);
+                cJSON* reader = cJSON_CreateObject();
+                cJSON_AddNumberToObject(reader, "chip_type", sample.chip_type);
+                cJSON_AddNumberToObject(reader, "chip_revision", sample.chip_revision);
+                cJSON_AddItemToObject(root, "reader", reader);
+
+                cJSON* tag = cJSON_CreateObject();
+                cJSON_AddBoolToObject(tag, "present", sample.tag_present);
+                cJSON_AddBoolToObject(tag, "collision_detected", sample.collision_detected);
+                if (sample.protocol == StackChanNfcProtocol::kIso14443A) {
+                    cJSON_AddStringToObject(tag, "protocol", "ISO14443A");
+                } else if (sample.protocol == StackChanNfcProtocol::kNfcF) {
+                    cJSON_AddStringToObject(tag, "protocol", "NFC-F");
+                } else {
+                    cJSON_AddNullToObject(tag, "protocol");
+                }
+                if (sample.protocol == StackChanNfcProtocol::kIso14443A) {
+                    char atqa_hex[7];
+                    std::snprintf(atqa_hex, sizeof(atqa_hex), "0x%04X", sample.atqa);
+                    cJSON_AddStringToObject(tag, "atqa", atqa_hex);
+                } else {
+                    cJSON_AddNullToObject(tag, "atqa");
+                }
+                if (sample.protocol == StackChanNfcProtocol::kIso14443A) {
+                    char uid_hex[sizeof(sample.uid) * 2 + 1] = {};
+                    for (size_t i = 0; i < sample.uid_length; ++i) {
+                        std::snprintf(uid_hex + i * 2, sizeof(uid_hex) - i * 2,
+                                      "%02X", sample.uid[i]);
+                    }
+                    cJSON_AddStringToObject(tag, "uid", uid_hex);
+                    cJSON_AddNumberToObject(tag, "uid_length", sample.uid_length);
+                    cJSON_AddNumberToObject(tag, "sak", sample.sak);
+                } else {
+                    cJSON_AddNullToObject(tag, "uid");
+                    cJSON_AddNullToObject(tag, "uid_length");
+                    cJSON_AddNullToObject(tag, "sak");
+                }
+                if (sample.protocol == StackChanNfcProtocol::kNfcF) {
+                    char idm_hex[sizeof(sample.idm) * 2 + 1] = {};
+                    char pmm_hex[sizeof(sample.pmm) * 2 + 1] = {};
+                    for (size_t i = 0; i < sizeof(sample.idm); ++i) {
+                        std::snprintf(idm_hex + i * 2, sizeof(idm_hex) - i * 2,
+                                      "%02X", sample.idm[i]);
+                        std::snprintf(pmm_hex + i * 2, sizeof(pmm_hex) - i * 2,
+                                      "%02X", sample.pmm[i]);
+                    }
+                    cJSON_AddStringToObject(tag, "idm", idm_hex);
+                    cJSON_AddStringToObject(tag, "pmm", pmm_hex);
+                } else {
+                    cJSON_AddNullToObject(tag, "idm");
+                    cJSON_AddNullToObject(tag, "pmm");
+                }
+                cJSON_AddItemToObject(root, "tag", tag);
+
+                // A UID or NFC-F IDm can be a stable personal identifier.
+                // Keep it in the explicit tool response only; logs record no
+                // identifier bytes.
+                ESP_LOGD(TAG, "self.nfc.scan present=%d collision=%d protocol=%d uid_length=%u",
+                         sample.tag_present ? 1 : 0, sample.collision_detected ? 1 : 0,
+                         static_cast<int>(sample.protocol),
+                         static_cast<unsigned>(sample.uid_length));
+                return root;
+            });
+
+        mcp_server.AddTool(
             "self.robot.set_touch_sensor_enabled",
             "Update the NVS-backed head-touch sensor enable flag. Disabling "
             "takes effect immediately and persists across reboot; subsequent "
@@ -7359,24 +7656,23 @@ public:
         InitializePortAI2c();
         InitializeAxp2101();
         InitializeAw9523();
-        // I2cDetect() moved AFTER all I2C device initializations.
-        // The 128-address probe (i2c_master_probe over the whole bus) was
-        // leaving PY32 (0x6F) in a half-finished slave state, so the
-        // following transmit_receive (REG_VERSION via Repeated Start)
-        // timed out (0x103). Doing the scan after IOExpander/Si12T init
-        // preserves the boot-log debug info without poisoning subsequent
-        // register reads. Si12T (0x68) is unaffected on the same bus,
-        // but moving the scan is safer for any future I2C peripheral too.
         InitializeSpi();
         InitializeIli9342Display();
         InitializeCamera();
-        InitializeFt6336TouchPad();
         GetBacklight()->RestoreBrightness();
         InitializeIOExpander();
         InitializeServo();
         InitializeTouchSettings();
+        // Start the internal-bus sensor setup before the periodic touch tasks.
+        // BMI270's 8 KiB firmware upload occupies the bus long enough for a
+        // concurrent FT6336 poll to hit its 100 ms timeout and abort via the
+        // common I2cDevice helper. The external Port A scan remains available
+        // through the self.i2c.scan tool.
+        InitializeImu();
+        InitializeEnvironment();
+        InitializeNfc();
+        InitializeFt6336TouchPad();
         InitializeSi12tTouch();
-        I2cDetect();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
         // Avatar is shown on-demand via MCP set_avatar command.
         // InitializeAvatar();
