@@ -35,7 +35,7 @@ documented-only.
 - Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
   frame-geometry consistency, full-frame exports from layered sources,
   the avatar-set fetch window, and blink cadence tuning.
-  
+
 ### Gateway
 
 - Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
@@ -53,6 +53,18 @@ documented-only.
   connection flags. The id changes on every (re)connection, so a polling
   host can detect a device reboot even when the reconnect lands between
   polls and `connected` never reads false.
+- Added a command-queue watchdog to the HTTP daemon: a hung head-of-queue
+  dispatch is now force-dequeued after a per-tool timeout (default 30 s;
+  `say`/`listen`/`load_avatar_set` get longer budgets, and a
+  `load_avatar_set` call with an explicit `timeout` argument gets a
+  budget derived from that value so schema-legal long fetches are never
+  cut short) instead of stalling every queued command behind it, and a
+  saturated queue sheds the oldest cosmetic LED-class command (Port B
+  and Port C ws2812 frames alike) to admit new commands (`say`,
+  `set_avatar`, `take_photo`, `move_head` and other one-shot commands
+  are never dropped). Interventions are logged and appended to the
+  stackchan JSONL event log (`event_type="queue"`), following the
+  notify configuration's JSONL path and its `jsonl_enabled` gate.
 
 ### Firmware
 
