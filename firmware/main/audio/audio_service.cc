@@ -1,5 +1,6 @@
 #include "audio_service.h"
 #include <esp_log.h>
+#include <algorithm>
 #include <cstring>
 
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)        \
@@ -36,6 +37,12 @@
 #endif
 
 #define TAG "AudioService"
+
+namespace {
+
+constexpr size_t kRawCaptureFramePoolSize = MAX_ENCODE_TASKS_IN_QUEUE + 1;
+
+} // namespace
 
 AudioService::AudioService() {
     event_group_ = xEventGroupCreate();
@@ -124,7 +131,10 @@ void AudioService::Initialize(AudioCodec* codec) {
 
 void AudioService::Start() {
     service_stopped_ = false;
-    xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING | AS_EVENT_WAKE_WORD_RUNNING | AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+    xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING |
+        AS_EVENT_WAKE_WORD_RUNNING |
+        AS_EVENT_AUDIO_PROCESSOR_RUNNING |
+        AS_EVENT_RAW_CAPTURE_RUNNING);
 
     esp_timer_start_periodic(audio_power_timer_, 1000000);
 
@@ -171,7 +181,10 @@ void AudioService::Stop() {
     service_stopped_ = true;
     xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING |
         AS_EVENT_WAKE_WORD_RUNNING |
-        AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+        AS_EVENT_AUDIO_PROCESSOR_RUNNING |
+        AS_EVENT_RAW_CAPTURE_RUNNING);
+    raw_capture_generation_.fetch_add(1, std::memory_order_acq_rel);
+    ReleaseRawCaptureStorage();
 
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     audio_encode_queue_.clear();
@@ -230,7 +243,9 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
 void AudioService::AudioInputTask() {
     while (true) {
         EventBits_t bits = xEventGroupWaitBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING |
-            AS_EVENT_WAKE_WORD_RUNNING | AS_EVENT_AUDIO_PROCESSOR_RUNNING,
+            AS_EVENT_WAKE_WORD_RUNNING |
+            AS_EVENT_AUDIO_PROCESSOR_RUNNING |
+            AS_EVENT_RAW_CAPTURE_RUNNING,
             pdFALSE, pdFALSE, portMAX_DELAY);
 
         if (service_stopped_) {
@@ -265,15 +280,19 @@ void AudioService::AudioInputTask() {
             }
         }
 
-        /* Feed the wake word and/or audio processor */
-        if (bits & (AS_EVENT_WAKE_WORD_RUNNING | AS_EVENT_AUDIO_PROCESSOR_RUNNING)) {
+        /* Feed the wake word, raw capture, and/or audio processor */
+        if (bits & (AS_EVENT_WAKE_WORD_RUNNING |
+                    AS_EVENT_RAW_CAPTURE_RUNNING |
+                    AS_EVENT_AUDIO_PROCESSOR_RUNNING)) {
             int samples = 160; // 10ms
             std::vector<int16_t> data;
             if (ReadAudioData(data, 16000, samples)) {
                 if (bits & AS_EVENT_WAKE_WORD_RUNNING) {
                     wake_word_->Feed(data);
                 }
-                if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
+                if (bits & AS_EVENT_RAW_CAPTURE_RUNNING) {
+                    FeedRawCapture(std::move(data));
+                } else if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
                     audio_processor_->Feed(std::move(data));
                 }
                 continue;
@@ -285,6 +304,178 @@ void AudioService::AudioInputTask() {
     }
 
     ESP_LOGW(TAG, "Audio input task stopped");
+}
+
+void AudioService::FeedRawCapture(std::vector<int16_t>&& data) {
+    uint32_t generation = raw_capture_generation_.load(std::memory_order_acquire);
+    if (encoder_frame_size_ <= 0 || !IsRawCaptureGenerationCurrent(generation)) {
+        return;
+    }
+
+    if (codec_->input_channels() > 1) {
+        size_t channels = codec_->input_channels();
+        size_t mono_samples = data.size() / channels;
+        for (size_t i = 0, j = 0; i < mono_samples; ++i, j += channels) {
+            data[i] = data[j];
+        }
+        data.resize(mono_samples);
+    }
+
+    size_t offset = 0;
+    std::vector<int16_t> frame_pcm;
+    std::unique_lock<std::mutex> lock(raw_capture_mutex_);
+    while (offset < data.size()) {
+        if (!IsRawCaptureGenerationCurrent(generation) ||
+            !raw_capture_buffer_ ||
+            raw_capture_buffer_->size() != (size_t)encoder_frame_size_) {
+            return;
+        }
+
+        size_t writable = (size_t)encoder_frame_size_ - raw_capture_buffer_samples_;
+        size_t samples_to_copy = std::min(writable, data.size() - offset);
+        std::memcpy(raw_capture_buffer_->data() + raw_capture_buffer_samples_,
+                    data.data() + offset,
+                    samples_to_copy * sizeof(int16_t));
+        raw_capture_buffer_samples_ += samples_to_copy;
+        offset += samples_to_copy;
+
+        if (raw_capture_buffer_samples_ == (size_t)encoder_frame_size_) {
+            frame_pcm.resize(encoder_frame_size_);
+            std::memcpy(frame_pcm.data(), raw_capture_buffer_->data(), encoder_frame_size_ * sizeof(int16_t));
+            raw_capture_buffer_samples_ = 0;
+            lock.unlock();
+            if (!PushRawCaptureFrameToEncodeQueue(generation, frame_pcm.data())) {
+                return;
+            }
+            lock.lock();
+        }
+    }
+}
+
+void AudioService::ResetRawCaptureBuffer() {
+    std::lock_guard<std::mutex> lock(raw_capture_mutex_);
+    raw_capture_buffer_samples_ = 0;
+}
+
+bool AudioService::IsRawCaptureGenerationCurrent(uint32_t generation) const {
+    return generation != 0 &&
+        raw_capture_generation_.load(std::memory_order_acquire) == generation &&
+        IsRawCaptureRunning();
+}
+
+void AudioService::AllocateRawCaptureStorage() {
+    if (encoder_frame_size_ <= 0) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(raw_capture_mutex_);
+        if (!raw_capture_buffer_) {
+            raw_capture_buffer_ = std::make_unique<std::vector<int16_t>>();
+        }
+        raw_capture_buffer_->resize(encoder_frame_size_);
+        raw_capture_buffer_samples_ = 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        if (!raw_capture_free_frames_) {
+            raw_capture_free_frames_ = std::make_unique<std::deque<std::unique_ptr<RawCaptureFrame>>>();
+        } else {
+            raw_capture_free_frames_->clear();
+        }
+        for (size_t i = 0; i < kRawCaptureFramePoolSize; ++i) {
+            auto frame = std::make_unique<RawCaptureFrame>();
+            frame->pcm.resize(encoder_frame_size_);
+            raw_capture_free_frames_->push_back(std::move(frame));
+        }
+        audio_queue_cv_.notify_all();
+    }
+}
+
+void AudioService::DropRawCaptureQueuedDataLocked() {
+    for (auto it = audio_encode_queue_.begin(); it != audio_encode_queue_.end();) {
+        if ((*it)->raw_capture_generation != 0) {
+            it = audio_encode_queue_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = audio_send_queue_.begin(); it != audio_send_queue_.end();) {
+        if ((*it)->raw_capture_generation != 0) {
+            it = audio_send_queue_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void AudioService::ReleaseRawCaptureStorage() {
+    {
+        std::lock_guard<std::mutex> lock(raw_capture_mutex_);
+        raw_capture_buffer_.reset();
+        raw_capture_buffer_samples_ = 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        DropRawCaptureQueuedDataLocked();
+        raw_capture_free_frames_.reset();
+        audio_queue_cv_.notify_all();
+    }
+}
+
+bool AudioService::PushRawCaptureFrameToEncodeQueue(uint32_t generation, const int16_t* pcm) {
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    audio_queue_cv_.wait(lock, [this, generation]() {
+        return service_stopped_ ||
+            !IsRawCaptureGenerationCurrent(generation) ||
+            (audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE &&
+             raw_capture_free_frames_ &&
+             !raw_capture_free_frames_->empty());
+    });
+
+    if (service_stopped_ ||
+        !IsRawCaptureGenerationCurrent(generation) ||
+        !raw_capture_free_frames_ ||
+        raw_capture_free_frames_->empty()) {
+        return false;
+    }
+
+    auto frame = std::move(raw_capture_free_frames_->front());
+    raw_capture_free_frames_->pop_front();
+    std::memcpy(frame->pcm.data(), pcm, encoder_frame_size_ * sizeof(int16_t));
+
+    auto task = std::make_unique<AudioTask>();
+    task->type = kAudioTaskTypeEncodeToSendQueue;
+    task->raw_capture_generation = generation;
+    task->raw_capture_frame = std::move(frame);
+
+    if (!timestamp_queue_.empty()) {
+        if (timestamp_queue_.size() <= MAX_TIMESTAMPS_IN_QUEUE) {
+            task->timestamp = timestamp_queue_.front();
+        } else {
+            ESP_LOGW(TAG, "Timestamp queue (%u) is full, dropping timestamp",
+                     (unsigned)timestamp_queue_.size());
+        }
+        timestamp_queue_.pop_front();
+    }
+
+    audio_encode_queue_.push_back(std::move(task));
+    audio_queue_cv_.notify_all();
+    return true;
+}
+
+void AudioService::ReturnRawCaptureFrame(std::unique_ptr<RawCaptureFrame> frame, uint32_t generation) {
+    if (!frame) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    if (IsRawCaptureGenerationCurrent(generation) && raw_capture_free_frames_) {
+        raw_capture_free_frames_->push_back(std::move(frame));
+    }
+    audio_queue_cv_.notify_all();
 }
 
 void AudioService::AudioOutputTask() {
@@ -402,11 +593,21 @@ void AudioService::OpusCodecTask() {
             packet->frame_duration = OPUS_FRAME_DURATION_MS;
             packet->sample_rate = 16000;
             packet->timestamp = task->timestamp;
+            packet->raw_capture_generation = task->raw_capture_generation;
+            bool is_raw_capture_task = task->raw_capture_generation != 0;
+            const auto* pcm_data = is_raw_capture_task ? task->raw_capture_frame->pcm.data() : task->pcm.data();
+            size_t pcm_size = is_raw_capture_task ? task->raw_capture_frame->pcm.size() : task->pcm.size();
 
-            if (opus_encoder_ != nullptr && task->pcm.size() == encoder_frame_size_) {
+            if (is_raw_capture_task && !IsRawCaptureGenerationCurrent(task->raw_capture_generation)) {
+                ReturnRawCaptureFrame(std::move(task->raw_capture_frame), task->raw_capture_generation);
+                lock.lock();
+                continue;
+            }
+
+            if (opus_encoder_ != nullptr && pcm_size == (size_t)encoder_frame_size_) {
                 std::vector<uint8_t> buf(encoder_outbuf_size_);
                 esp_audio_enc_in_frame_t in = {
-                    .buffer = (uint8_t *)(task->pcm.data()),
+                    .buffer = (uint8_t *)(pcm_data),
                     .len = (uint32_t)(encoder_frame_size_ * sizeof(int16_t)),
                 };
                 esp_audio_enc_out_frame_t out = {
@@ -416,9 +617,14 @@ void AudioService::OpusCodecTask() {
                 };
                 auto ret = esp_opus_enc_process(opus_encoder_, &in, &out);
                 if (ret == ESP_AUDIO_ERR_OK) {
-                    packet->payload.assign(buf.data(), buf.data() + out.encoded_bytes);
+                    bool should_queue_packet = !is_raw_capture_task ||
+                        IsRawCaptureGenerationCurrent(task->raw_capture_generation);
 
-                    if (task->type == kAudioTaskTypeEncodeToSendQueue) {
+                    if (should_queue_packet) {
+                        packet->payload.assign(buf.data(), buf.data() + out.encoded_bytes);
+                    }
+
+                    if (should_queue_packet && task->type == kAudioTaskTypeEncodeToSendQueue) {
                         {
                             std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
                             audio_send_queue_.push_back(std::move(packet));
@@ -426,7 +632,7 @@ void AudioService::OpusCodecTask() {
                         if (callbacks_.on_send_queue_available) {
                             callbacks_.on_send_queue_available();
                         }
-                    } else if (task->type == kAudioTaskTypeEncodeToTestingQueue) {
+                    } else if (should_queue_packet && task->type == kAudioTaskTypeEncodeToTestingQueue) {
                         std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
                         audio_testing_queue_.push_back(std::move(packet));
                     }
@@ -436,7 +642,10 @@ void AudioService::OpusCodecTask() {
                 }
             } else {
                 ESP_LOGE(TAG, "Failed to encode audio: encoder not configured or invalid frame size (got %u, expected %u)",
-                         task->pcm.size(), encoder_frame_size_);
+                         (unsigned)pcm_size, (unsigned)encoder_frame_size_);
+            }
+            if (is_raw_capture_task) {
+                ReturnRawCaptureFrame(std::move(task->raw_capture_frame), task->raw_capture_generation);
             }
             lock.lock();
         }
@@ -493,7 +702,8 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
         if (timestamp_queue_.size() <= MAX_TIMESTAMPS_IN_QUEUE) {
             task->timestamp = timestamp_queue_.front();
         } else {
-            ESP_LOGW(TAG, "Timestamp queue (%u) is full, dropping timestamp", timestamp_queue_.size());
+            ESP_LOGW(TAG, "Timestamp queue (%u) is full, dropping timestamp",
+                     (unsigned)timestamp_queue_.size());
         }
         timestamp_queue_.pop_front();
     }
@@ -519,13 +729,17 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
 
 std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    if (audio_send_queue_.empty()) {
-        return nullptr;
+    while (!audio_send_queue_.empty()) {
+        auto packet = std::move(audio_send_queue_.front());
+        audio_send_queue_.pop_front();
+        audio_queue_cv_.notify_all();
+        if (packet->raw_capture_generation != 0 &&
+            raw_capture_generation_.load(std::memory_order_acquire) != packet->raw_capture_generation) {
+            continue;
+        }
+        return packet;
     }
-    auto packet = std::move(audio_send_queue_.front());
-    audio_send_queue_.pop_front();
-    audio_queue_cv_.notify_all();
-    return packet;
+    return nullptr;
 }
 
 void AudioService::EncodeWakeWord() {
@@ -579,6 +793,10 @@ void AudioService::EnableWakeWordDetection(bool enable) {
 void AudioService::EnableVoiceProcessing(bool enable) {
     ESP_LOGD(TAG, "%s voice processing", enable ? "Enabling" : "Disabling");
     if (enable) {
+        xEventGroupClearBits(event_group_, AS_EVENT_RAW_CAPTURE_RUNNING);
+        raw_capture_generation_.fetch_add(1, std::memory_order_acq_rel);
+        audio_queue_cv_.notify_all();
+        ReleaseRawCaptureStorage();
         if (!audio_processor_initialized_) {
             audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS, models_list_);
             audio_processor_initialized_ = true;
@@ -600,6 +818,34 @@ void AudioService::EnableVoiceProcessing(bool enable) {
     } else {
         audio_processor_->Stop();
         xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+    }
+}
+
+void AudioService::EnableRawCapture(bool enable) {
+    ESP_LOGD(TAG, "%s raw capture", enable ? "Enabling" : "Disabling");
+    if (enable) {
+        raw_capture_generation_.fetch_add(1, std::memory_order_acq_rel);
+        audio_queue_cv_.notify_all();
+        if (audio_processor_initialized_) {
+            audio_processor_->Stop();
+        }
+        xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+
+        ResetDecoder();
+        audio_input_need_warmup_ = true;
+        {
+            std::lock_guard<std::mutex> lock(input_resampler_mutex_);
+            if (input_resampler_ != nullptr) {
+                esp_ae_rate_cvt_reset(input_resampler_);
+            }
+        }
+        AllocateRawCaptureStorage();
+        xEventGroupSetBits(event_group_, AS_EVENT_RAW_CAPTURE_RUNNING);
+    } else {
+        xEventGroupClearBits(event_group_, AS_EVENT_RAW_CAPTURE_RUNNING);
+        raw_capture_generation_.fetch_add(1, std::memory_order_acq_rel);
+        audio_queue_cv_.notify_all();
+        ReleaseRawCaptureStorage();
     }
 }
 

@@ -32,6 +32,7 @@ set(SOURCES "audio/audio_codec.cc"
             "protocols/mdns_gateway_discovery.cc"
             "mcp_server.cc"
             "system_info.cc"
+            "listening_profile.cc"
             "application.cc"
             "ota.cc"
             "settings.cc"
@@ -1025,6 +1026,7 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
     )
 endif()
 if(CONFIG_STACKCHAN_MDNS_DISCOVERY)
+    list(APPEND SOURCES "protocols/mdns_candidate_extract.cc")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA espressif__mdns)
 endif()
 

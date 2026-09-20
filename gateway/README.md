@@ -75,6 +75,25 @@ Default ports:
 - WebSocket (ESP32 -> gateway): `0.0.0.0:8765`
 - HTTP capture (ESP32 -> gateway): `0.0.0.0:8766`
 
+## Daemon mode (Phase B)
+
+For multi-client setups, run one shared Streamable HTTP daemon instead of
+letting each MCP client spawn its own stdio gateway:
+
+```bash
+uv run stackchan-mcp serve --transport streamable-http
+```
+
+The daemon exposes MCP at `http://127.0.0.1:8767/mcp` by default, keeps the
+existing ESP32 WebSocket and capture listeners, and serializes ESP32-bound
+tool calls through a bounded command queue. See
+[`../docs/178-daemon-setup.md`](../docs/178-daemon-setup.md) for environment
+variables, bearer-token rules, `MCP_HTTP_ALLOWED_HOSTS`, bind safety, and
+migration notes.
+
+The zero-subcommand stdio mode remains supported and unchanged for existing
+client configs.
+
 By default, the gateway advertises the WebSocket endpoint as
 `_stackchan-mcp._tcp.local.` via mDNS/DNS-SD so fresh firmware can discover it
 on the local LAN. Run `stackchan-mcp --no-mdns` to disable this advertisement.
@@ -90,10 +109,10 @@ again, check `get_status` from the stdio MCP side to confirm the device is back.
 ## Configuration changes
 
 The gateway reads `.env` once at process start. Because the gateway runs as a
-**stdio MCP server** (it has no standalone CLI mode beyond `--help` /
-`--version` / `--check`), editing `.env` while it is connected to an MCP
-client does not take effect on the running process — and killing the gateway
-process directly will not auto-restart it; the MCP client owns the lifecycle.
+**stdio MCP server** by default, editing `.env` while it is connected to an MCP
+client does not take effect on the running process — and killing that stdio
+gateway process directly will not auto-restart it; the MCP client owns the
+lifecycle. In daemon mode, restart the daemon process after changing `.env`.
 
 After editing `.env` (for example to update `STACKCHAN_TOKEN`, `VISION_URL`,
 or `VISION_TOKEN`):
@@ -153,7 +172,7 @@ Same shape, under `mcpServers`.
 |---|---|
 | `get_status` | Gateway connection state (ESP32 connected? device info?) |
 | `get_device_info` | ESP32 device status (battery, volume, WiFi, etc.) |
-| `take_photo(question?)` | Trigger camera capture; returns saved JPEG path |
+| `take_photo(question?)` | Trigger camera capture; returns the saved JPEG path plus the image itself as an inline MCP image block |
 | `set_volume(volume)` | Speaker volume 0-100 |
 | `set_brightness(brightness)` | Screen brightness 0-100 |
 | `move_head(yaw, pitch, speed?)` | Drive yaw + pitch servos |
@@ -168,6 +187,11 @@ Same shape, under `mcpServers`.
 | `set_all_leds(r, g, b)` | Set all 12 base RGB LEDs to the same color. Updates immediately. |
 | `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array (1..12 entries). Single I2C burst + one latch — use this for animations / multi-color patterns instead of N individual `set_led` calls. Trailing LEDs (beyond `len(colors)`) keep their previous color. Validation is atomic: a malformed entry rejects the whole call without mutating any LED. |
 | `clear_leds` | Turn all 12 base RGB LEDs off. |
+| `beat_mode_start(motion_intensity?, sensitivity?, color?, duration_sec?)` | Start gateway-side beat mode: capture ambient audio through the existing `listen` wire path, estimate BPM locally, and drive free-running head sway plus base-ring LED flashes. `sensitivity` tunes the onset floor for quiet rooms or loud venues. `listen()` is mutually exclusive while active; `say()` may interrupt and beat mode re-arms listening afterwards. Requires the `[stt]` extra for Opus decoding. |
+| `beat_mode_stop()` | Stop beat mode and retain the latest rolling audio buffer for clip export until the next beat-mode start or gateway restart. |
+| `beat_mode_update(motion_intensity?, sensitivity?, color?, blink_rate?, motion_enabled?, led_enabled?)` | Update beat-mode motion/LED parameters without restarting capture. |
+| `beat_meta_snapshot()` | Poll the latest beat metadata, active sensitivity/minimum onset floor, capture health, counters, and current motion/LED parameters. |
+| `beat_clip_save(seconds?)` | Save the latest rolling beat-mode audio as a 16 kHz mono WAV temp file and return its path plus captured duration. |
 
 The 12 base LEDs are 12× WS2812C wired to the PY32L020 IO expander
 (expander pin 13, not an ESP32 GPIO), so all four LED tools share the

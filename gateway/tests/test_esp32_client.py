@@ -3,11 +3,15 @@
 import asyncio
 import gc
 import json
+import logging
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
 import websockets
+from websockets.frames import Close
 
+from stackchan_mcp import esp32_client
 from stackchan_mcp.esp32_client import ESP32Connection, ESP32Manager, _hardware_lane
 
 
@@ -26,6 +30,78 @@ async def manager():
     await mgr.stop()
 
 
+class _FakeServeServer:
+    def __init__(self) -> None:
+        self.closed = False
+        self.waited = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        self.waited = True
+
+
+class _ClosingHandlerWebSocket:
+    """Fake server-side WebSocket that raises a close exception from iteration."""
+
+    def __init__(
+        self,
+        messages: list[str | bytes],
+        close_exc: websockets.exceptions.ConnectionClosed,
+    ) -> None:
+        self._messages = messages
+        self._close_exc = close_exc
+        self.request = SimpleNamespace(headers={"Device-Id": "device-test"})
+        self.sent: list[str | bytes] = []
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._messages:
+            return self._messages.pop(0)
+        raise self._close_exc
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _GracefulCloseHandlerWebSocket:
+    """Fake server-side WebSocket whose iterator exits after a graceful close."""
+
+    def __init__(
+        self,
+        messages: list[str | bytes],
+        close_code: int | None,
+        close_reason: str | None,
+    ) -> None:
+        self._messages = messages
+        self.close_code = close_code
+        self.close_reason = close_reason
+        self.request = SimpleNamespace(headers={"Device-Id": "device-test"})
+        self.sent: list[str | bytes] = []
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._messages:
+            return self._messages.pop(0)
+        raise StopAsyncIteration
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 @pytest.mark.asyncio
 async def test_manager_starts_and_stops():
     """Manager can start and stop cleanly."""
@@ -34,6 +110,40 @@ async def test_manager_starts_and_stops():
     assert mgr._server is not None
     await mgr.stop()
     assert mgr._server is None
+
+
+@pytest.mark.asyncio
+async def test_manager_start_sets_explicit_websocket_keepalive(monkeypatch, caplog):
+    """The gateway keeps websockets defaults explicit and visible in logs."""
+    captured: dict[str, object] = {}
+    fake_server = _FakeServeServer()
+
+    async def fake_serve(handler, host, port, **kwargs):
+        captured.update(
+            {
+                "handler": handler,
+                "host": host,
+                "port": port,
+                "kwargs": kwargs,
+            }
+        )
+        return fake_server
+
+    monkeypatch.setattr(websockets, "serve", fake_serve)
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    mgr = ESP32Manager()
+
+    await mgr.start("127.0.0.1", 8765)
+    await mgr.stop()
+
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 8765
+    kwargs = captured["kwargs"]
+    assert kwargs["ping_interval"] == 20
+    assert kwargs["ping_timeout"] == 20
+    assert fake_server.closed is True
+    assert fake_server.waited is True
+    assert "ping_interval=20 ping_timeout=20" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -132,6 +242,13 @@ async def test_esp32_hello_handshake(manager):
         }
         await ws.send(json.dumps(tools_resp))
 
+        auto_msg = await _expect_auto_idle_avatar(ws)
+        await _send_mcp_response(
+            ws,
+            auto_msg,
+            result={"content": [{"type": "text", "text": "true"}], "isError": False},
+        )
+
         # Wait for manager to process
         await asyncio.sleep(0.2)
 
@@ -205,6 +322,84 @@ async def test_esp32_disconnect_handling(manager):
 
 
 @pytest.mark.asyncio
+async def test_handler_logs_graceful_close_details_once(monkeypatch, caplog):
+    """Normal async-for completion still logs enriched close details once."""
+    ticks = iter([100.0, 103.25, 105.5])
+    monkeypatch.setattr(esp32_client, "_monotonic", lambda: next(ticks))
+    ws = _GracefulCloseHandlerWebSocket(
+        [json.dumps({"type": "noop"})],
+        close_code=1000,
+        close_reason="normal",
+    )
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+
+    await ESP32Manager()._handler(ws)  # type: ignore[arg-type]
+
+    disconnect_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("ESP32 disconnected:")
+    ]
+    assert disconnect_logs == [
+        "ESP32 disconnected: device=device-test close_class=GracefulClose "
+        "rcvd_code=1000 rcvd_reason='normal' sent_code=None sent_reason=None "
+        "last_frame_age_s=2.250 lifetime_s=5.500"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_close_details_with_last_frame_elapsed(monkeypatch, caplog):
+    """Disconnect logs include close class, close frames, and timing fields."""
+    ticks = iter([100.0, 103.25, 105.5])
+    monkeypatch.setattr(esp32_client, "_monotonic", lambda: next(ticks))
+    close_exc = websockets.exceptions.ConnectionClosedOK(
+        Close(1000, "normal"),
+        Close(1000, "ack"),
+        True,
+    )
+    ws = _ClosingHandlerWebSocket(
+        [json.dumps({"type": "noop"})],
+        close_exc,
+    )
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+
+    await ESP32Manager()._handler(ws)  # type: ignore[arg-type]
+
+    assert "ESP32 disconnected: device=device-test" in caplog.text
+    assert "close_class=ConnectionClosedOK" in caplog.text
+    assert "rcvd_code=1000 rcvd_reason='normal'" in caplog.text
+    assert "sent_code=1000 sent_reason='ack'" in caplog.text
+    assert "last_frame_age_s=2.250" in caplog.text
+    assert "lifetime_s=5.500" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_close_details_when_fields_are_missing(
+    monkeypatch,
+    caplog,
+):
+    """Missing close fields and missing inbound frames are logged safely."""
+    ticks = iter([200.0, 204.75])
+    monkeypatch.setattr(esp32_client, "_monotonic", lambda: next(ticks))
+    close_exc = websockets.exceptions.ConnectionClosedError(
+        Close(1006, "abnormal"),
+        None,
+        None,
+    )
+    ws = _ClosingHandlerWebSocket([], close_exc)
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+
+    await ESP32Manager()._handler(ws)  # type: ignore[arg-type]
+
+    assert "ESP32 disconnected: device=device-test" in caplog.text
+    assert "close_class=ConnectionClosedError" in caplog.text
+    assert "rcvd_code=1006 rcvd_reason='abnormal'" in caplog.text
+    assert "sent_code=None sent_reason=None" in caplog.text
+    assert "last_frame_age_s=None" in caplog.text
+    assert "lifetime_s=4.750" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_auth_rejection(manager):
     """Unauthorized connections are rejected."""
     import os
@@ -234,6 +429,8 @@ async def test_auth_rejection(manager):
     [
         ("self.robot.set_head_angles", "servo"),
         ("self.led.set_many", "led"),
+        ("self.port_b.ws2812.set_strip", "port_b"),
+        ("self.port_c.ws2812.set_strip", "port_c"),
         ("self.display.set_avatar", "avatar"),
         ("self.screen.set_brightness", "display"),
         ("self.audio_speaker.set_volume", "audio"),
@@ -316,6 +513,265 @@ async def test_connection_removes_pending_request_when_call_is_cancelled():
         await task
 
     assert conn._pending == {}
+
+
+# ---------------------------------------------------------------------------
+# Auto idle avatar render after session initialization (Issue #77)
+# ---------------------------------------------------------------------------
+
+
+class _InitDeviceConnection:
+    """Fake connection for exercising ESP32Manager._init_device."""
+
+    def __init__(
+        self,
+        *,
+        avatar_render_sent: bool = False,
+        discover_ok: bool = True,
+        auto_error: dict | None = None,
+        auto_exception: Exception | None = None,
+    ) -> None:
+        self.tools: list[dict] = []
+        self.tools_discovered = False
+        self.avatar_render_sent = avatar_render_sent
+        self.discover_ok = discover_ok
+        self.auto_error = auto_error
+        self.auto_exception = auto_exception
+        self.initialize_calls = 0
+        self.discover_calls = 0
+        self.call_tool_calls: list[tuple[str, dict]] = []
+
+    async def initialize(self, *, vision_url: str = "", vision_token: str = "") -> bool:
+        self.initialize_calls += 1
+        return True
+
+    async def discover_tools(self) -> list[dict]:
+        self.discover_calls += 1
+        if not self.discover_ok:
+            self.tools = []
+            self.tools_discovered = False
+            return self.tools
+
+        self.tools = [
+            {
+                "name": "self.display.set_avatar",
+                "description": "Set avatar",
+                "inputSchema": {"type": "object"},
+            }
+        ]
+        self.tools_discovered = True
+        return self.tools
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.call_tool_calls.append((name, arguments))
+        if name == "self.display.set_avatar":
+            self.avatar_render_sent = True
+        if self.auto_exception is not None:
+            raise self.auto_exception
+        return {"content": [{"type": "text", "text": "true"}]}, self.auto_error
+
+
+class _AutoMcpWebSocket:
+    """Fake WebSocket that responds to gateway MCP requests immediately."""
+
+    def __init__(self) -> None:
+        self.connection: ESP32Connection | None = None
+        self.sent: list[str] = []
+        self.tool_calls: list[tuple[str, dict]] = []
+
+    async def send(self, data: str) -> None:
+        self.sent.append(data)
+        message = json.loads(data)
+        payload = message["payload"]
+        method = payload["method"]
+
+        if method == "initialize":
+            result = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "test-device", "version": "1.0.0"},
+            }
+        elif method == "tools/list":
+            result = {
+                "tools": [
+                    {
+                        "name": "self.display.set_avatar",
+                        "description": "Set avatar",
+                        "inputSchema": {"type": "object"},
+                    }
+                ],
+                "nextCursor": "",
+            }
+        elif method == "tools/call":
+            params = payload["params"]
+            self.tool_calls.append((params["name"], params["arguments"]))
+            result = {"content": [{"type": "text", "text": "true"}], "isError": False}
+        else:
+            raise AssertionError(f"unexpected MCP method: {method}")
+
+        assert self.connection is not None
+        self.connection.handle_response(
+            {"jsonrpc": "2.0", "id": payload["id"], "result": result}
+        )
+
+
+@pytest.mark.asyncio
+async def test_init_auto_renders_idle_avatar_after_tools_list():
+    """A successful initialize + tools/list sends idle set_avatar once."""
+    ws = _AutoMcpWebSocket()
+    connection = ESP32Connection(ws, session_id="session-auto")  # type: ignore[arg-type]
+    ws.connection = connection
+    mgr = ESP32Manager()
+
+    await mgr._init_device(connection, "device-test")
+
+    assert ws.tool_calls == [("self.display.set_avatar", {"face": "idle"})]
+    assert connection.avatar_render_sent is True
+
+
+@pytest.mark.asyncio
+async def test_init_skips_auto_idle_avatar_when_avatar_already_sent():
+    """The connection-scoped flag suppresses the automatic idle render."""
+    mgr = ESP32Manager()
+    connection = _InitDeviceConnection(avatar_render_sent=True)
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert connection.initialize_calls == 1
+    assert connection.discover_calls == 1
+    assert connection.call_tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_init_skips_auto_idle_avatar_when_tools_discovery_fails(caplog):
+    """The auto-render path only runs after successful tools/list discovery."""
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    mgr = ESP32Manager()
+    connection = _InitDeviceConnection(discover_ok=False)
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert connection.initialize_calls == 1
+    assert connection.discover_calls == 1
+    assert connection.call_tool_calls == []
+    assert "ESP32 ready: device=device-test" not in caplog.text
+
+
+@pytest.mark.parametrize("failure_mode", ["error", "timeout"])
+@pytest.mark.asyncio
+async def test_init_continues_when_auto_idle_avatar_fails(failure_mode, caplog):
+    """Auto-render failures are warnings and do not block ESP32 ready."""
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    if failure_mode == "error":
+        connection = _InitDeviceConnection(
+            auto_error={"code": -32000, "message": "device rejected set_avatar"}
+        )
+    else:
+        connection = _InitDeviceConnection(
+            auto_exception=asyncio.TimeoutError("set_avatar timed out")
+        )
+    mgr = ESP32Manager()
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert connection.call_tool_calls == [
+        ("self.display.set_avatar", {"face": "idle"})
+    ]
+    assert "auto-rendering idle avatar failed" in caplog.text
+    assert "ESP32 ready: device=device-test tools=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_reconnect_auto_renders_idle_avatar_again():
+    """A new ESP32Connection gets a fresh auto-render flag."""
+    first_ws = _AutoMcpWebSocket()
+    first = ESP32Connection(first_ws, session_id="session-first")  # type: ignore[arg-type]
+    first_ws.connection = first
+    second_ws = _AutoMcpWebSocket()
+    second = ESP32Connection(second_ws, session_id="session-second")  # type: ignore[arg-type]
+    second_ws.connection = second
+    mgr = ESP32Manager()
+
+    await mgr._init_device(first, "device-test")
+    await mgr._init_device(second, "device-test")
+
+    assert first_ws.tool_calls == [("self.display.set_avatar", {"face": "idle"})]
+    assert second_ws.tool_calls == [("self.display.set_avatar", {"face": "idle"})]
+
+
+@pytest.mark.asyncio
+async def test_send_avatar_set_fetch_resolves_when_loaded_event_arrives():
+    """avatar_set_loaded resolves the matching load_avatar_set waiter."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-avatar")  # type: ignore[arg-type]
+
+    task = asyncio.create_task(
+        conn.send_avatar_set_fetch(
+            url="https://example.invalid/avatar-set.bin",
+            token="test-token",
+            mode="replace",
+            checksum="sha256:avatar-set",
+            expected_size=1234,
+            timeout=30.0,
+        )
+    )
+
+    await asyncio.sleep(0)
+    assert len(ws.sent) == 1
+    assert json.loads(ws.sent[0]) == {
+        "type": "avatar_set_fetch",
+        "url": "https://example.invalid/avatar-set.bin",
+        "token": "test-token",
+        "mode": "replace",
+        "checksum": "sha256:avatar-set",
+        "expected_size": 1234,
+    }
+
+    payload = {
+        "ok": True,
+        "checksum": "sha256:avatar-set",
+        "bytes": 1234,
+    }
+    conn.handle_avatar_set_loaded(payload)
+
+    result = await asyncio.wait_for(task, timeout=1.0)
+    assert result == payload
+    assert conn._avatar_set_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_send_avatar_set_fetch_returns_disconnected_when_connection_drops():
+    """Disconnect wakes an in-flight avatar set fetch without waiting for timeout."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-avatar")  # type: ignore[arg-type]
+
+    task = asyncio.create_task(
+        conn.send_avatar_set_fetch(
+            url="https://example.invalid/avatar-set.bin",
+            token="test-token",
+            mode="replace",
+            checksum="sha256:avatar-set",
+            expected_size=1234,
+            timeout=30.0,
+        )
+    )
+
+    await asyncio.sleep(0)
+    assert len(ws.sent) == 1
+    assert len(conn._avatar_set_waiters) == 1
+
+    started_at = asyncio.get_running_loop().time()
+    conn.disconnect()
+    result = await asyncio.wait_for(task, timeout=1.0)
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert result == {
+        "ok": False,
+        "checksum": "sha256:avatar-set",
+        "error": "disconnected",
+    }
+    assert elapsed < 1.0
+    assert conn._avatar_set_waiters == {}
 
 
 class _GateableConnection:
@@ -558,7 +1014,7 @@ async def test_manager_send_tts_state_no_device():
 
 @pytest.mark.asyncio
 async def test_connection_send_listen_state_start_includes_mode():
-    """listen.start carries a mode field on the wire."""
+    """listen.start carries a mode field and omits the default voice profile."""
     ws = _FakeWebSocket()
     conn = ESP32Connection(ws, session_id="session-listen")  # type: ignore[arg-type]
 
@@ -571,6 +1027,25 @@ async def test_connection_send_listen_state_start_includes_mode():
         "type": "listen",
         "state": "start",
         "mode": "manual",
+    }
+
+
+@pytest.mark.asyncio
+async def test_connection_send_listen_state_raw_profile_includes_profile():
+    """listen.start carries profile only when a non-default profile is requested."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-listen")  # type: ignore[arg-type]
+
+    await conn.send_listen_state("start", mode="manual", profile="raw")
+
+    assert len(ws.sent) == 1
+    payload = json.loads(ws.sent[0])
+    assert payload == {
+        "session_id": "session-listen",
+        "type": "listen",
+        "state": "start",
+        "mode": "manual",
+        "profile": "raw",
     }
 
 
@@ -726,7 +1201,7 @@ def test_connection_default_protocol_version_is_one():
 # ---------------------------------------------------------------------------
 
 
-async def _complete_handshake(ws, tools=None):
+async def _complete_handshake(ws, tools=None, *, consume_auto_avatar=True):
     """Complete the full ESP32 handshake sequence."""
     if tools is None:
         tools = []
@@ -774,6 +1249,49 @@ async def _complete_handshake(ws, tools=None):
         },
     }
     await ws.send(json.dumps(tools_resp))
+    if not consume_auto_avatar:
+        return None
+
+    auto_msg = await _expect_auto_idle_avatar(ws)
+    await _send_mcp_response(
+        ws,
+        auto_msg,
+        result={"content": [{"type": "text", "text": "true"}], "isError": False},
+    )
+    return auto_msg
+
+
+async def _expect_auto_idle_avatar(ws):
+    """Receive and assert the automatic idle avatar tools/call."""
+    auto_raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+    auto_msg = json.loads(auto_raw)
+    assert auto_msg["type"] == "mcp"
+    assert auto_msg["payload"]["method"] == "tools/call"
+    assert auto_msg["payload"]["params"]["name"] == "self.display.set_avatar"
+    assert auto_msg["payload"]["params"]["arguments"] == {"face": "idle"}
+    return auto_msg
+
+
+async def _send_mcp_response(ws, req_msg, *, result=None, error=None):
+    """Send a JSON-RPC response for a gateway-originated MCP request."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": req_msg["payload"]["id"],
+    }
+    if error is None:
+        payload["result"] = result or {}
+    else:
+        payload["error"] = error
+
+    await ws.send(
+        json.dumps(
+            {
+                "session_id": req_msg["session_id"],
+                "type": "mcp",
+                "payload": payload,
+            }
+        )
+    )
 
 
 # --- Device-driven listen capture --------------------------------------------
@@ -932,4 +1450,3 @@ async def test_device_driven_listen_cleanup_on_disconnect(manager_with_hook):
     assert not is_recording(), "recording slot was leaked across connections"
     # No push should have fired for the aborted capture.
     assert calls == []
-

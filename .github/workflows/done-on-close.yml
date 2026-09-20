@@ -1,0 +1,178 @@
+name: Set closed issues and PRs to Done
+
+on:
+  issues:
+    types: [closed]
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  done-on-close:
+    name: Set maintainer board status to Done
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
+          script: |
+            try {
+              const PROJECT_OWNER = "kisaragi-mochi";
+              const PROJECT_NUMBER = 2;
+              const STATUS_FIELD_NAME = "Status";
+              const DONE_OPTION_NAME = "Done";
+              const MAX_PAGES = 50;
+
+              const closedItem =
+                context.eventName === "issues"
+                  ? context.payload.issue
+                  : context.payload.pull_request;
+
+              if (!closedItem?.node_id) {
+                throw new Error(`Unsupported event payload for ${context.eventName}`);
+              }
+
+              const closedNodeId = closedItem.node_id;
+              const number = closedItem.number;
+
+              const projectResult = await github.graphql(
+                `
+                  query($owner: String!, $number: Int!) {
+                    user(login: $owner) {
+                      projectV2(number: $number) {
+                        id
+                        field(name: "Status") {
+                          __typename
+                          ... on ProjectV2SingleSelectField {
+                            id
+                            options {
+                              id
+                              name
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                `,
+                {
+                  owner: PROJECT_OWNER,
+                  number: PROJECT_NUMBER,
+                },
+              );
+
+              const project = projectResult.user?.projectV2;
+              if (!project?.id) {
+                throw new Error(`Project ${PROJECT_OWNER}/${PROJECT_NUMBER} was not found`);
+              }
+
+              const statusField = project.field;
+              if (statusField?.__typename !== "ProjectV2SingleSelectField" || !statusField.id) {
+                throw new Error(`Project field "${STATUS_FIELD_NAME}" is not a single-select field`);
+              }
+
+              const doneOption = statusField.options?.find((option) => option.name === DONE_OPTION_NAME);
+              if (!doneOption?.id) {
+                throw new Error(`Project field "${STATUS_FIELD_NAME}" has no "${DONE_OPTION_NAME}" option`);
+              }
+
+              let itemId = null;
+              let cursor = null;
+              let exhausted = false;
+
+              for (let page = 0; page < MAX_PAGES; page += 1) {
+                const itemsResult = await github.graphql(
+                  `
+                    query($projectId: ID!, $cursor: String) {
+                      node(id: $projectId) {
+                        ... on ProjectV2 {
+                          items(first: 100, after: $cursor) {
+                            pageInfo {
+                              hasNextPage
+                              endCursor
+                            }
+                            nodes {
+                              id
+                              content {
+                                ... on Issue {
+                                  id
+                                }
+                                ... on PullRequest {
+                                  id
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  `,
+                  {
+                    projectId: project.id,
+                    cursor,
+                  },
+                );
+
+                const items = itemsResult.node?.items;
+                if (!items) {
+                  throw new Error(`Project ${PROJECT_OWNER}/${PROJECT_NUMBER} items could not be read`);
+                }
+
+                const matchingItem = items.nodes.find((item) => item.content?.id === closedNodeId);
+                if (matchingItem) {
+                  itemId = matchingItem.id;
+                  break;
+                }
+
+                if (!items.pageInfo.hasNextPage) {
+                  exhausted = true;
+                  break;
+                }
+
+                if (!items.pageInfo.endCursor) {
+                  throw new Error("Project item pagination did not return an end cursor");
+                }
+
+                cursor = items.pageInfo.endCursor;
+              }
+
+              if (!itemId && !exhausted) {
+                throw new Error(`Stopped after ${MAX_PAGES} project item pages without finding #${number}`);
+              }
+
+              if (!itemId) {
+                core.info(`Closed ${context.eventName} #${number} is not in the maintainer board; leaving it unchanged.`);
+                return;
+              }
+
+              await github.graphql(
+                `
+                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                    updateProjectV2ItemFieldValue(
+                      input: {
+                        projectId: $projectId
+                        itemId: $itemId
+                        fieldId: $fieldId
+                        value: { singleSelectOptionId: $optionId }
+                      }
+                    ) {
+                      projectV2Item {
+                        id
+                      }
+                    }
+                  }
+                `,
+                {
+                  projectId: project.id,
+                  itemId,
+                  fieldId: statusField.id,
+                  optionId: doneOption.id,
+                },
+              );
+
+              core.info(`Set Status=Done for ${context.eventName} #${number}`);
+            } catch (error) {
+              core.setFailed(error.message);
+            }

@@ -7,7 +7,9 @@ covered by ``test_stdio_server.py`` and ``test_gateway.py``.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import signal
 import socket
 from pathlib import Path
 
@@ -38,6 +40,9 @@ _PREFLIGHT_ENV_VARS = (
     # already export ``PORT``.
     "PORT",
     "CAPTURE_PORT",
+    "MCP_HTTP_HOST",
+    "MCP_HTTP_PORT",
+    "MCP_HTTP_ALLOWED_HOSTS",
 )
 
 
@@ -57,6 +62,15 @@ def _isolate_preflight_env(
     monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
     for var in _PREFLIGHT_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+def _fake_lock_info() -> dict[str, object]:
+    return {
+        "owner_id": "test-owner",
+        "pid": 123,
+        "start_ts": "2026-06-05T00:00:00Z",
+        "host": "test-host",
+    }
 
 
 def test_arg_parser_help_long_flag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -164,14 +178,18 @@ def test_arg_parser_no_mdns_defaults_to_false() -> None:
 
 
 def test_main_default_advertises_mdns(monkeypatch: pytest.MonkeyPatch) -> None:
+    from stackchan_mcp import ownership
+
     called: dict[str, bool] = {}
 
     async def fake_run(*, advertise_mdns: bool = True) -> None:
         called["advertise_mdns"] = advertise_mdns
 
+    monkeypatch.setattr(cli, "_prepare_stdio_startup", _fake_lock_info)
     monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "_ensure_libopus_findable", lambda: None)
     monkeypatch.setattr(cli, "_run", fake_run)
+    monkeypatch.setattr(ownership, "release_lock_if_owner", lambda info, path=None: True)
 
     main([])
 
@@ -181,19 +199,125 @@ def test_main_default_advertises_mdns(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_main_no_mdns_disables_advertisement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from stackchan_mcp import ownership
+
     called: dict[str, bool] = {}
 
     async def fake_run(*, advertise_mdns: bool = True) -> None:
         called["advertise_mdns"] = advertise_mdns
 
+    monkeypatch.setattr(cli, "_prepare_stdio_startup", _fake_lock_info)
     monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "_ensure_libopus_findable", lambda: None)
     monkeypatch.setattr(cli, "_run", fake_run)
+    monkeypatch.setattr(ownership, "release_lock_if_owner", lambda info, path=None: True)
 
     main(["--no-mdns"])
 
     assert called == {"advertise_mdns": False}
 
+
+@pytest.mark.asyncio
+async def test_run_sigterm_handler_cancels_and_stops_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if cli.sys.platform == "win32":
+        pytest.skip("POSIX signal handlers are not registered on Windows")
+
+    from stackchan_mcp import gateway as gateway_module
+    from stackchan_mcp import stdio_server
+
+    events: list[object] = []
+    registered_handlers: dict[int, object] = {}
+
+    class FakeGateway:
+        async def start(self, *, advertise_mdns: bool = True) -> None:
+            events.append(("start", advertise_mdns))
+
+        async def stop(self) -> None:
+            events.append("stop")
+
+    async def fake_run_stdio_server(*, notify_config=None) -> None:
+        events.append("stdio")
+        handler = registered_handlers[signal.SIGTERM]
+        assert callable(handler)
+        handler()
+        await asyncio.sleep(0)
+
+    def fake_add_signal_handler(signum: int, callback: object) -> None:
+        registered_handlers[signum] = callback
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "add_signal_handler", fake_add_signal_handler)
+    monkeypatch.setattr(gateway_module, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(stdio_server, "run_stdio_server", fake_run_stdio_server)
+
+    await cli._run(advertise_mdns=False)
+
+    assert registered_handlers.keys() == {signal.SIGTERM}
+    assert events == [("start", False), "stdio", "stop"]
+
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("jsonl_enabled", [False, True])
+async def test_run_rotates_event_log_only_when_jsonl_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    jsonl_enabled: bool,
+) -> None:
+    from stackchan_mcp import event_log as event_log_module
+    from stackchan_mcp import gateway as gateway_module
+    from stackchan_mcp import notify_config as notify_config_module
+    from stackchan_mcp import stdio_server
+    from stackchan_mcp.notify_config import DEFAULT_MESSAGE_TEMPLATES, NotifyConfig
+
+    events: list[object] = []
+    rotate_calls: list[Path] = []
+    jsonl_path = tmp_path / "events.jsonl"
+    config = NotifyConfig(
+        legacy_event_enabled=False,
+        channels_enabled=False,
+        jsonl_enabled=jsonl_enabled,
+        jsonl_path=jsonl_path,
+        messages=dict(DEFAULT_MESSAGE_TEMPLATES),
+    )
+
+    class FakeESP32:
+        def set_notify_config(self, notify_config: NotifyConfig) -> None:
+            events.append(("set_notify_config", notify_config))
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+        async def start(self, *, advertise_mdns: bool = True) -> None:
+            events.append(("start", advertise_mdns))
+
+        async def stop(self) -> None:
+            events.append("stop")
+
+    async def fake_run_stdio_server(*, notify_config=None) -> None:
+        events.append("stdio")
+
+    def fake_rotate_old_entries(*, path: Path, now_unix: float | None = None) -> None:
+        rotate_calls.append(path)
+
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(notify_config_module, "load_notify_config", lambda: config)
+    monkeypatch.setattr(event_log_module, "rotate_old_entries", fake_rotate_old_entries)
+    monkeypatch.setattr(gateway_module, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(stdio_server, "run_stdio_server", fake_run_stdio_server)
+
+    await cli._run(advertise_mdns=False)
+
+    assert (rotate_calls == [jsonl_path]) == jsonl_enabled
+    assert events == [
+        ("set_notify_config", config),
+        ("start", False),
+        "stdio",
+        "stop",
+    ]
 
 def test_main_check_flag_remains_side_effect_free_with_no_mdns(
     monkeypatch: pytest.MonkeyPatch,
@@ -201,13 +325,97 @@ def test_main_check_flag_remains_side_effect_free_with_no_mdns(
     async def fail_run(*, advertise_mdns: bool = True) -> None:
         raise AssertionError("--check must not start the gateway")
 
-    monkeypatch.setattr(cli, "_run_preflight", lambda: 0)
+    # ``--check`` runs ``_run_ownership_check()``, which calls ``_load_dotenv()``.
+    # Without stubbing it, the developer's real ``gateway/.env`` is loaded into
+    # ``os.environ`` outside monkeypatch's tracking and never restored, polluting
+    # later tests (e.g. a ``STACKCHAN_TOKEN`` there breaks the WS-server suite).
+    monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "_run", fail_run)
 
     with pytest.raises(SystemExit) as exc:
         main(["--check", "--no-mdns"])
 
     assert exc.value.code == 0
+
+
+def test_streamable_http_refuses_non_loopback_without_token(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MCP_HTTP_HOST", "0.0.0.0")
+
+    def fail_acquire(**kwargs: object) -> object:
+        raise AssertionError("bind safety must run before ownership lock")
+
+    monkeypatch.setattr(cli, "_acquire_startup_lock", fail_acquire)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["serve", "--transport", "streamable-http"])
+
+    assert exc.value.code == 1
+    assert (
+        "stackchan-mcp: refusing non-loopback MCP_HTTP_HOST without "
+        "STACKCHAN_TOKEN or BEARER_TOKEN"
+    ) in capsys.readouterr().err
+
+
+def test_streamable_http_releases_lock_after_daemon_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stackchan_mcp import ownership
+
+    info = {
+        "owner_id": "owner-test",
+        "pid": 123,
+        "start_ts": "2026-06-05T00:00:00Z",
+        "host": "test-host",
+        "mode": "streamable-http",
+        "http_endpoint": "127.0.0.1:8767",
+        "started_by": "cli-serve",
+    }
+    acquired: list[dict[str, object]] = []
+    released: list[object] = []
+    daemon_kwargs: list[dict[str, object]] = []
+
+    def fake_acquire(**kwargs: object) -> dict[str, object]:
+        acquired.append(kwargs)
+        return info
+
+    async def fake_daemon(**kwargs: object) -> None:
+        daemon_kwargs.append(kwargs)
+
+    monkeypatch.setattr(cli, "_configure_gateway_startup", lambda: None)
+    monkeypatch.setattr(cli, "_acquire_startup_lock", fake_acquire)
+    monkeypatch.setattr(cli, "_run_streamable_http_daemon", fake_daemon)
+    monkeypatch.setattr(
+        ownership, "release_lock_if_owner", lambda info, path=None: released.append(info)
+    )
+    monkeypatch.delenv("MCP_HTTP_HOST", raising=False)
+    monkeypatch.delenv("MCP_HTTP_PORT", raising=False)
+    monkeypatch.delenv("STACKCHAN_TOKEN", raising=False)
+    monkeypatch.delenv("BEARER_TOKEN", raising=False)
+
+    cli._run_streamable_http_placeholder(advertise_mdns=False)
+
+    assert acquired == [
+        {
+            "mode": "streamable-http",
+            "http_endpoint": "127.0.0.1:8767",
+            "started_by": "cli-serve",
+        }
+    ]
+    assert daemon_kwargs == [
+        {
+            "host": "127.0.0.1",
+            "port": 8767,
+            "owner_id": "owner-test",
+            "token": None,
+            "advertise_mdns": False,
+        }
+    ]
+    assert released == [info]
 
 
 def test_format_port_status_available() -> None:
@@ -353,11 +561,13 @@ def test_run_preflight_with_no_config_reports_defaults_and_exits_zero(
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "STACKCHAN_TOKEN     not set" in out
+    assert "MCP_HTTP_ALLOWED_HOSTS not set" in out
     assert "VISION_HOST         not set" in out
     assert "VISION_URL          not set" in out
     assert "VISION_TOKEN        not set" in out
     assert "ws://0.0.0.0:8765" in out
     assert "http://0.0.0.0:8766" in out
+    assert "http://127.0.0.1:8767/mcp" in out
     assert "AVAILABLE" in out
     assert "Result: ready. Exit 0." in out
 
@@ -509,7 +719,8 @@ def test_run_preflight_in_use_ports_return_nonzero(
     out = capsys.readouterr().out
     assert "IN USE (pid 12345, mock-8765)" in out
     assert "IN USE (pid 12345, mock-8766)" in out
-    assert "Result: 2 issues. Exit 1." in out
+    assert "IN USE (pid 12345, mock-8767)" in out
+    assert "Result: 3 issues. Exit 1." in out
 
 
 def test_run_preflight_one_in_use_port_singular_phrasing(
@@ -533,26 +744,100 @@ def test_run_preflight_one_in_use_port_singular_phrasing(
     assert "Result: 1 issue. Exit 1." in out
 
 
-def test_main_check_flag_runs_preflight_and_exits(
+def test_main_check_flag_runs_ownership_check_and_exits(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    """``main(['--check'])`` exits with the preflight return code.
+    """``main(['--check'])`` exits after the ownership check.
 
-    Guards the contract that ``--check`` never reaches the asyncio
-    gateway start-up below the early exit, by relying on ``main`` to
-    propagate ``_run_preflight``'s return as ``SystemExit``.
+    Guards the contract that ``--check`` never reaches gateway startup
+    or the port/config preflight path below the early exit.
     """
+    from stackchan_mcp import ownership
+
     _isolate_preflight_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+    monkeypatch.setattr(cli, "_run_preflight", lambda: 99)
+    monkeypatch.setattr(ownership, "read_lock", lambda path=None: None)
 
     with pytest.raises(SystemExit) as exc:
         main(["--check"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "preflight" in out
+    assert "ownership preflight" in out
     assert "Result: ready" in out
+
+
+def test_main_check_flag_inspects_per_ws_port_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``--check`` inspects the lock for the configured WS_PORT.
+
+    Guards against the ``--check`` preflight reading the default
+    ``owner-8765.lock`` while a gateway configured for another port owns
+    ``owner-<port>.lock``. ``_run_ownership_check`` loads ``.env`` before
+    deriving the lock path, mirroring the startup order, so a WS_PORT set in
+    the environment (or ``.env``) is reflected here.
+    """
+    from stackchan_mcp import ownership
+
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("WS_PORT", "18765")
+    seen: list[Path] = []
+
+    def fake_read_lock(path: Path | None = None) -> None:
+        seen.append(path)
+        return None
+
+    monkeypatch.setattr(ownership, "read_lock", fake_read_lock)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--check"])
+    assert exc.value.code == 0
+    assert seen and seen[0] is not None and seen[0].name == "owner-18765.lock"
+    assert "owner-18765.lock" in capsys.readouterr().out
+
+
+def test_main_check_flag_scopes_lock_for_ephemeral_ws_port(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``WS_PORT=0`` scopes the lock to ``owner-0.lock``, not the legacy path.
+
+    Preflight treats ``0`` as a valid (OS-assigned ephemeral) port, so the
+    ownership lock must stay per-port for it too. A truthiness check would send
+    ``0`` to the machine-global ``owner.lock`` and diverge from startup.
+    """
+    from stackchan_mcp import ownership
+
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("WS_PORT", "0")
+    seen: list[Path] = []
+
+    def fake_read_lock(path: Path | None = None) -> None:
+        seen.append(path)
+        return None
+
+    monkeypatch.setattr(ownership, "read_lock", fake_read_lock)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--check"])
+    assert exc.value.code == 0
+    assert seen and seen[0] is not None and seen[0].name == "owner-0.lock"
+
+
+def test_main_preflight_flag_runs_preflight_and_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_run_preflight", lambda: 7)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--preflight"])
+
+    assert exc.value.code == 7
 
 
 # --- Port resolution tests (must mirror gateway.py) -------------------------
@@ -722,6 +1007,56 @@ def test_run_preflight_invalid_capture_port_is_blocking(
     assert "CAPTURE_PORT" in out
 
 
+def test_run_preflight_invalid_mcp_http_port_is_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MCP_HTTP_PORT", "not-a-number")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "INVALID" in out
+    assert "MCP_HTTP_PORT" in out
+
+
+def test_run_preflight_non_loopback_mcp_http_without_token_is_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MCP_HTTP_HOST", "0.0.0.0")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "MCP HTTP bind safety: BLOCKED" in out
+    assert "Result: 1 issue. Exit 1." in out
+
+
+def test_run_preflight_non_loopback_mcp_http_with_token_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MCP_HTTP_HOST", "0.0.0.0")
+    monkeypatch.setenv("STACKCHAN_TOKEN", "secret")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "MCP HTTP bind safety: BLOCKED" not in out
+    assert "http://0.0.0.0:8767/mcp" in out
+    assert "Result: ready. Exit 0." in out
+
+
 def test_run_preflight_uses_PORT_fallback_for_ws_port(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -767,6 +1102,24 @@ def test_run_preflight_ws_and_capture_same_port_is_conflict(
     out = capsys.readouterr().out
     assert "8765" in out
     assert "distinct ports" in out
+
+
+def test_run_preflight_mcp_http_port_conflict_is_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _isolate_preflight_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("CAPTURE_PORT", "8767")
+    monkeypatch.setenv("MCP_HTTP_PORT", "8767")
+    monkeypatch.setattr(cli, "_check_port", lambda host, port: (True, None))
+
+    exit_code = _run_preflight()
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "MCP_HTTP_PORT" in out
+    assert "CAPTURE_PORT" in out
+    assert "distinct listener ports" in out
 
 
 def test_run_preflight_both_ports_zero_is_not_a_conflict(

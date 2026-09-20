@@ -18,6 +18,8 @@ from .mdns_advertiser import MdnsAdvertiser
 
 logger = logging.getLogger(__name__)
 
+BEAT_MODE_LISTEN_STOP_TIMEOUT_S = 3.0
+
 
 class Gateway:
     """Main gateway orchestrator.
@@ -108,6 +110,24 @@ class Gateway:
             or ""
         )
 
+    @property
+    def pcm_token(self) -> str:
+        """Bearer token expected by the /pcm HTTP endpoint.
+
+        Separate token from the ESP32 WebSocket / capture upload because
+        the /pcm endpoint authorises external PCM producers (e.g. the
+        SAIVerse voice-tts addon) — a different trust boundary from the
+        device-to-gateway authentication. Falls back to STACKCHAN_TOKEN
+        / BEARER_TOKEN when STACKCHAN_PCM_TOKEN is not configured so
+        single-token local development keeps working.
+        """
+        return (
+            os.getenv("STACKCHAN_PCM_TOKEN")
+            or os.getenv("STACKCHAN_TOKEN")
+            or os.getenv("BEARER_TOKEN")
+            or ""
+        )
+
     async def start(self, *, advertise_mdns: bool = True) -> None:
         """Start the ESP32 WebSocket server and HTTP capture server."""
         host = os.getenv("HOST", "0.0.0.0")
@@ -124,9 +144,16 @@ class Gateway:
             audio_hook_token=self.audio_hook_token,
         )
 
-        # Start HTTP capture server. Same web.Application also serves
-        # the Phase 4.5 avatar /avatar_set/{short_id} endpoint.
-        app = create_capture_app(capture_token=self.vision_token)
+        # Start HTTP capture server. Hosts /capture, /pcm, and the
+        # Phase 4.5 avatar /avatar_set/{short_id} endpoint on the same
+        # web.Application. The PCM endpoint forwards into
+        # send_pcm_stream, so we hand it the active Gateway instance so
+        # it can reach esp32 + tts_lock.
+        app = create_capture_app(
+            capture_token=self.vision_token,
+            pcm_token=self.pcm_token,
+            gateway=self,
+        )
         self._capture_app = app
         self._http_runner = web.AppRunner(app)
         await self._http_runner.setup()
@@ -151,6 +178,33 @@ class Gateway:
 
     async def stop(self) -> None:
         """Stop the gateway."""
+        # Cancel any active pose-stream follower before the rest of the
+        # shutdown sequence closes gateway-side services.
+        try:
+            from .follow_pose_stream import stop_follow
+
+            await stop_follow()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("follow_pose_stream shutdown failed: %s", exc)
+
+        # Likewise cancel any active LED-stream follower so its WiFi
+        # power-save lease is released before services close.
+        try:
+            from .follow_led_stream import stop_follow as stop_led_follow
+
+            await stop_led_follow()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("follow_led_stream shutdown failed: %s", exc)
+
+        try:
+            from .beat import stop_beat_mode
+
+            await stop_beat_mode(
+                listen_stop_timeout_s=BEAT_MODE_LISTEN_STOP_TIMEOUT_S,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("beat mode shutdown failed: %s", exc)
+
         self._running = False
         if self._mdns_advertiser:
             try:

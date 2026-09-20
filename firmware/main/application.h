@@ -10,10 +10,12 @@
 #include <mutex>
 #include <deque>
 #include <memory>
+#include <atomic>
 
 #include "protocol.h"
 #include "ota.h"
 #include "audio_service.h"
+#include "listening_profile.h"
 #include "device_state.h"
 #include "device_state_machine.h"
 
@@ -65,6 +67,9 @@ public:
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
+    std::string GetConnectedGatewayUrl() const {
+        return protocol_ ? protocol_->GetConnectedUrl() : "";
+    }
     
     /**
      * Request state transition
@@ -95,7 +100,7 @@ public:
      * Start listening (event-based, thread-safe)
      * Sends MAIN_EVENT_START_LISTENING to be handled in Run()
      */
-    void StartListening();
+    void StartListening(ListeningProfile profile = kListeningProfileVoice);
 
     /**
      * Stop listening (event-based, thread-safe)
@@ -108,6 +113,7 @@ public:
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
+    void SendStackChanEvent(const char* event_type, const char* subtype, uint64_t duration_ms);
 
     // Phase 4.5 avatar: thread-safe generic WS text frame send.
     // Wraps Protocol::SendText through the main-task Schedule for the
@@ -137,6 +143,10 @@ private:
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
+    std::atomic<ListeningProfile> pending_listening_profile_{kListeningProfileVoice};
+    std::atomic<uint32_t> pending_listening_generation_{0};
+    std::atomic<uint32_t> listening_request_generation_{0};
+    ListeningProfile listening_profile_ = kListeningProfileVoice;
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
@@ -159,8 +169,11 @@ private:
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
-    void ContinueOpenAudioChannel(ListeningMode mode);
-    void ContinueWakeWordInvoke(const std::string& wake_word);
+    uint32_t BeginListeningRequest(ListeningProfile profile);
+    void InvalidatePendingListeningRequest();
+    bool IsListeningRequestCurrent(uint32_t generation) const;
+    void ContinueOpenAudioChannel(ListeningMode mode, uint32_t generation);
+    void ContinueWakeWordInvoke(const std::string& wake_word, uint32_t generation);
 
     // Activation task (runs in background)
     void ActivationTask();

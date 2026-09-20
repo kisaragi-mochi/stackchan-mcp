@@ -26,6 +26,7 @@ This repository is a monorepo.
 | `firmware/` | Full git subtree of [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32). The custom StackChan board lives at `firmware/main/boards/stackchan/`. |
 | `gateway/` | Python MCP gateway. stdio MCP server (LLM side) + WebSocket MCP client (ESP32 side) + HTTP capture server. |
 | `docs/` | [`architecture.md`](docs/architecture.md): full component diagram, tool name mapping, photo flow, auth, phase roadmap. [`firmware-sync.md`](docs/firmware-sync.md): upstream xiaozhi-esp32 sync playbook. [`remote-access.md`](docs/remote-access.md): Tailscale Funnel setup for non-LAN use. |
+| `examples/` | Optional, unmaintained examples. [`cloudflare-relay/`](examples/cloudflare-relay/): Cloudflare Workers WebSocket relay for reaching the gateway from outside the local LAN. |
 
 ## Target hardware
 
@@ -47,11 +48,13 @@ This repository is a monorepo.
 |---|---|---|
 | `get_status` | Gateway connection state | ✅ |
 | `get_device_info` | ESP32 device state (battery / volume / WiFi / etc.) | ✅ |
-| `take_photo(question?)` | Capture a frame, save as JPEG, return the path | ✅ |
+| `take_photo(question?)` | Capture a frame, save as JPEG, return the path + inline image block | ✅ |
 | `set_volume(volume)` | Speaker volume (0-100) | ✅ |
 | `set_brightness(brightness)` | Screen brightness (0-100) | ✅ |
 | `move_head(yaw, pitch, speed?)` | Move the neck (servos). `pitch` is constrained to `5..85` — the M5Stack-recommended operating range. For the wider firmware hard clamp (`0..88`), use the firmware-side `set_head_angles` device tool instead. | ✅ |
 | `get_touch_state` | Touch sensor state (press / release / stroke / etc.) | ✅ |
+| `get_touch_sensor_enabled` | Read whether head-touch detection is enabled. The NVS-backed setting persists across reboot. | ✅ |
+| `set_touch_sensor_enabled(enabled)` | Enable or disable head-touch detection. Disabling stops both the firmware local motion response and MCP `stackchan/event` emission, and persists across reboot. | ✅ |
 | `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`), or `off` to hide the avatar and disable blink so the underlying WiFi config / OTA / settings screens are visible. Any other face brings the avatar back and restores blink. | ✅ |
 | `set_blink(state)` | Blink on/off | ✅ |
 | `set_mouth(state)` | Mouth open/close (one-shot, held until next call) | ✅ |
@@ -61,8 +64,15 @@ This repository is a monorepo.
 | `set_all_leds(r, g, b)` | Set all 12 base RGB LEDs to the same color | ✅ |
 | `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array in a single I2C burst (use this for animations / multi-color patterns); trailing LEDs keep their previous color | ✅ |
 | `clear_leds` | Turn all 12 base RGB LEDs off | ✅ |
-| `say(text, voice?, speaker_id?, reference_audio?)` | Speak text on the device speaker via gateway-side TTS. Default engine: **VOICEVOX** (runs as a separate HTTP service — see [TTS setup](#optional-tts-setup-voicevox)). Requires the `[tts]` extra. | ✅ |
+| `say(text, voice?, speaker_id?, reference_audio?)` | Speak text on the device speaker via gateway-side TTS. A supported expression emoji in the text can switch the avatar face in the same call. Default engine: **VOICEVOX** (runs as a separate HTTP service — see [TTS setup](#optional-tts-setup-voicevox)). Requires the `[tts]` extra. | ✅ |
 | `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | Capture a short utterance from the device microphone and transcribe it via gateway-side STT. Default engine: **faster-whisper** (local, MIT) — see [STT setup](#optional-stt-setup-faster-whisper). Optional `motion` feedback can show the `thinking` face or tilt the head up during capture. Requires the `[stt-faster-whisper]` (or `[stt-openai]`) extra and a firmware update with the inbound `listen` wire type. | ✅ |
+| `beat_mode_start(motion_intensity?, sensitivity?, color?, duration_sec?)` | Start gateway-only beat mode: continuously capture ambient device audio through the existing `listen` wire path, estimate BPM in the gateway, and drive free-running beat-synced head sway plus base-ring LED flashes. `sensitivity` tunes the onset floor for quiet rooms or loud venues. Beat mode requests the firmware raw capture profile so music bypasses speech-oriented AFE suppression. While active, `listen()` is mutually exclusive; `say()` may interrupt and beat mode re-arms listening afterwards. Requires the `[stt]` extra for Opus decoding. | ✅ |
+| `beat_mode_stop()` | Stop beat mode and send `listen.stop` best-effort while retaining the latest rolling audio buffer for clip export until the next beat-mode start or gateway restart. | ✅ |
+| `beat_mode_update(motion_intensity?, sensitivity?, color?, blink_rate?, motion_enabled?, led_enabled?)` | Update beat-mode VJ parameters without restarting capture. | ✅ |
+| `beat_meta_snapshot()` | Poll the latest beat-mode metadata: active state, BPM, confidence, active sensitivity/minimum onset floor, last beat/audio timestamps, capture health, counters, and current motion/LED parameters. | ✅ |
+| `beat_clip_save(seconds?)` | Save the latest rolling beat-mode audio window as a 16 kHz mono WAV temp file and return its path plus actual captured duration. Clip files persist on disk; the caller is responsible for deleting them when no longer needed. | ✅ |
+| `stackchan_follow_pose_stream(action, url, ...)` | Subscribe to an arbitrary external WebSocket pose-stream and drive the head to follow incoming `yaw` / `pitch` frames 1:1 within the SCS0009 working range. `action` switches between `start` / `stop` / `status`. Includes per-axis flip, pitch-center offset, downsample rate cap, angular-velocity clamp, and reconnect with exponential backoff; the initial pose is seeded from the device so the angular-velocity clamp is anchored at the real servo position from the first frame. The upstream server's protocol (zero-offset commands, source dispatching, transport) is intentionally outside this gateway's scope. | ✅ |
+| `stackchan_follow_led_stream(action, url, target, ...)` | Subscribe to an arbitrary external WebSocket LED-frame stream and forward validated `colors` frames to either the built-in 12-LED base ring or a Port B WS2812 strip. `event` frames bypass the rate gate; `continuous` frames are capped by `max_fps`. | ✅ |
 
 See `gateway/README.md` for full schemas.
 
@@ -134,7 +144,8 @@ After flashing, WiFi configuration happens on first boot — connect from a smar
 
 On a local network, the gateway advertises `_stackchan-mcp._tcp.local.`
 by default. Fresh firmware can use that mDNS/DNS-SD record to find the
-WebSocket endpoint automatically when no primary URL has been saved yet.
+WebSocket endpoint automatically when no primary URL has been saved yet. mDNS
+discovery requires NVS `websocket.url` to be empty.
 
 ### Configuring the WebSocket gateway URL and auth token
 
@@ -156,27 +167,38 @@ The gateway advertises mDNS by default; run `stackchan-mcp --no-mdns` to
 disable advertisement. To compile out firmware discovery, set
 `CONFIG_STACKCHAN_MDNS_DISCOVERY=n`. Discovery requires UDP multicast on the
 local LAN, and some routers or VLANs block it. When multiple gateways are
-visible, the firmware picks the first supported gateway service, tries each
-usable IPv4 address from that service, and logs the selected instance, host,
-address list, and port. mDNS only discovers the URL;
+visible, the firmware tries each usable IPv4 address from every supported
+gateway service discovered in one browse, and logs the accepted instance count
+and candidate address list. mDNS only discovers the URL;
 `websocket.token` / `CONFIG_DEFAULT_WEBSOCKET_TOKEN` still control
 authentication.
 
+For LAN auto-discovery with an automatic out-of-LAN relay fallback, keep NVS
+`websocket.url` empty and store the relay URL in `websocket.fallback_url`. With
+that profile, mDNS candidates are tried first, and the relay is tried later if
+the local discovery path does not complete the WebSocket server hello flow.
+
+Automatic recovery after a gateway host IPv4 change requires both sides of the
+paired mDNS fix: Gateway vA.B.C+ refreshes the advertised service when the host
+address changes, and Firmware vX.Y.Z+ tries all supported mDNS service
+instances from a browse. Earlier firmware may keep trying a stale cached
+instance until reboot.
+
 The firmware reads these NVS keys for the gateway connection:
 
-- `websocket.url` — the gateway WebSocket URL (e.g. `ws://192.168.1.100:8765/`)
+- `websocket.url` — the gateway WebSocket URL (e.g. `ws://<gateway-host>:8765/`)
 - `websocket.fallback_url` — optional second gateway URL to try when
   `websocket.url` cannot be reached or does not complete the server hello flow
 - `websocket.token` — the bearer token sent as `Authorization: Bearer <token>`,
   matched against `STACKCHAN_TOKEN` / `BEARER_TOKEN` on the gateway side
   (leave both empty to skip authentication entirely)
 
-There are three practical ways to provide them:
+There are four practical ways to provide them, plus one temporary source-level escape hatch:
 
 1. **Build-time defaults via Kconfig (recommended for developers)**: run
    `idf.py menuconfig` → `Component config` → `Xiaozhi Assistant`, and set:
    - `Default WebSocket gateway URL (fallback when NVS is empty)` →
-     `CONFIG_DEFAULT_WEBSOCKET_URL` (e.g. `ws://192.168.1.100:8765/`)
+     `CONFIG_DEFAULT_WEBSOCKET_URL` (e.g. `ws://<gateway-host>:8765/`)
    - `Fallback WebSocket gateway URL` →
      `CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL`
    - `Default WebSocket auth token (fallback when NVS is empty)` →
@@ -194,7 +216,7 @@ There are three practical ways to provide them:
    `http://192.168.4.1`, switch to the **Advanced** tab, and fill in:
    - **WebSocket Gateway URL** (e.g. `ws://<gateway-host>:8765/`) — the
      primary gateway candidate.
-   - **Fallback Gateway URL** (e.g. `wss://<node>.<tailnet>.ts.net/`) —
+   - **Fallback Gateway URL** (e.g. `wss://<relay-host>/`) —
      optional second candidate, tried only after the primary candidate
      fails the server-hello flow.
    - **Gateway Token** — optional bearer token, sent as
@@ -219,12 +241,21 @@ There are three practical ways to provide them:
    `CONFIG_DEFAULT_WEBSOCKET_*` Kconfig value (or to "no fallback" when
    no Kconfig default is set).
 
-3. **Write `websocket.url` / `websocket.fallback_url` / `websocket.token`
-   directly to NVS** (advanced): for example with a custom NVS-write tool
-   over serial. Same persistence semantics as the WiFi config UI;
-   primarily useful for batch provisioning.
+3. **Use the runtime MCP tools over an established connection**:
+   `gateway_config_get` reports `websocket.url`, `websocket.fallback_url`,
+   whether a token is set, `force_mode`, `discovery_enabled`, and the connected
+   candidate URL without exposing the token value. `gateway_config_set` accepts
+   optional `url`, `fallback_url`, and `token` strings. Passing an empty string
+   clears that NVS key; for example `url=""` restores the mDNS discovery path
+   on the next reconnect. Changes are persisted immediately but do not trigger
+   a disconnect, reconnect, or reboot.
 
-4. **Temporary source hardcode (not recommended)**: editing
+4. **Write `websocket.url` / `websocket.fallback_url` / `websocket.token`
+   directly to NVS** (advanced): for example with a custom NVS-write tool
+   over serial. Same persistence semantics as the WiFi config UI and runtime
+   MCP tools; primarily useful for batch provisioning.
+
+5. **Temporary source hardcode (not recommended)**: editing
    `websocket_protocol.cc` can unblock local experiments, but keep it out of
    commits.
 
@@ -232,9 +263,10 @@ Common gateway URL setups:
 
 | Mode | Primary URL | Fallback URL |
 | --- | --- | --- |
-| Local only | `ws://<gateway-host>:8765/` | empty |
-| Tailscale only | `wss://<node>.<tailnet>.ts.net/` | empty |
-| Local with remote fallback | `ws://<gateway-host>:8765/` | `wss://<node>.<tailnet>.ts.net/` |
+| LAN auto-discovery with relay fallback | empty (mDNS) | `wss://<relay-host>/` |
+| Fixed local only | `ws://<gateway-host>:8765/` | empty |
+| Relay only | `wss://<relay-host>/` | empty |
+| Fixed local with relay fallback | `ws://<gateway-host>:8765/` | `wss://<relay-host>/` |
 
 #### Existing devices with stale NVS — `CONFIG_FORCE_DEFAULT_WEBSOCKET_URL`
 
@@ -242,11 +274,14 @@ If you are flashing onto a device that previously ran upstream xiaozhi-esp32
 firmware, NVS will already contain `websocket.url=wss://api.tenclass.net/...`
 written by the upstream OTA-config path. In this case the empty-NVS fallback
 in option 1 above will **not** trigger, and the device will keep trying to
-talk to tenclass instead of your local gateway. There is currently no
-runtime tool to clear the `websocket` NVS namespace selectively.
+talk to tenclass instead of your local gateway.
 
-To work around this without erasing all of NVS (which would also drop WiFi
-credentials), enable the force-override switch:
+If the device can still establish a stackchan-mcp connection through any
+candidate, call `gateway_config_set` with `url=""` to clear the stale primary
+NVS URL and restore the mDNS discovery path on the next reconnect. If the stale
+URL prevents any stackchan-mcp connection from being established, use the
+force-override switch without erasing all of NVS (which would also drop WiFi
+credentials):
 
 - `Force CONFIG_DEFAULT_WEBSOCKET_URL/TOKEN to override NVS` →
   `CONFIG_FORCE_DEFAULT_WEBSOCKET_URL=y`
@@ -271,7 +306,7 @@ tracked `firmware/sdkconfig.defaults`. Instead, create a gitignored local file:
 cd firmware
 cat > sdkconfig.defaults.local <<'EOF'
 CONFIG_DEFAULT_WEBSOCKET_URL="ws://<your-lan-ip>:8765/"
-CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL="wss://<node>.<tailnet>.ts.net/"
+CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL="wss://<relay-host>/"
 CONFIG_DEFAULT_WEBSOCKET_TOKEN="<your-dev-token>"
 CONFIG_FORCE_DEFAULT_WEBSOCKET_URL=y
 EOF
@@ -374,6 +409,91 @@ If you installed from source via `uv`:
 
 See `gateway/README.md` for details.
 
+### Gateway user-defaults TOML file
+
+The Python gateway can optionally read user-local default argument values from
+a TOML file under the OS-standard user config directory:
+
+- Linux / XDG: `~/.config/stackchan-mcp/user-defaults.toml`
+- macOS: `~/Library/Application Support/stackchan-mcp/user-defaults.toml`
+- Windows: `%APPDATA%\stackchan-mcp\user-defaults.toml`
+
+The exact path is resolved with `platformdirs`, and the gateway logs the
+resolved path at startup. The tracked `user-defaults.toml.example` file at the
+repository root is the template.
+
+The file is an overlay on top of the MCP schema defaults. If the file is absent
+or empty, schema defaults are used. If a key is omitted from the file, that key
+keeps its schema default. Explicit MCP tool-call arguments always take
+precedence over the file, so the order is: explicit argument > user-defaults
+file > schema default.
+
+This is a gateway-side Python setting. It is separate from the firmware-side
+NVS connection settings exposed by `gateway_config_get` / `gateway_config_set`
+(added in PR #293). Those tools read or update the device's saved WebSocket
+connection settings; this TOML file only changes default MCP argument values
+used by the Python gateway.
+
+Minimal example:
+
+```toml
+[tool.stackchan_follow_pose_stream]
+smoothing_window = 1
+downsample_hz = 20
+max_step_deg = 30
+
+[tool.stackchan_follow_led_stream]
+target = "base_ring"
+max_fps = 30
+source_filter = "stage"
+```
+
+### follow_led_stream WebSocket LED frames
+
+`stackchan_follow_led_stream(action="start", url=..., target=...)` connects
+from the gateway to an external WebSocket URL as a client. It validates incoming
+LED frames and forwards them to one of two targets:
+
+- `target="base_ring"` writes the built-in 12-LED base ring through `set_leds`.
+  Omit `led_count`, or pass `12`.
+- `target="port_b"` writes a WS2812 strip on Port B through
+  `port_b_ws2812_set_strip`. `led_count` is required (`1..256`), and the
+  gateway sends `port_b_ws2812_init` on stream start and after device reconnect.
+
+Frame schema:
+
+```json
+{"ts": 1751234567890, "kind": "event", "colors": [[255, 0, 0], [0, 0, 255]]}
+```
+
+`ts` must be numeric. `kind` is either `event` or `continuous`. `continuous`
+frames are downsampled to `max_fps` (default `30`), while `event` frames bypass
+that gate so beat flashes are not silently dropped. `colors` must be a non-empty
+array of `[r,g,b]` integer triples (`0..255`) and must fit the target capacity.
+Optional string fields `source` and `frame` can be matched with `source_filter`
+and `frame_filter`.
+
+Manual fallback does not need a switching step: when the stream is stopped or
+the upstream WebSocket is disconnected, plain `set_leds` and
+`port_b_ws2812_*` calls still work normally.
+
+TOML overlay example:
+
+```toml
+[tool.stackchan_follow_led_stream]
+target = "port_b"
+led_count = 24
+max_fps = 30
+source_filter = "stage"
+frame_filter = "calibrated"
+```
+
+### Measured guidance (real device, home WLAN)
+
+- Wire round-trip per frame: ~40-50 ms median → effective dispatch rate ~20 fps
+- Recommended `max_fps: 20` — feeding more than the effective rate only increases continuous-frame drops (event frames are never dropped)
+- While the stream is active the gateway forces WiFi power save off (restored on stop); without it dispatch latency spikes to 300-1100 ms
+
 ### 4. Optional: TTS setup (VOICEVOX)
 
 To make the device speak, install the `[tts]` extra and run a
@@ -425,9 +545,105 @@ The gateway POSTs to VOICEVOX, decodes the returned WAV, resamples to
 WebSocket binary frames to the device — which decodes and plays them
 through its speaker. **No firmware changes are required**: the
 existing audio decoder pipeline already accepts these frames. The
-TTS framework is engine-agnostic, so additional engines (Irodori-TTS
-voice cloning is on the roadmap) can be added without changing the
-`say` API.
+TTS framework is engine-agnostic, so additional engines plug in behind
+the same `say` API — see the Irodori engine below.
+
+`say` also accepts supported expression emoji in the text: happy
+(😊 😄 😀 😁 🙂 😆 🥰 😍 😋 🤗), sad (😢 😭 😞 😔 ☹️ 🙁 😿),
+surprised (😲 😮 😯 😱 🤯), embarrassed (😳 😅 🫣), and thinking
+(🤔 🧐 💭). The first mapped emoji changes the avatar face in the same
+MCP call before speech; unmapped emoji do not change the face. VOICEVOX
+and other engines without emoji-style support strip all emoji before
+synthesis. If stripping leaves empty text, the face change is attempted
+and speech is skipped.
+
+#### Alternative engine: Irodori
+
+Irodori is a second TTS engine that calls an external synthesis service
+returning MP3. It plugs into the same `say` pipeline as VOICEVOX (MP3 is
+decoded to 16 kHz mono PCM, then encoded to Opus), and it receives
+emoji embedded in the input text verbatim so they can act as voice-style
+cues.
+
+There is **no default endpoint** — the synthesis backend is a hosted
+service, and shipping a hard-coded URL would point every install at
+someone else's deployment. You must self-host a compatible synthesis API
+(for example, duplicate the reference Hugging Face Space, or run your own
+service that honours the same request/response contract) and point the
+gateway at it.
+
+Install the extra:
+
+```bash
+pip install 'stackchan-mcp[tts-irodori]'
+```
+
+This pulls in `httpx`, `opuslib`, and `miniaudio` (a small self-contained
+MP3/audio decoder with prebuilt wheels, so no extra system library is
+needed beyond the `libopus` that `opuslib` already requires).
+
+Configure via environment variables (URL and key are read from the
+environment only — never commit them):
+
+| Environment variable | Default | Notes |
+|---|---|---|
+| `STACKCHAN_IRODORI_URL` | _(required)_ | Synthesis endpoint URL of your self-hosted service. Unset → the engine still lists but `say(voice="irodori")` returns a clear error. |
+| `STACKCHAN_IRODORI_KEY` | _(none)_ | Optional API key, forwarded as a query parameter. |
+| `STACKCHAN_IRODORI_SPEAKER` | `3` | Default speaker identifier. |
+| `STACKCHAN_IRODORI_STEPS` | `24` | Default diffusion step count (higher = slower, higher quality). |
+
+Select Irodori per call:
+
+```
+say(text="やったね😊", voice="irodori")
+```
+
+Or make it the default engine for every `say` call that omits `voice`:
+
+```bash
+export STACKCHAN_TTS_ENGINE=irodori
+```
+
+VOICEVOX remains the default when `STACKCHAN_TTS_ENGINE` is unset, and an
+explicit `voice` argument always overrides the default.
+
+#### Alternative engine: ElevenLabs
+
+ElevenLabs is a cloud TTS engine that plugs into the same `say`
+pipeline (the MP3 reply is decoded to 16 kHz mono PCM, then encoded to
+Opus). Unlike VOICEVOX/Irodori there is nothing to self-host — you need
+an [ElevenLabs](https://elevenlabs.io/) account and API key, and each
+`say` call bills your ElevenLabs quota.
+
+Install the extra:
+
+```bash
+pip install 'stackchan-mcp[tts-elevenlabs]'
+```
+
+Configure via environment variables (the key is read from the
+environment only — never commit it):
+
+| Environment variable | Default | Notes |
+|---|---|---|
+| `ELEVENLABS_API_KEY` | _(required)_ | Your ElevenLabs API key. `STACKCHAN_ELEVENLABS_KEY` is also accepted and wins when both are set. |
+| `STACKCHAN_ELEVEN_VOICE_<NAME>` | _(none)_ | Voice map: each variable names one speaker, e.g. `STACKCHAN_ELEVEN_VOICE_RACHEL=<voice id>` makes `speaker_name="rachel"` work. |
+| `STACKCHAN_ELEVEN_DEFAULT_SPEAKER` | _(none)_ | Speaker used when a call omits `speaker_name`. If unset and exactly one voice is mapped, that voice is the default. |
+| `STACKCHAN_ELEVEN_MODEL` | `eleven_v3` | ElevenLabs model identifier. |
+
+Select ElevenLabs per call — the speaker selector is the string
+`speaker_name` (not the numeric `speaker_id`, which is VOICEVOX-shaped);
+a raw ElevenLabs voice ID is also accepted and passed through verbatim:
+
+```
+say(text="Hello!", voice="elevenlabs", speaker_name="rachel")
+```
+
+Or make it the default engine:
+
+```bash
+export STACKCHAN_TTS_ENGINE=elevenlabs
+```
 
 ### 5. Optional: STT setup (faster-whisper)
 
@@ -491,6 +707,256 @@ For visible capture feedback, pass `motion="face-only"` to show the
 success. The STT framework is engine-agnostic — additional engines
 (Vosk, whisper.cpp, cloud providers) can be added without changing
 the `listen` API.
+
+### 6. Optional: enable event notifications
+
+Stack-chan physical events (today: touch tap / stroke; the structure
+allows additional subtypes to be appended later) can be delivered
+through three notification channels. All channels are disabled by
+default; opt in via `~/.config/stackchan-mcp/notify.yml`. More than
+one channel can be enabled at the same time; each event is then
+delivered over every enabled channel. Pick whichever match the host
+you are integrating with:
+
+- `channels` — Claude Code plugin path. Notifications are injected
+  into the running session as `<channel ...>` blocks via Claude Code's
+  experimental Channels capability. Use this when Stack-chan is wired
+  into Claude Code as an installed plugin and you want events to reach
+  the conversation in-band.
+- `jsonl` — Out-of-process file integration. Each event is appended
+  as a single JSON line to a file you configure. Use this when an
+  external host (anything other than Claude Code, or your own
+  pipeline) needs to ingest events asynchronously by tailing a file.
+- `legacy_event` — Pre-plugin MCP notification. The gateway emits the
+  self-defined `stackchan/event` MCP notification method, which
+  existed before the Channels capability shipped. Use this for
+  backward compatibility when the host wires the gateway via
+  `~/.claude.json` `mcpServers` rather than the Claude Code plugin
+  path.
+
+See `notify.example.yml` for the full annotated configuration
+reference.
+
+#### Channel: `channels` (Claude Code plugin path)
+
+Use when Stack-chan is loaded as a Claude Code plugin and you want
+events delivered as in-session channel blocks. This channel uses an
+experimental MCP capability that may evolve.
+
+Enable in `notify.yml`:
+
+```yaml
+channels:
+  enabled: true
+```
+
+Delivered as a `<channel ...>` block injected into the Claude Code
+session, for example:
+
+```
+<channel source="plugin:stackchanmcp:stackchanmcp" ...>head was tapped</channel>
+```
+
+Setup:
+
+1. Plugin installation — install this repository as a Claude Code
+   plugin from the `kisaragi-mochi-channels` marketplace:
+
+   ```bash
+   claude plugin install stackchanmcp@kisaragi-mochi-channels
+   ```
+
+   For local development against your working copy, pass
+   `--plugin-dir /path/to/stackchan-mcp` instead of installing from the
+   marketplace; Claude Code starts the gateway under
+   `${CLAUDE_PLUGIN_ROOT}/gateway` via the bundled `.mcp.json`.
+
+2. Host environment setup — the Channels delivery path requires three
+   host-side names to be aligned with the gateway's MCP server name
+   (`stackchanmcp`, no hyphen):
+
+   - The plugin's `.mcp.json` `mcpServers` key for this gateway must be
+     `stackchanmcp`. If you previously wired the gateway under a
+     different key, rename it.
+   - Claude Code's `settings.local.json` `enabledMcpjsonServers`
+     whitelist must include `stackchanmcp`.
+   - The Channels allowlist requires a system-wide approval — Claude
+     Code does not honor user-level (e.g. `~/.claude/settings.json`)
+     settings for the Channels allowlist. On macOS, create or edit
+     `/Library/Application Support/ClaudeCode/managed-settings.json`
+     (requires `sudo`):
+
+     ```json
+     {
+       "channelsEnabled": true,
+       "allowedChannelPlugins": ["stackchanmcp@kisaragi-mochi-channels"]
+     }
+     ```
+
+3. Receiver side — launch Claude Code with the Channels flags:
+
+   ```bash
+   claude --channels plugin:stackchanmcp@kisaragi-mochi-channels \
+          --dangerously-load-development-channels plugin:stackchanmcp@kisaragi-mochi-channels
+   ```
+
+   The `--channels` flag attaches the channel source to the gateway and
+   injects `<channel source="plugin:stackchanmcp:stackchanmcp" ...>`
+   blocks into the session. The
+   `--dangerously-load-development-channels` flag is currently required
+   alongside `--channels` because the plugin's Channels capability is
+   experimental; the approved-allowlist-only path without this flag has
+   been verified not to deliver notifications in current Claude Code
+   versions. The flag is expected to become optional once the plugin's
+   Channels capability stabilizes.
+
+Important — pre-plugin wiring does not receive Channels: if you
+previously wired this gateway via `~/.claude.json` `mcpServers` (the
+pre-plugin path), that wiring does not receive `<channel ...>`
+injections. Claude Code only attaches a channel source to
+plugin-loaded MCP servers. Before switching to the plugin path, stop
+any existing gateway process to release the ESP32 ownership lock; the
+plugin-loaded gateway will otherwise fail to acquire it. If you prefer
+to keep the `~/.claude.json` wiring, use the `legacy_event` or `jsonl`
+channel below — both work without plugin loading.
+
+Other hosts:
+
+- Hosts with a `claude/channel`-compatible receiver: open that
+  receiver per the host's documentation. Compatibility with hosts
+  other than Claude Code has not been verified in this repository.
+- Hosts without a Channels receiver: use the `jsonl` channel below.
+
+##### Migration from the previous `stackchan-mcp` (hyphenated) form
+
+If you enabled Channels using the older `stackchan-mcp` server-name
+form, rename to the current `stackchanmcp` form (no hyphen) in all four
+places to keep the host MCP client and the gateway aligned:
+
+- Plugin / server name: change `stackchan-mcp` to `stackchanmcp` in
+  your host's `.mcp.json` `mcpServers` key, in `settings.local.json`
+  `enabledMcpjsonServers` whitelist, and in the `--channels` /
+  `--dangerously-load-development-channels` flag arguments.
+- Channels flag form: change from `--channels server:stackchan-mcp` to
+  `--channels plugin:stackchanmcp@kisaragi-mochi-channels`. The
+  plugin form is the supported form now that the marketplace manifest
+  is published.
+- system-wide allowlist: ensure
+  `/Library/Application Support/ClaudeCode/managed-settings.json` has
+  `allowedChannelPlugins` listing
+  `stackchanmcp@kisaragi-mochi-channels` (not the old `stackchan-mcp`
+  form).
+
+Without all four renames the host MCP client logs
+`Channel notifications skipped: server <name> not in --channels list
+for this session` and the notifications never reach the session.
+
+#### Channel: `jsonl` (out-of-process file integration)
+
+Use when an external host or your own pipeline needs to ingest events
+asynchronously by tailing a file. This is the simplest channel to wire
+into anything that is not Claude Code.
+
+Enable in `notify.yml`:
+
+```yaml
+jsonl:
+  enabled: true
+  path: ~/.claude/stackchan-events.jsonl
+```
+
+Each event is appended as one JSON line to the configured path. The
+file is created if it does not exist, and existing entries are
+preserved. Each line carries:
+
+- `event_type` — top-level event type (currently `"touch"`).
+- `subtype` — subtype within the event type (currently `"tap"` or
+  `"stroke"`).
+- `duration_ms` — firmware-reported duration of the event in
+  milliseconds.
+- `ts` — firmware uptime in milliseconds (monotonic).
+- `ts_unix` — wall-clock timestamp when the gateway recorded the
+  event.
+- `session_id` — gateway session identifier.
+- `action` — avatar action keyword for the event subtype (e.g.
+  `head_pat`, `head_stroke`). The built-in default templates always
+  populate this, and `messages:` overrides are also required to
+  specify `action`, so this field is present for every supported
+  subtype.
+
+The rendered wording (e.g. `head was tapped`) is what the `channels`
+channel delivers as the human-readable message; it is not stored in
+the JSONL record itself. A delivered tap-and-stroke pair looks like:
+
+```json
+{"event_type": "touch", "subtype": "tap", "duration_ms": 0, "ts": 123456, "ts_unix": 1717862400.0, "session_id": "abc-123", "action": "head_pat"}
+{"event_type": "touch", "subtype": "stroke", "duration_ms": 720, "ts": 124000, "ts_unix": 1717862400.7, "session_id": "abc-123", "action": "head_stroke"}
+```
+
+The top-level `event_type` and `subtype` correspond to the rows in
+"Supported event subtypes" below.
+
+#### Channel: `legacy_event` (pre-plugin backward compatibility)
+
+Use when the gateway is wired into the host via `~/.claude.json`
+`mcpServers` (the pre-plugin path) and you want events without
+switching the host over to the plugin form.
+
+Enable in `notify.yml`:
+
+```yaml
+legacy_event:
+  enabled: true
+```
+
+The gateway emits the self-defined `stackchan/event` MCP notification
+method. The notification params carry the same fields as the JSONL
+record above, except that `ts_unix` is not included (it is added only
+by the JSONL writer). The host is responsible for surfacing the
+notification — Claude Code's pre-plugin path historically displayed
+the rendered template inline; other hosts may handle the notification
+differently.
+
+#### Supported event subtypes
+
+The currently supported physical events are listed below. The structure
+is intentionally extensible: additional `touch` subtypes or new
+top-level types (e.g. `motion`, `voice`) can be appended in future
+releases without rewriting this section.
+
+| Type | Subtype | Default `action` | Default `template` |
+| --- | --- | --- | --- |
+| `touch` | `tap` | `head_pat` | `head was tapped` |
+| `touch` | `stroke` | `head_stroke` | `head was stroked for {duration_ms}ms` |
+
+The built-in defaults are phrased experientially — describing what the
+device felt rather than naming a mechanical event — so the consuming
+agent reads them as first-person narration. The `{duration_ms}`
+placeholder is substituted from the event payload; unknown
+placeholders are preserved verbatim.
+
+##### Overriding the wording
+
+Add a `messages:` block to `~/.config/stackchan-mcp/notify.yml` to
+override the per-subtype `action` and `template`. Only the subtypes
+you list are overridden; everything else keeps the defaults above.
+
+```yaml
+# ~/.config/stackchan-mcp/notify.yml
+messages:
+  touch:
+    tap:
+      action: head_pat
+      template: "got a head pat"
+    stroke:
+      action: head_stroke
+      template: "head being stroked for {duration_ms}ms"
+```
+
+Both `action` and `template` are required for each overridden subtype.
+The `action` value is forwarded in the event metadata, so keep it
+stable if a downstream consumer keys off it. See `notify.example.yml`
+for the full annotated reference.
 
 ## About the avatar images
 

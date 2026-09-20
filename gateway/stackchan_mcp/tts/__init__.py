@@ -48,7 +48,28 @@ def _register_voicevox() -> None:
     get_registry().register(VoicevoxEngine())
 
 
+def _register_irodori() -> None:
+    from .irodori import IrodoriEngine
+
+    get_registry().register(IrodoriEngine())
+
+
+def _register_edge_tts() -> None:
+    from .edge_tts import EdgeTTSEngine
+
+    get_registry().register(EdgeTTSEngine())
+
+
+def _register_elevenlabs() -> None:
+    from .elevenlabs import ElevenLabsEngine
+
+    get_registry().register(ElevenLabsEngine())
+
+
 _try_register(_register_voicevox, "voicevox")
+_try_register(_register_irodori, "irodori")
+_try_register(_register_edge_tts, "edge-tts")
+_try_register(_register_elevenlabs, "elevenlabs")
 
 
 __all__ = [

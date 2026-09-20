@@ -1,0 +1,26 @@
+# wrangler.toml — Cloudflare Workers deployment configuration for
+# the stackchan-mcp relay example.
+#
+# Before deploying:
+#   1. Copy this file as-is (or edit `name` to match your own deployment).
+#   2. Set UPSTREAM_URL to your Cloudflare Tunnel hostname using the
+#      `https://` form (the Worker performs the WebSocket upgrade by
+#      issuing fetch() with `Upgrade: websocket`, which requires an
+#      http/https URL).
+#   3. Register the shared Bearer secret used end-to-end (device <->
+#      Worker <-> gateway). The Worker verifies it against the
+#      incoming Authorization header and forwards the same header to
+#      the upstream gateway:
+#        wrangler secret put SHARED_SECRET
+#   4. Deploy:
+#        wrangler deploy
+
+name = "stackchan-relay"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+
+# UPSTREAM_URL points to the Cloudflare Tunnel that exposes the
+# stackchan-mcp gateway's localhost:8765 WebSocket endpoint.
+# Format: https://<your-tunnel-hostname>
+[vars]
+UPSTREAM_URL = "https://<your-tunnel-hostname>"

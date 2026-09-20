@@ -42,6 +42,7 @@ WebsocketProtocol::WebsocketProtocol() {
                 if (!alive->load()) {
                     return;
                 }
+                protocol->reconnect_timer_armed_.store(false);
                 // Re-check intent on the main task. esp_timer_stop() does
                 // not cancel work that the timer has already re-posted via
                 // Application::Schedule, so a CloseAudioChannel() or
@@ -207,6 +208,13 @@ bool WebsocketProtocol::IsTransportConnected() const {
     return transport_connected_.load();
 }
 
+std::string WebsocketProtocol::GetConnectedUrl() const {
+    if (!transport_connected_.load()) {
+        return "";
+    }
+    return connected_url_;
+}
+
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;
     // Keep WebSocket alive — only notify the application that the audio
@@ -230,6 +238,33 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
+    const bool existing_transport_ready = transport_connected_.load() &&
+        websocket_ != nullptr &&
+        websocket_->IsConnected() &&
+        !error_occurred_ &&
+        !session_id_.empty();
+    if (existing_transport_ready) {
+        // Issue #328: PR #136 and PR #192 made the audio session a logical
+        // state that can be closed while the WebSocket transport stays open.
+        // Server-driven listen.start, touch, and wake-word activations from
+        // that idle state should therefore arm the session on the current
+        // socket instead of rebuilding a healthy transport. Do not gate this
+        // transport predicate on Protocol::IsTimeout(): that tracks the
+        // audio-session inbound-frame deadline, while an idle persistent MCP
+        // socket can have no inbound frames for minutes and still be healthy.
+        // Refresh last_incoming_time_ when arming so IsAudioChannelOpened()
+        // starts its session deadline from this open, matching MQTT.
+        // A non-empty session_id_ is the ParseServerHello-acked signal.
+        // session_id_ is read here on the main task following the existing
+        // session-id gate pattern; broader cross-task hardening is out of
+        // scope for this fix.
+        last_incoming_time_ = std::chrono::steady_clock::now();
+        if (!audio_channel_open_.exchange(true) && on_audio_channel_opened_ != nullptr) {
+            on_audio_channel_opened_();
+        }
+        return true;
+    }
+
     return OpenAudioChannelInternal(true, true);
 }
 
@@ -293,7 +328,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
         AddGatewayCandidate(gateway_candidates, nvs_url, "websocket.url");
         if (nvs_url.empty()) {
 #ifdef CONFIG_STACKCHAN_MDNS_DISCOVERY
-            auto mdns_candidates = DiscoverStackchanGateway(1500);
+            auto mdns_candidates = DiscoverStackchanGateway(5000);
             if (mdns_candidates.has_value()) {
                 for (const auto& mdns_candidate : *mdns_candidates) {
                     AddGatewayCandidate(gateway_candidates,
@@ -373,10 +408,14 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
     auto network = Board::GetInstance().GetNetwork();
     if (gateway_candidates.empty()) {
         ESP_LOGE(TAG, "WS_URL not configured: no websocket gateway URL candidates available");
-        if (report_error) {
-            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
-        }
-        return false;
+        // Do not return early here: fall through to the shared failure exit so
+        // intentional_close_ is cleared and ScheduleReconnect() can arm the
+        // next retry. Returning here left the latch set from the prologue, so
+        // ScheduleReconnect() later refused the retry after a single mDNS
+        // 0-result on gateway restart (Issue #61 real-device finding). The
+        // loop below naturally performs zero iterations for an empty vector,
+        // and the shared exit reports SERVER_NOT_CONNECTED because
+        // server_hello_timed_out remains false on this path.
     }
 
     if (!token.empty() && token.find(" ") == std::string::npos) {
@@ -526,7 +565,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
             // before resetting the socket. A false reading here means
             // either the candidate never completed handshake or the
             // close was intentional — neither should reconnect.
-            if (!notify_disconnect->load()) {
+            if (!notify_disconnect->load(std::memory_order_acquire)) {
                 ESP_LOGI(TAG, "Websocket disconnected (no reconnect: candidate failed or intentional close)");
                 return;
             }
@@ -631,6 +670,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_error, bool arm_aud
         // synchronously when intentionally tearing this socket down.
         current_notify_disconnect_ = notify_disconnect;
         intentional_close_.store(false);
+        connected_url_ = candidate_url;
         transport_connected_.store(true);
         reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
         StopReconnectTimer();
@@ -683,10 +723,15 @@ void WebsocketProtocol::ScheduleReconnect() {
         ESP_LOGI(TAG, "Reconnect not scheduled (intentional close in progress)");
         return;
     }
+    bool expected = false;
+    if (!reconnect_timer_armed_.compare_exchange_strong(expected, true)) {
+        ESP_LOGI(TAG, "Reconnect already scheduled");
+        return;
+    }
 
-    StopReconnectTimer();
     esp_err_t err = esp_timer_start_once(reconnect_timer_, reconnect_interval_ms_ * 1000);
     if (err != ESP_OK) {
+        reconnect_timer_armed_.store(false);
         ESP_LOGW(TAG, "Failed to start reconnect timer (err=%d); reconnect not scheduled", err);
         return;
     }
@@ -695,6 +740,7 @@ void WebsocketProtocol::ScheduleReconnect() {
 }
 
 void WebsocketProtocol::StopReconnectTimer() {
+    reconnect_timer_armed_.store(false);
     if (reconnect_timer_ == nullptr) {
         return;
     }

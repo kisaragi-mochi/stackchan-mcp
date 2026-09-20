@@ -11,6 +11,8 @@ struct AudioStreamPacket {
     int sample_rate = 0;
     int frame_duration = 0;
     uint32_t timestamp = 0;
+    // Local-only marker used before transport serialization.
+    uint32_t raw_capture_generation = 0;
     std::vector<uint8_t> payload;
 };
 
@@ -75,6 +77,7 @@ public:
     // when no audio session is currently armed. Default false so subclasses
     // that lack a persistent-transport notion are unaffected.
     virtual bool IsTransportConnected() const { return false; }
+    virtual std::string GetConnectedUrl() const { return ""; }
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);
@@ -108,4 +111,3 @@ protected:
 };
 
 #endif // PROTOCOL_H
-

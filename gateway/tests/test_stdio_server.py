@@ -1,19 +1,59 @@
 """Tests for stdio MCP server tool definitions."""
 
 import json
+from pathlib import Path
 
 import pytest
 from mcp.types import CallToolRequest, ListToolsRequest
 
-from stackchan_mcp.stdio_server import create_server
+from stackchan_mcp.notify_config import DEFAULT_MESSAGE_TEMPLATES, NotifyConfig
+import stackchan_mcp.stdio_server as stdio_server
+from stackchan_mcp.stdio_server import (
+    CHANNEL_CAPABILITY,
+    CHANNEL_NOTIFICATION_METHOD,
+    STACKCHAN_CHANNEL_INSTRUCTIONS,
+    STACKCHAN_EVENT_INSTRUCTIONS,
+    STACKCHAN_EVENT_METHOD,
+    STACKCHAN_JSONL_INSTRUCTIONS,
+    SPEED_DESCRIPTION,
+    _build_experimental_capabilities,
+    _build_stackchan_event_instructions,
+    _create_initialization_options,
+    _resolve_speed_dps,
+    create_server,
+    notify_stackchan_event,
+)
 from stackchan_mcp.tts import get_registry
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_defaults_config(monkeypatch, tmp_path):
+    """Keep stdio tests independent from any real user-defaults file."""
+    import stackchan_mcp.user_defaults as user_defaults
+
+    config_dir = tmp_path / "user-defaults-config"
+
+    def fake_user_config_path(appname: str, **kwargs):
+        assert appname == "stackchan-mcp"
+        return config_dir
+
+    monkeypatch.setattr(
+        user_defaults.platformdirs,
+        "user_config_path",
+        fake_user_config_path,
+    )
+    user_defaults._clear_user_defaults_cache_for_tests()
+    stdio_server._reset_ws2812_color_orders_for_tests()
+    yield
+    user_defaults._clear_user_defaults_cache_for_tests()
+    stdio_server._reset_ws2812_color_orders_for_tests()
 
 
 def test_create_server():
     """Server creation succeeds with correct name."""
     server = create_server()
     assert server is not None
-    assert server.name == "stackchan-mcp"
+    assert server.name == "stackchanmcp"
 
 
 @pytest.mark.asyncio
@@ -65,6 +105,246 @@ async def test_get_head_angles_relays_to_esp32(monkeypatch):
 
     assert calls == [("self.robot.get_head_angles", {})]
     assert json.loads(result.root.content[0].text) == {"yaw": 12, "pitch": -3}
+
+
+@pytest.mark.asyncio
+async def test_list_tools_includes_gateway_config_tools():
+    """gateway_config_get/set are exposed with the expected schemas."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools = {tool.name: tool for tool in result.root.tools}
+    assert "gateway_config_get" in tools
+    assert "gateway_config_set" in tools
+
+    get_schema = tools["gateway_config_get"].inputSchema
+    assert get_schema == {"type": "object", "properties": {}}
+    assert "mDNS" in tools["gateway_config_get"].description
+    assert "force_mode" in tools["gateway_config_get"].description
+
+    set_tool = tools["gateway_config_set"]
+    set_schema = set_tool.inputSchema
+    assert set(set_schema["properties"]) == {"url", "fallback_url", "token"}
+    assert "required" not in set_schema
+    assert set_schema["properties"]["url"]["type"] == "string"
+    assert set_schema["properties"]["fallback_url"]["type"] == "string"
+    assert set_schema["properties"]["token"]["type"] == "string"
+    assert "empty string clears" in set_tool.description
+    assert "next reconnect" in set_tool.description
+
+
+@pytest.mark.asyncio
+async def test_gateway_config_get_relays_to_esp32(monkeypatch):
+    """gateway_config_get maps to self.gateway_config.get."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "url": "",
+                                "fallback_url": "wss://relay.example/",
+                                "token_set": True,
+                                "force_mode": False,
+                                "discovery_enabled": True,
+                            }
+                        ),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "gateway_config_get", "arguments": {}},
+        )
+    )
+
+    assert calls == [("self.gateway_config.get", {})]
+    assert json.loads(result.root.content[0].text)["discovery_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_config_set_relays_optional_strings(monkeypatch):
+    """gateway_config_set forwards provided fields, including empty strings."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "ok": True,
+                                "updated_keys": ["url", "fallback_url"],
+                                "url": "",
+                                "fallback_url": "wss://relay.example/",
+                                "token_set": False,
+                                "discovery_enabled": True,
+                            }
+                        ),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    arguments = {"url": "", "fallback_url": "wss://relay.example/"}
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "gateway_config_set", "arguments": arguments},
+        )
+    )
+
+    assert calls == [("self.gateway_config.set", arguments)]
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is True
+    assert payload["url"] == ""
+
+
+@pytest.mark.asyncio
+async def test_list_tools_includes_touch_sensor_tools():
+    """Touch sensor enable/disable tools are exposed with expected schemas."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools = {tool.name: tool for tool in result.root.tools}
+    assert "get_touch_sensor_enabled" in tools
+    assert "set_touch_sensor_enabled" in tools
+
+    get_tool = tools["get_touch_sensor_enabled"]
+    assert get_tool.inputSchema == {"type": "object", "properties": {}}
+    assert "NVS" in get_tool.description
+    assert "local motion response" in get_tool.description
+    assert "stackchan/event" in get_tool.description
+
+    set_tool = tools["set_touch_sensor_enabled"]
+    assert set_tool.inputSchema == {
+        "type": "object",
+        "properties": {
+            "enabled": {
+                "type": "boolean",
+                "description": (
+                    "True to enable tap/stroke detection; false to disable "
+                    "local reactions and event emission."
+                ),
+            },
+        },
+        "required": ["enabled"],
+    }
+    assert "persists across reboot" in set_tool.description
+    assert "local motion response" in set_tool.description
+    assert "stackchan/event" in set_tool.description
+
+
+@pytest.mark.asyncio
+async def test_set_touch_sensor_enabled_relays_to_esp32(monkeypatch):
+    """set_touch_sensor_enabled maps to the firmware robot tool."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "ok": True,
+                                "enabled": arguments["enabled"],
+                                "takes_effect": "immediate",
+                            }
+                        ),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    arguments = {"enabled": False}
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "set_touch_sensor_enabled", "arguments": arguments},
+        )
+    )
+
+    assert calls == [("self.robot.set_touch_sensor_enabled", arguments)]
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is True
+    assert payload["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_touch_sensor_enabled_relays_to_esp32(monkeypatch):
+    """get_touch_sensor_enabled maps to the firmware robot tool."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"enabled": False}),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "get_touch_sensor_enabled", "arguments": {}},
+        )
+    )
+
+    assert calls == [("self.robot.get_touch_sensor_enabled", {})]
+    assert json.loads(result.root.content[0].text) == {"enabled": False}
 
 
 @pytest.mark.asyncio
@@ -377,6 +657,408 @@ async def test_set_mouth_sequence_relays_steps_as_json_string(monkeypatch):
     assert json.loads(arguments["steps_json"]) == steps
 
 
+_WS2812_PORTS = (
+    ("port_b", "Port B", "GPIO 9"),
+    ("port_c", "Port C", "GPIO 17"),
+)
+
+
+def _ws2812_tool_names(port: str) -> tuple[str, ...]:
+    return (
+        f"{port}_ws2812_init",
+        f"{port}_ws2812_set_pixel",
+        f"{port}_ws2812_set_strip",
+        f"{port}_ws2812_refresh",
+        f"{port}_ws2812_clear",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("port", "port_label", "gpio_label"), _WS2812_PORTS)
+async def test_list_tools_includes_ws2812_tools_with_schemas(
+    port,
+    port_label,
+    gpio_label,
+):
+    """Port B/C WS2812 wrappers are exposed with LLM-facing schemas."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools_by_name = {tool.name: tool for tool in result.root.tools}
+    for tool_name in _ws2812_tool_names(port):
+        assert tool_name in tools_by_name, f"{tool_name} tool should be registered"
+        description = tools_by_name[tool_name].description
+        assert port_label in description
+        assert gpio_label in description
+        assert "3.3 V CMOS data" in description
+        assert "level shifter" in description
+
+    init_schema = tools_by_name[f"{port}_ws2812_init"].inputSchema
+    assert init_schema["properties"]["led_count"] == {
+        "type": "integer",
+        "description": "Number of LEDs in the strip (1..256).",
+        "minimum": 1,
+        "maximum": 256,
+    }
+    assert init_schema["properties"]["color_order"] == {
+        "type": "string",
+        "enum": ["grb", "rgb"],
+        "default": "grb",
+        "description": (
+            "Logical LED color order. Use grb for standard WS2812/NeoPixel "
+            "strips, or rgb for RGB-wired LEDs; the gateway swaps R/G before "
+            "forwarding colors to the firmware."
+        ),
+    }
+    assert init_schema["required"] == ["led_count"]
+
+    pixel_schema = tools_by_name[f"{port}_ws2812_set_pixel"].inputSchema
+    assert pixel_schema["properties"]["index"]["minimum"] == 0
+    assert pixel_schema["properties"]["index"]["maximum"] == 255
+    for channel in ("r", "g", "b"):
+        assert pixel_schema["properties"][channel]["minimum"] == 0
+        assert pixel_schema["properties"][channel]["maximum"] == 255
+    assert pixel_schema["properties"]["refresh"] == {
+        "type": "boolean",
+        "description": "True to latch the update immediately.",
+        "default": False,
+    }
+    assert pixel_schema["required"] == ["index", "r", "g", "b"]
+
+    strip_schema = tools_by_name[f"{port}_ws2812_set_strip"].inputSchema
+    colors_schema = strip_schema["properties"]["colors"]
+    assert colors_schema["type"] == "array"
+    assert colors_schema["minItems"] == 1
+    assert colors_schema["maxItems"] == 256
+    assert colors_schema["items"]["type"] == "array"
+    assert colors_schema["items"]["minItems"] == 3
+    assert colors_schema["items"]["maxItems"] == 3
+    assert colors_schema["items"]["items"] == {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255,
+    }
+    assert strip_schema["required"] == ["colors"]
+
+    for tool_name in (f"{port}_ws2812_refresh", f"{port}_ws2812_clear"):
+        assert tools_by_name[tool_name].inputSchema == {
+            "type": "object",
+            "properties": {},
+        }
+
+
+_PORT_A_I2C_TOOL_NAMES = ("i2c_read", "i2c_write", "i2c_write_read")
+
+
+@pytest.mark.asyncio
+async def test_list_tools_port_a_i2c_declares_scl_speed_hz_schema():
+    """Port A I2C wrappers expose the per-transaction clock schema."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools_by_name = {tool.name: tool for tool in result.root.tools}
+    for tool_name in _PORT_A_I2C_TOOL_NAMES:
+        assert tool_name in tools_by_name, f"{tool_name} tool should be registered"
+        description = tools_by_name[tool_name].description
+        assert "scl_speed_hz" in description
+        assert "400000" in description
+        assert "RCWL-9620" in description
+        assert "ESP_ERR_INVALID_STATE" in description
+
+        schema = tools_by_name[tool_name].inputSchema
+        assert schema["properties"]["scl_speed_hz"] == {
+            "type": "integer",
+            "default": 400000,
+            "description": (
+                "I2C clock for this transaction. Default 400000; lower it "
+                "(e.g. 100000 or 200000) for slower Units such as the "
+                "RCWL-9620 ultrasonic ranger that fail at 400 kHz with "
+                "ESP_ERR_INVALID_STATE."
+            ),
+            "minimum": 100000,
+            "maximum": 1000000,
+        }
+        assert "scl_speed_hz" not in schema["required"]
+
+
+@pytest.mark.asyncio
+async def test_i2c_read_relays_scl_speed_hz_to_firmware(monkeypatch):
+    """i2c_read forwards optional scl_speed_hz unchanged to the ESP32 tool."""
+    calls: list[tuple[str, dict]] = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, tool_name, arguments):
+            calls.append((tool_name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"ok": True, "bytes": [1, 2]}),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+    arguments = {"addr": 0x57, "n_bytes": 2, "scl_speed_hz": 200000}
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "i2c_read", "arguments": arguments},
+        )
+    )
+
+    assert calls == [("self.i2c.read", arguments)]
+    assert json.loads(result.root.content[0].text) == {"ok": True, "bytes": [1, 2]}
+
+
+def _make_ws2812_fake_gateway(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, tool_name, arguments):
+            calls.append((tool_name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"ok": True}),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    return calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("gateway_name", "request_args", "firmware_name", "firmware_args"),
+    [
+        (
+            "port_b_ws2812_init",
+            {"led_count": 18},
+            "self.port_b.ws2812.init",
+            {"led_count": 18},
+        ),
+        (
+            "port_b_ws2812_set_pixel",
+            {"index": 2, "r": 10, "g": 20, "b": 30, "refresh": True},
+            "self.port_b.ws2812.set_pixel",
+            {"index": 2, "r": 10, "g": 20, "b": 30, "refresh": True},
+        ),
+        (
+            "port_b_ws2812_refresh",
+            {},
+            "self.port_b.ws2812.refresh",
+            {},
+        ),
+        (
+            "port_b_ws2812_clear",
+            {},
+            "self.port_b.ws2812.clear",
+            {},
+        ),
+        (
+            "port_c_ws2812_init",
+            {"led_count": 18},
+            "self.port_c.ws2812.init",
+            {"led_count": 18},
+        ),
+        (
+            "port_c_ws2812_set_pixel",
+            {"index": 2, "r": 10, "g": 20, "b": 30, "refresh": True},
+            "self.port_c.ws2812.set_pixel",
+            {"index": 2, "r": 10, "g": 20, "b": 30, "refresh": True},
+        ),
+        (
+            "port_c_ws2812_refresh",
+            {},
+            "self.port_c.ws2812.refresh",
+            {},
+        ),
+        (
+            "port_c_ws2812_clear",
+            {},
+            "self.port_c.ws2812.clear",
+            {},
+        ),
+    ],
+)
+async def test_ws2812_tools_relay_to_firmware(
+    monkeypatch,
+    gateway_name,
+    request_args,
+    firmware_name,
+    firmware_args,
+):
+    calls = _make_ws2812_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": gateway_name, "arguments": request_args},
+        )
+    )
+
+    assert calls == [(firmware_name, firmware_args)]
+    assert json.loads(result.root.content[0].text) == {"ok": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("port", ["port_b", "port_c"])
+async def test_ws2812_set_strip_relays_colors_as_json_string(monkeypatch, port):
+    calls = _make_ws2812_fake_gateway(monkeypatch)
+    server = create_server()
+    colors = [[32, 0, 0], [0, 32, 0], [0, 0, 32]]
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": f"{port}_ws2812_set_strip",
+                "arguments": {"colors": colors},
+            },
+        )
+    )
+
+    assert len(calls) == 1
+    name, arguments = calls[0]
+    assert name == f"self.{port}.ws2812.set_strip"
+    assert set(arguments.keys()) == {"colors"}
+    assert json.loads(arguments["colors"]) == colors
+    assert json.loads(result.root.content[0].text) == {"ok": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("port", ["port_b", "port_c"])
+async def test_ws2812_rgb_color_order_swaps_channels_until_reinitialized(
+    monkeypatch,
+    port,
+):
+    calls = _make_ws2812_fake_gateway(monkeypatch)
+    server = create_server()
+
+    await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": f"{port}_ws2812_init",
+                "arguments": {"led_count": 18, "color_order": "rgb"},
+            },
+        )
+    )
+    await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": f"{port}_ws2812_set_pixel",
+                "arguments": {
+                    "index": 2,
+                    "r": 255,
+                    "g": 0,
+                    "b": 64,
+                    "refresh": True,
+                },
+            },
+        )
+    )
+    await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": f"{port}_ws2812_set_strip",
+                "arguments": {"colors": [[255, 0, 64], [0, 16, 32]]},
+            },
+        )
+    )
+    await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": f"{port}_ws2812_init",
+                "arguments": {"led_count": 18},
+            },
+        )
+    )
+    await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": f"{port}_ws2812_set_pixel",
+                "arguments": {"index": 3, "r": 7, "g": 8, "b": 9},
+            },
+        )
+    )
+    await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": f"{port}_ws2812_set_strip",
+                "arguments": {"colors": [[7, 8, 9]]},
+            },
+        )
+    )
+
+    assert calls == [
+        (f"self.{port}.ws2812.init", {"led_count": 18}),
+        (
+            f"self.{port}.ws2812.set_pixel",
+            {"index": 2, "r": 0, "g": 255, "b": 64, "refresh": True},
+        ),
+        (
+            f"self.{port}.ws2812.set_strip",
+            {"colors": json.dumps([[0, 255, 64], [16, 0, 32]])},
+        ),
+        (f"self.{port}.ws2812.init", {"led_count": 18}),
+        (f"self.{port}.ws2812.set_pixel", {"index": 3, "r": 7, "g": 8, "b": 9}),
+        (f"self.{port}.ws2812.set_strip", {"colors": json.dumps([[7, 8, 9]])}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("port", ["port_b", "port_c"])
+async def test_ws2812_init_rejects_invalid_color_order(monkeypatch, port):
+    calls = _make_ws2812_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": f"{port}_ws2812_init",
+                "arguments": {"led_count": 18, "color_order": "bgr"},
+            },
+        )
+    )
+
+    assert calls == []
+    assert "Input validation error" in result.root.content[0].text
+    assert "'bgr' is not one of ['grb', 'rgb']" in result.root.content[0].text
+
+
 # ---------------------------------------------------------------------------
 # move_head — Issue #109: schema + handler enforce the M5Stack-recommended
 # pitch operating range (5..85). pitch=0 motion-starts have been observed on
@@ -409,6 +1091,38 @@ async def test_list_tools_move_head_declares_recommended_pitch_range():
     # The description should mention the escape-hatch tool name so an LLM
     # reading it can pick the right alternative for permissive use cases.
     assert "set_head_angles" in tool.description
+
+    speed_schema = tool.inputSchema["properties"]["speed"]
+    assert speed_schema["oneOf"] == [
+        {"enum": ["low", "mid", "high"]},
+        {"type": "integer", "minimum": 1, "maximum": 10000},
+    ]
+    assert speed_schema["description"] == SPEED_DESCRIPTION
+
+
+@pytest.mark.parametrize(
+    ("speed", "expected_dps"),
+    [
+        ("low", 30),
+        ("mid", 120),
+        ("high", 240),
+        (None, None),
+        (200, 200),
+        (1, 1),
+        (10000, 10000),
+    ],
+)
+def test_resolve_speed_dps_valid(speed, expected_dps):
+    assert _resolve_speed_dps(speed) == expected_dps
+
+
+@pytest.mark.parametrize(
+    "bad_speed",
+    ["fast", "slow", "", 0, -1, 10001, True, False, 1.5, [120], {}],
+)
+def test_resolve_speed_dps_invalid(bad_speed):
+    with pytest.raises((ValueError, TypeError)):
+        _resolve_speed_dps(bad_speed)
 
 
 def _make_fake_gateway(monkeypatch):
@@ -444,10 +1158,16 @@ def _make_fake_gateway(monkeypatch):
     return calls
 
 
-def _move_head_request(yaw, pitch):
+_MISSING = object()
+
+
+def _move_head_request(yaw, pitch, speed=_MISSING):
+    arguments = {"yaw": yaw, "pitch": pitch}
+    if speed is not _MISSING:
+        arguments["speed"] = speed
     return CallToolRequest(
         method="tools/call",
-        params={"name": "move_head", "arguments": {"yaw": yaw, "pitch": pitch}},
+        params={"name": "move_head", "arguments": arguments},
     )
 
 
@@ -544,6 +1264,42 @@ async def test_move_head_accepts_pitch_inside_recommended(monkeypatch, pitch):
 
 
 @pytest.mark.asyncio
+async def test_move_head_speed_mid_forwards_speed_dps(monkeypatch):
+    calls = _make_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _move_head_request(yaw=10, pitch=45, speed="mid")
+    )
+
+    assert len(calls) == 1
+    name, arguments = calls[0]
+    assert name == "self.robot.set_head_angles"
+    assert arguments == {"yaw": 10, "pitch": 45, "speed_dps": 120}
+
+    payload = json.loads(result.root.content[0].text)
+    assert "error" not in payload
+
+
+@pytest.mark.asyncio
+async def test_move_head_without_speed_omits_speed_dps(monkeypatch):
+    calls = _make_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _move_head_request(yaw=10, pitch=45)
+    )
+
+    assert len(calls) == 1
+    name, arguments = calls[0]
+    assert name == "self.robot.set_head_angles"
+    assert arguments == {"yaw": 10, "pitch": 45}
+
+    payload = json.loads(result.root.content[0].text)
+    assert "error" not in payload
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("pitch", [None, "45", 5.5])
 async def test_move_head_rejects_non_integer_pitch(monkeypatch, pitch):
     """Non-int pitch values are refused before reaching the device."""
@@ -569,3 +1325,666 @@ async def test_move_head_rejects_boolean_pitch(monkeypatch, pitch):
     )
 
     _assert_rejected_without_dispatch(result, calls)
+
+
+# ---------------------------------------------------------------------------
+# Stack-chan event notification config: capabilities, instructions, allowlist
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    (
+        "legacy",
+        "channels",
+        "jsonl",
+        "expected_capabilities",
+        "expected_instructions",
+    ),
+    [
+        (
+            False,
+            True,
+            False,
+            {CHANNEL_CAPABILITY: {}},
+            STACKCHAN_CHANNEL_INSTRUCTIONS,
+        ),
+        (
+            True,
+            False,
+            False,
+            {STACKCHAN_EVENT_METHOD: {}},
+            STACKCHAN_EVENT_INSTRUCTIONS,
+        ),
+        (
+            False,
+            False,
+            True,
+            {},
+            STACKCHAN_JSONL_INSTRUCTIONS,
+        ),
+        (
+            True,
+            True,
+            False,
+            {STACKCHAN_EVENT_METHOD: {}, CHANNEL_CAPABILITY: {}},
+            STACKCHAN_CHANNEL_INSTRUCTIONS + "\n\n" + STACKCHAN_EVENT_INSTRUCTIONS,
+        ),
+        (
+            False,
+            False,
+            False,
+            {},
+            None,
+        ),
+    ],
+)
+def test_stackchan_event_capabilities_and_instructions_follow_notify_config(
+    legacy,
+    channels,
+    jsonl,
+    expected_capabilities,
+    expected_instructions,
+):
+    config = _notify_config(legacy=legacy, channels=channels, jsonl=jsonl)
+    server = create_server()
+    options = _create_initialization_options(server, notify_config=config)
+
+    assert _build_experimental_capabilities(config) == expected_capabilities
+    assert options.capabilities.experimental == expected_capabilities
+    assert _build_stackchan_event_instructions(config) == expected_instructions
+    assert options.instructions == expected_instructions
+
+
+def test_create_initialization_options_requires_notify_config():
+    server = create_server(notify_config=_notify_config())
+
+    with pytest.raises(TypeError):
+        _create_initialization_options(server)
+
+
+def test_create_initialization_options_uses_explicit_notify_config(monkeypatch):
+    all_off_config = _notify_config(legacy=False, channels=False, jsonl=False)
+    channels_config = _notify_config(legacy=False, channels=True, jsonl=False)
+
+    load_calls = []
+
+    def load_all_off_config():
+        load_calls.append("load")
+        return all_off_config
+
+    monkeypatch.setattr(stdio_server, "load_notify_config", load_all_off_config)
+    server = create_server(notify_config=all_off_config)
+
+    all_off_options = _create_initialization_options(server, all_off_config)
+    channels_options = _create_initialization_options(server, channels_config)
+
+    assert load_calls == []
+    assert all_off_options.capabilities.experimental == {}
+    assert all_off_options.instructions is None
+    assert channels_options.capabilities.experimental == {CHANNEL_CAPABILITY: {}}
+    assert channels_options.instructions == STACKCHAN_CHANNEL_INSTRUCTIONS
+
+
+@pytest.mark.asyncio
+async def test_notify_stackchan_event_accepts_channel_method(monkeypatch):
+    session = _FakeNotificationSession()
+    monkeypatch.setattr("stackchan_mcp.stdio_server._active_session", session)
+    monkeypatch.setattr("stackchan_mcp.stdio_server._active_sessions", {})
+
+    params = {"content": "(head pat)", "meta": {"action": "head_pat"}}
+    await notify_stackchan_event(CHANNEL_NOTIFICATION_METHOD, params)
+
+    assert session.notifications == [
+        {"method": CHANNEL_NOTIFICATION_METHOD, "params": params}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notify_stackchan_event_rejects_unsupported_method(
+    monkeypatch,
+    caplog,
+):
+    session = _FakeNotificationSession()
+    monkeypatch.setattr("stackchan_mcp.stdio_server._active_session", session)
+    monkeypatch.setattr("stackchan_mcp.stdio_server._active_sessions", {})
+
+    with caplog.at_level("WARNING"):
+        await notify_stackchan_event("notifications/other", {"ok": True})
+
+    assert session.notifications == []
+    assert "Unsupported stackchan event notification method" in caplog.text
+
+
+def _notify_config(
+    *,
+    legacy: bool = False,
+    channels: bool = False,
+    jsonl: bool = False,
+) -> NotifyConfig:
+    return NotifyConfig(
+        legacy_event_enabled=legacy,
+        channels_enabled=channels,
+        jsonl_enabled=jsonl,
+        jsonl_path=Path("/tmp/stackchan-events-test.jsonl"),
+        messages=dict(DEFAULT_MESSAGE_TEMPLATES),
+    )
+
+
+class _FakeNotificationSession:
+    def __init__(self):
+        self.notifications = []
+
+    async def send_notification(self, notification):
+        self.notifications.append(
+            notification.model_dump(
+                by_alias=True,
+                mode="json",
+                exclude_none=True,
+            )
+        )
+
+
+def _make_follow_pose_fake_gateway(monkeypatch):
+    """Helper: capture the FollowPoseStreamConfig that reaches start_follow.
+
+    Returns a single-element ``captured`` list; the handler imports
+    start_follow from follow_pose_stream at call time, so patching the
+    module attribute is enough to intercept the config without driving a
+    real WebSocket subscription.
+    """
+    captured: list = []
+
+    class FakeGateway:
+        pass
+
+    async def fake_start_follow(gateway, cfg):
+        captured.append(cfg)
+        return {"running": True}
+
+    import stackchan_mcp.follow_pose_stream as follow_pose_stream
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(follow_pose_stream, "start_follow", fake_start_follow)
+    return captured
+
+
+def _follow_pose_request(**arguments):
+    arguments.setdefault("action", "start")
+    arguments.setdefault("url", "ws://example.test/pose")
+    return CallToolRequest(
+        method="tools/call",
+        params={"name": "stackchan_follow_pose_stream", "arguments": arguments},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", [1, 5, 20])
+async def test_follow_pose_smoothing_window_propagates(monkeypatch, window):
+    """Explicit in-range smoothing_window reaches FollowPoseStreamConfig."""
+    captured = _make_follow_pose_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_pose_request(smoothing_window=window)
+    )
+
+    assert len(captured) == 1, (
+        f"start_follow should fire once for smoothing_window={window}; "
+        f"response text={result.root.content[0].text!r}"
+    )
+    assert captured[0].smoothing_window == window
+
+
+@pytest.mark.asyncio
+async def test_follow_pose_smoothing_window_defaults_to_five(monkeypatch):
+    """Omitting smoothing_window reproduces the dataclass default of 5."""
+    captured = _make_follow_pose_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_pose_request()
+    )
+
+    assert len(captured) == 1, (
+        "start_follow should fire once when smoothing_window is omitted; "
+        f"response text={result.root.content[0].text!r}"
+    )
+    assert captured[0].smoothing_window == 5
+
+
+@pytest.mark.asyncio
+async def test_follow_pose_explicit_smoothing_window_wins_over_user_default(
+    monkeypatch,
+    tmp_path,
+):
+    """Explicit MCP args override user-defaults TOML values."""
+    import stackchan_mcp.user_defaults as user_defaults
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "user-defaults.toml").write_text(
+        "[tool.stackchan_follow_pose_stream]\n"
+        "smoothing_window = 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        user_defaults.platformdirs,
+        "user_config_path",
+        lambda appname, **kwargs: config_dir,
+    )
+    user_defaults._clear_user_defaults_cache_for_tests()
+
+    try:
+        captured = _make_follow_pose_fake_gateway(monkeypatch)
+        server = create_server()
+
+        result = await server.request_handlers[CallToolRequest](
+            _follow_pose_request(smoothing_window=20)
+        )
+    finally:
+        user_defaults._clear_user_defaults_cache_for_tests()
+
+    assert len(captured) == 1, (
+        "start_follow should fire once with the explicit argument; "
+        f"response text={result.root.content[0].text!r}"
+    )
+    assert captured[0].smoothing_window == 20
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", [0, 21, -1, 100])
+async def test_follow_pose_smoothing_window_out_of_range_rejected(monkeypatch, window):
+    """Out-of-range smoothing_window is refused without starting a follow."""
+    captured = _make_follow_pose_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_pose_request(smoothing_window=window)
+    )
+
+    assert captured == [], (
+        "Out-of-range smoothing_window must not start a follow. "
+        f"Got captured={captured}, "
+        f"response text={result.root.content[0].text!r}"
+    )
+    response_text = result.root.content[0].text.lower()
+    assert any(
+        keyword in response_text
+        for keyword in ("error", "invalid", "minimum", "maximum", "type")
+    ), f"Expected an error signal in {result.root.content[0].text!r}"
+
+
+@pytest.mark.asyncio
+async def test_follow_pose_smoothing_window_non_integer_rejected(monkeypatch):
+    """A non-integer smoothing_window is refused without starting a follow."""
+    captured = _make_follow_pose_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_pose_request(smoothing_window=3.5)
+    )
+
+    assert captured == [], (
+        "Non-integer smoothing_window must not start a follow. "
+        f"Got captured={captured}, "
+        f"response text={result.root.content[0].text!r}"
+    )
+    response_text = result.root.content[0].text.lower()
+    assert any(
+        keyword in response_text
+        for keyword in ("error", "invalid", "type", "integer")
+    ), f"Expected an error signal in {result.root.content[0].text!r}"
+
+
+def _make_follow_led_fake_gateway(monkeypatch):
+    captured: list = []
+
+    class FakeGateway:
+        pass
+
+    async def fake_start_follow(gateway, cfg):
+        captured.append(cfg)
+        return {
+            "running": True,
+            "target": cfg.target,
+            "max_fps": cfg.max_fps,
+        }
+
+    import stackchan_mcp.follow_led_stream as follow_led_stream
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(follow_led_stream, "start_follow", fake_start_follow)
+    return captured
+
+
+def _follow_led_request(**arguments):
+    arguments.setdefault("action", "start")
+    arguments.setdefault("url", "ws://example.test/led")
+    return CallToolRequest(
+        method="tools/call",
+        params={"name": "stackchan_follow_led_stream", "arguments": arguments},
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_tools_includes_follow_led_stream_schema():
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools = {tool.name: tool for tool in result.root.tools}
+    tool = tools["stackchan_follow_led_stream"]
+    schema = tool.inputSchema
+    assert schema["properties"]["target"]["enum"] == [
+        "base_ring",
+        "port_b",
+        "port_c",
+    ]
+    assert schema["properties"]["led_count"]["maximum"] == 256
+    assert schema["properties"]["color_order"] == {
+        "type": "string",
+        "enum": ["grb", "rgb"],
+        "default": "grb",
+        "description": (
+            "WS2812 strip color order for target=port_b or target=port_c. "
+            "Use rgb for RGB-wired LEDs; the gateway swaps R/G before "
+            "forwarding to the firmware. base_ring only supports grb."
+        ),
+    }
+    assert schema["properties"]["max_fps"]["maximum"] == 30
+    assert "kind='event'" in tool.description
+
+
+@pytest.mark.asyncio
+async def test_list_tools_includes_beat_mode_tools():
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools = {tool.name: tool for tool in result.root.tools}
+    for name in (
+        "beat_mode_start",
+        "beat_mode_stop",
+        "beat_mode_update",
+        "beat_meta_snapshot",
+        "beat_clip_save",
+    ):
+        assert name in tools
+
+    start_schema = tools["beat_mode_start"].inputSchema
+    assert start_schema["properties"]["motion_intensity"]["maximum"] == 1
+    assert start_schema["properties"]["sensitivity"]["default"] == 0.5
+    assert start_schema["properties"]["sensitivity"]["maximum"] == 1
+    sensitivity_description = start_schema["properties"]["sensitivity"]["description"]
+    assert "0.5 => 0.004" in sensitivity_description
+    assert start_schema["properties"]["color"]["minItems"] == 3
+    assert "listen() calls fail fast" in tools["beat_mode_start"].description
+    assert "base ring" in tools["beat_mode_start"].description
+
+    update_schema = tools["beat_mode_update"].inputSchema
+    assert update_schema["properties"]["sensitivity"]["minimum"] == 0
+    assert update_schema["properties"]["blink_rate"]["minimum"] == 0.25
+    assert update_schema["properties"]["motion_enabled"]["type"] == "boolean"
+    assert "persists on disk" in tools["beat_clip_save"].description
+    assert "caller is responsible" in tools["beat_clip_save"].description
+
+
+@pytest.mark.asyncio
+async def test_beat_mode_start_arguments_propagate(monkeypatch):
+    captured = {}
+
+    class FakeGateway:
+        pass
+
+    async def fake_start_beat_mode(gateway, cfg):
+        captured["gateway"] = gateway
+        captured["cfg"] = cfg
+        return {
+            "active": True,
+            "motion": {"intensity": cfg.motion_intensity},
+            "sensitivity": cfg.sensitivity,
+            "min_onset_rms": cfg.min_onset_rms,
+            "led": {"color": list(cfg.color)},
+        }
+
+    import stackchan_mcp.beat as beat
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(beat, "start_beat_mode", fake_start_beat_mode)
+
+    server = create_server()
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "beat_mode_start",
+                "arguments": {
+                    "motion_intensity": 0.75,
+                    "sensitivity": 0.25,
+                    "color": [10, 20, 30],
+                    "duration_sec": 12,
+                },
+            },
+        )
+    )
+
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is True
+    assert captured["cfg"].motion_intensity == 0.75
+    assert captured["cfg"].sensitivity == 0.25
+    assert captured["cfg"].color == (10, 20, 30)
+    assert captured["cfg"].duration_sec == 12
+
+
+@pytest.mark.asyncio
+async def test_beat_mode_start_rejects_invalid_sensitivity(monkeypatch):
+    class FakeGateway:
+        pass
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "beat_mode_start",
+                "arguments": {"sensitivity": -0.1},
+            },
+        )
+    )
+
+    assert "Input validation error" in result.root.content[0].text
+    assert "less than the minimum of 0" in result.root.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_beat_mode_update_rejects_invalid_color(monkeypatch):
+    class FakeGateway:
+        pass
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "beat_mode_update",
+                "arguments": {"color": [255, 0]},
+            },
+        )
+    )
+
+    assert "Input validation error" in result.root.content[0].text
+    assert "too short" in result.root.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_beat_mode_update_rejects_invalid_sensitivity(monkeypatch):
+    class FakeGateway:
+        pass
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "beat_mode_update",
+                "arguments": {"sensitivity": 1.5},
+            },
+        )
+    )
+
+    assert "Input validation error" in result.root.content[0].text
+    assert "greater than the maximum of 1" in result.root.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_beat_clip_save_defaults_to_ten_seconds(monkeypatch):
+    captured = {}
+
+    class FakeGateway:
+        pass
+
+    async def fake_save_beat_clip(seconds):
+        captured["seconds"] = seconds
+        return {"path": "/tmp/beat.wav", "seconds": 1.0}
+
+    import stackchan_mcp.beat as beat
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(beat, "save_beat_clip", fake_save_beat_clip)
+
+    server = create_server()
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "beat_clip_save", "arguments": {}},
+        )
+    )
+
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is True
+    assert payload["path"] == "/tmp/beat.wav"
+    assert captured["seconds"] == 10.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["port_b", "port_c"])
+async def test_follow_led_ws2812_target_arguments_propagate(monkeypatch, target):
+    captured = _make_follow_led_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_led_request(
+            target=target,
+            led_count=18,
+            max_fps=24,
+            color_order="rgb",
+            source_filter="stage",
+            frame_filter="calibrated",
+            reconnect_initial_backoff_s=0.25,
+            reconnect_max_backoff_s=2.0,
+        )
+    )
+
+    assert len(captured) == 1, result.root.content[0].text
+    cfg = captured[0]
+    assert cfg.target == target
+    assert cfg.led_count == 18
+    assert cfg.max_fps == 24
+    assert cfg.color_order == "rgb"
+    assert cfg.source_filter == "stage"
+    assert cfg.frame_filter == "calibrated"
+    assert cfg.reconnect_initial_backoff_s == 0.25
+    assert cfg.reconnect_max_backoff_s == 2.0
+
+
+@pytest.mark.asyncio
+async def test_follow_led_reads_user_defaults(monkeypatch, tmp_path):
+    import stackchan_mcp.user_defaults as user_defaults
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "user-defaults.toml").write_text(
+        "[tool.stackchan_follow_led_stream]\n"
+        'target = "port_c"\n'
+        "led_count = 7\n"
+        "max_fps = 12\n"
+        'color_order = "rgb"\n'
+        'source_filter = "stage"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        user_defaults.platformdirs,
+        "user_config_path",
+        lambda appname, **kwargs: config_dir,
+    )
+    user_defaults._clear_user_defaults_cache_for_tests()
+
+    try:
+        captured = _make_follow_led_fake_gateway(monkeypatch)
+        server = create_server()
+        result = await server.request_handlers[CallToolRequest](
+            _follow_led_request()
+        )
+    finally:
+        user_defaults._clear_user_defaults_cache_for_tests()
+
+    assert len(captured) == 1, result.root.content[0].text
+    assert captured[0].target == "port_c"
+    assert captured[0].led_count == 7
+    assert captured[0].max_fps == 12
+    assert captured[0].color_order == "rgb"
+    assert captured[0].source_filter == "stage"
+
+
+@pytest.mark.asyncio
+async def test_follow_led_rejects_bad_target_led_count(monkeypatch):
+    captured = _make_follow_led_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_led_request(target="base_ring", led_count=13)
+    )
+
+    assert captured == []
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is False
+    assert "base_ring" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_follow_led_rejects_color_order_for_base_ring(monkeypatch):
+    captured = _make_follow_led_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_led_request(target="base_ring", color_order="rgb")
+    )
+
+    assert captured == []
+    payload = json.loads(result.root.content[0].text)
+    assert payload["ok"] is False
+    assert "color_order is only supported" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_follow_led_rejects_bad_color_order(monkeypatch):
+    captured = _make_follow_led_fake_gateway(monkeypatch)
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        _follow_led_request(target="port_b", led_count=8, color_order="bgr")
+    )
+
+    assert captured == []
+    assert "Input validation error" in result.root.content[0].text
+    assert "'bgr' is not one of ['grb', 'rgb']" in result.root.content[0].text

@@ -1,0 +1,16 @@
+{
+  "name": "stackchanmcp",
+  "description": "Stack-chan physical event channel for Claude Code — touch tap / stroke notifications from the desktop robot delivered as Channels messages.",
+  "version": "0.8.0",
+  "keywords": [
+    "stackchan",
+    "mcp",
+    "channel",
+    "esp32",
+    "robotics",
+    "touch"
+  ],
+  "author": {
+    "name": "kisaragi-mochi"
+  }
+}

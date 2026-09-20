@@ -40,6 +40,7 @@ public:
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
     bool IsTransportConnected() const override;
+    std::string GetConnectedUrl() const override;
 
 private:
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
@@ -65,6 +66,10 @@ private:
     // (now - last_received_us_) against the dead threshold to detect
     // silent path breaks.
     std::atomic<uint64_t> last_received_us_{0};
+    // True while reconnect_timer_ has a pending one-shot retry. This keeps
+    // independent failure/disconnect paths from double-arming the same retry
+    // and advancing reconnect_interval_ms_ more than once.
+    std::atomic<bool> reconnect_timer_armed_ = false;
     // Per-socket "this disconnect should fire the reconnect path" flag.
     // The candidate loop in OpenAudioChannelInternal() creates a fresh
     // shared_ptr<atomic<bool>>(false) for each socket and captures it
@@ -105,6 +110,10 @@ private:
     // so the timer-task read does not race with main-task websocket_.reset()
     // in OpenAudioChannelInternal / destructor / reconnect paths.
     std::atomic<bool> transport_connected_ = false;
+    // Main-task snapshot of the candidate URL that completed the WebSocket
+    // server-hello flow. GetConnectedUrl returns it only while the transport
+    // flag is still true, so post-disconnect stale values are not reported.
+    std::string connected_url_;
     int reconnect_interval_ms_ = WEBSOCKET_RECONNECT_INITIAL_INTERVAL_MS;
     int version_ = 1;
 

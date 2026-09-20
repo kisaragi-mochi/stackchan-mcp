@@ -11,6 +11,7 @@ working.
 
 from __future__ import annotations
 
+import atexit
 import argparse
 import asyncio
 import errno
@@ -21,9 +22,13 @@ import shutil
 import socket
 import subprocess
 import sys
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from . import __version__
+
+if TYPE_CHECKING:
+    from .ownership import LockInfo, LockMode
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +61,20 @@ Environment variables:
                            (default 8765).
   CAPTURE_PORT             Port for the HTTP capture server
                            (default 8766).
+  MCP_HTTP_HOST            Bind address for the Streamable HTTP MCP server
+                           (default 127.0.0.1).
+  MCP_HTTP_PORT            Port for the Streamable HTTP MCP server
+                           (default 8767).
+  MCP_HTTP_ALLOWED_HOSTS   Comma-separated Host / Origin allowlist entries
+                           for non-loopback Streamable HTTP clients.
 
 See gateway/README.md and the top-level README.md for full setup,
 including pairing the ESP32 firmware and configuring the WiFi gateway URL.
 """
+
+_STDIO_TRANSPORT = "stdio"
+_STREAMABLE_HTTP_TRANSPORT = "streamable-http"
+_TRANSPORT_CHOICES = (_STDIO_TRANSPORT, _STREAMABLE_HTTP_TRANSPORT)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -78,14 +93,38 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check",
         action="store_true",
+        help="Print the current gateway ownership lock status and exit.",
+    )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
         help=(
-            "Run a non-destructive preflight (configuration, port "
-            "availability, derived URLs) and exit. Exit 0 if ready to run, "
-            "non-zero if at least one blocking issue is found."
+            "Run a non-destructive configuration and port preflight, then "
+            "exit. Exit 0 if ready to run, non-zero if at least one "
+            "blocking issue is found."
         ),
     )
     parser.add_argument(
         "--no-mdns",
+        action="store_true",
+        help="Disable mDNS/DNS-SD advertisement for the WebSocket endpoint.",
+    )
+    subparsers = parser.add_subparsers(dest="command", metavar="{serve}")
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Start the StackChan gateway.",
+        description="Start the StackChan gateway using the selected transport.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    serve_parser.add_argument(
+        "--transport",
+        choices=_TRANSPORT_CHOICES,
+        default=_STDIO_TRANSPORT,
+        help="Gateway transport to serve (default: stdio).",
+    )
+    serve_parser.add_argument(
+        "--no-mdns",
+        dest="serve_no_mdns",
         action="store_true",
         help="Disable mDNS/DNS-SD advertisement for the WebSocket endpoint.",
     )
@@ -395,6 +434,42 @@ def _load_dotenv() -> None:
     load_dotenv()
 
 
+def _run_ownership_check() -> int:
+    """Print the current ownership lock status and exit cleanly."""
+    from .ownership import is_pid_alive, read_lock
+
+    # Load ``.env`` first so that a WS_PORT / PORT defined only there resolves
+    # the same per-port lock the running gateway claims. Startup loads ``.env``
+    # before ``_acquire_startup_lock`` (via ``_run_stdio_gateway`` /
+    # ``_run_streamable_http_placeholder``), so ``--check`` must match it —
+    # otherwise a gateway owning ``owner-18765.lock`` would be inspected against
+    # the default ``owner-8765.lock`` and wrongly reported ready. Mirrors how
+    # ``--preflight`` loads ``.env`` inside ``_run_preflight``.
+    _load_dotenv()
+    # Inspect the per-WS_PORT lock this gateway would claim (not the legacy
+    # machine-global owner.lock), so the preflight reflects the actual port.
+    lock_path = _ws_port_lock_path()
+    info = read_lock(lock_path)
+    if info is None:
+        print(f"no current owner (lock: {lock_path.name})")
+        print("ownership preflight: ready")
+        print("Result: ready. Exit 0.")
+    elif is_pid_alive(info["pid"]):
+        fields = [
+            f"owner_id={info['owner_id']}",
+            f"pid={info['pid']}",
+            f"start_ts={info['start_ts']}",
+            f"host={info['host']}",
+        ]
+        for key in ("mode", "http_endpoint", "started_by"):
+            if key in info:
+                fields.append(f"{key}={info[key]}")
+        print(" ".join(fields))
+    else:
+        print(f"stale lock found: pid {info['pid']} not alive")
+    return 0
+
+
 # Default Homebrew prefixes that ship libopus.dylib on macOS. Apple
 # Silicon installs default to ``/opt/homebrew``; Intel Macs use
 # ``/usr/local``. Keeping both keeps the helper portable across
@@ -469,6 +544,12 @@ def _run_preflight() -> int:
     else:
         print("  STACKCHAN_TOKEN     not set (gateway will accept any client)")
 
+    mcp_http_allowed_hosts = os.getenv("MCP_HTTP_ALLOWED_HOSTS", "")
+    if mcp_http_allowed_hosts:
+        print(f"  MCP_HTTP_ALLOWED_HOSTS {mcp_http_allowed_hosts}")
+    else:
+        print("  MCP_HTTP_ALLOWED_HOSTS not set")
+
     vision_host = os.getenv("VISION_HOST", "")
     capture_port_raw = os.getenv("CAPTURE_PORT", "8766")
     if vision_host:
@@ -518,14 +599,26 @@ def _run_preflight() -> int:
     print()
     print("Ports:")
     host = os.getenv("HOST", "0.0.0.0")
+    mcp_http_host = os.getenv("MCP_HTTP_HOST", "127.0.0.1")
     ws_port, ws_source = _resolve_ws_port()
     cap_port, cap_source = _resolve_capture_port()
+    raw_mcp_http_port = os.getenv("MCP_HTTP_PORT")
+    if raw_mcp_http_port is None:
+        mcp_http_port, mcp_http_source = (8767, "default")
+    else:
+        mcp_http_port, mcp_http_source = _validate_port_value(
+            raw_mcp_http_port,
+            "MCP_HTTP_PORT",
+        )
 
     if ws_port is None:
         print(f"  ws://{host}:???     INVALID ({ws_source})")
         issues += 1
     if cap_port is None:
         print(f"  http://{host}:???   INVALID ({cap_source})")
+        issues += 1
+    if mcp_http_port is None:
+        print(f"  http://{mcp_http_host}:???/mcp INVALID ({mcp_http_source})")
         issues += 1
 
     if (
@@ -550,6 +643,21 @@ def _run_preflight() -> int:
         )
         issues += 1
 
+    if mcp_http_port is not None:
+        for label, other_port, other_source in (
+            ("WS_PORT", ws_port, ws_source),
+            ("CAPTURE_PORT", cap_port, cap_source),
+        ):
+            if other_port is None or mcp_http_port == 0 or other_port == 0:
+                continue
+            if mcp_http_port == other_port:
+                print(
+                    f"  MCP_HTTP_PORT ({mcp_http_source}) and {label} "
+                    f"({other_source}) both resolve to {mcp_http_port}; "
+                    "the daemon needs distinct listener ports."
+                )
+                issues += 1
+
     if ws_port is not None:
         ws_available, ws_holder = _check_port(host, ws_port)
         print(
@@ -568,6 +676,22 @@ def _run_preflight() -> int:
         if not cap_available:
             issues += 1
 
+    if mcp_http_port is not None:
+        from .http_server import validate_bind_safety
+
+        mcp_available, mcp_holder = _check_port(mcp_http_host, mcp_http_port)
+        print(
+            f"  http://{mcp_http_host}:{mcp_http_port}/mcp "
+            f"{_format_port_status(mcp_available, mcp_holder)}"
+        )
+        if not mcp_available:
+            issues += 1
+        try:
+            validate_bind_safety(mcp_http_host, token)
+        except ValueError as exc:
+            print(f"  MCP HTTP bind safety: BLOCKED ({exc})")
+            issues += 1
+
     # --- Result -------------------------------------------------------------
     print()
     if issues == 0:
@@ -580,39 +704,50 @@ def _run_preflight() -> int:
 
 async def _run(*, advertise_mdns: bool = True) -> None:
     """Start both the ESP32 WebSocket server and the stdio MCP server."""
+    import signal
+
+    from .event_log import rotate_old_entries
     from .gateway import get_gateway
+    from .notify_config import load_notify_config
     from .stdio_server import run_stdio_server
 
+    notify_config = load_notify_config()
     gateway = get_gateway()
+    esp32 = getattr(gateway, "esp32", None)
+    set_notify_config = getattr(esp32, "set_notify_config", None)
+    if callable(set_notify_config):
+        set_notify_config(notify_config)
+
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+
+    def _handle_sigterm() -> None:
+        if main_task and not main_task.done():
+            main_task.cancel()
+
+    if sys.platform != "win32":
+        loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+
+    # Prune stale stackchan-event log entries only when the JSONL path is
+    # explicitly enabled. With the default all-OFF notify config, gateway
+    # startup must not create or rewrite any persistent event-log files.
+    if notify_config.jsonl_enabled:
+        rotate_old_entries(path=notify_config.jsonl_path)
 
     await gateway.start(advertise_mdns=advertise_mdns)
     logger.info("Gateway started, waiting for ESP32 connections...")
 
     try:
         # Run stdio MCP server (blocks until MCP client disconnects)
-        await run_stdio_server()
+        await run_stdio_server(notify_config=notify_config)
+    except asyncio.CancelledError:
+        logger.info("Received termination signal, shutting down...")
     finally:
         await gateway.stop()
 
 
-def main(argv: list[str] | None = None) -> None:
-    """Console-script entry point.
-
-    Parses ``--help`` / ``--version`` / ``--check`` early (without
-    starting the server), then loads ``.env``, configures logging, and
-    starts the gateway. Side effects are intentionally scoped to this
-    function so that ``import stackchan_mcp`` stays clean.
-    """
-    parser = _build_arg_parser()
-    # argparse exits with status 0 on --help / --version before reaching
-    # any of the gateway start-up below, which is the intended behaviour.
-    args = parser.parse_args(argv)
-
-    if args.check:
-        # ``_run_preflight`` loads ``.env`` itself; do not double-load
-        # via the path below.
-        sys.exit(_run_preflight())
-
+def _configure_gateway_startup() -> None:
+    """Load runtime configuration and logging for gateway startup paths."""
     _load_dotenv()
     _ensure_libopus_findable()
 
@@ -621,7 +756,239 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    asyncio.run(_run(advertise_mdns=not args.no_mdns))
+    from .user_defaults import log_user_defaults_startup
+
+    log_user_defaults_startup()
+
+
+def _ws_port_lock_path():
+    """Per-WS_PORT ownership lock path.
+
+    複数機体対応: ownership lock を machine-global な ``owner.lock`` でなく
+    WS_PORT 単位に scope する。 lock は「同一 device を 2 つの gateway が
+    奪い合わない」 ための機構だが、 1 device = 1 gateway = 1 WS ポートで
+    複数機体を同時に動かす構成では global lock が 2 台目以降を誤って弾く。
+    ポート単位なら N gateway が共存でき、 同一ポート二重起動は従来通り弾ける。
+    WS_PORT 未解決時は従来の global パスにフォールバック。
+    """
+    from .ownership import LOCK_DIR
+
+    ws_port, _ = _resolve_ws_port()
+    return LOCK_DIR / (
+        f"owner-{ws_port}.lock" if ws_port is not None else "owner.lock"
+    )
+
+
+def _acquire_startup_lock(
+    *,
+    mode: "LockMode" = _STDIO_TRANSPORT,
+    http_endpoint: str | None = None,
+    started_by: str | None = None,
+) -> "LockInfo":
+    """Claim the gateway ownership lock and register normal cleanup."""
+    from .ownership import (
+        OwnershipError,
+        acquire_lock,
+        generate_owner_id,
+        release_lock_if_owner,
+    )
+
+    lock_path = _ws_port_lock_path()
+
+    owner_id = generate_owner_id()
+    try:
+        if mode == _STDIO_TRANSPORT and http_endpoint is None and started_by is None:
+            info = acquire_lock(owner_id, path=lock_path)
+        else:
+            info = acquire_lock(
+                owner_id,
+                path=lock_path,
+                mode=mode,
+                http_endpoint=http_endpoint,
+                started_by=started_by,
+            )
+    except OwnershipError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        print(
+            "stackchan-mcp: acquired ownership lock "
+            f"(owner_id={info['owner_id']}, pid={info['pid']}, "
+            f"lock={lock_path.name})",
+            file=sys.stderr,
+        )
+        atexit.register(release_lock_if_owner, info, lock_path)
+    except BaseException:
+        release_lock_if_owner(info, lock_path)
+        raise
+
+    return info
+
+
+def _prepare_stdio_startup() -> "LockInfo":
+    """Prepare the existing stdio gateway flow without changing its lock shape."""
+    _configure_gateway_startup()
+    return _acquire_startup_lock()
+
+
+def _run_stdio_gateway(*, advertise_mdns: bool = True) -> None:
+    """Run the existing stdio MCP gateway flow."""
+    from .ownership import release_lock_if_owner
+
+    info = _prepare_stdio_startup()
+    try:
+        try:
+            asyncio.run(_run(advertise_mdns=advertise_mdns))
+        except KeyboardInterrupt:
+            pass
+    finally:
+        release_lock_if_owner(info, _ws_port_lock_path())
+
+
+def _resolve_mcp_http_endpoint() -> tuple[str, int]:
+    """Resolve the Streamable HTTP daemon endpoint from environment."""
+    host = os.getenv("MCP_HTTP_HOST", "127.0.0.1")
+    raw_port = os.getenv("MCP_HTTP_PORT", "8767")
+    port, source = _validate_port_value(raw_port, "MCP_HTTP_PORT")
+    if port is None:
+        print(f"stackchan-mcp: invalid MCP_HTTP_PORT: {source}", file=sys.stderr)
+        sys.exit(1)
+    return host, port
+
+
+async def _run_streamable_http_daemon(
+    *,
+    host: str,
+    port: int,
+    owner_id: str,
+    token: str | None,
+    advertise_mdns: bool,
+) -> None:
+    """Run the Streamable HTTP MCP daemon until the ASGI server exits."""
+    import uvicorn
+
+    from .event_log import rotate_old_entries
+    from .gateway import get_gateway
+    from .notify_config import load_notify_config
+    from .http_server import build_app, make_dispatch_fn
+    from .queue import CommandQueue
+
+    notify_config = load_notify_config()
+    if notify_config.jsonl_enabled:
+        rotate_old_entries(path=notify_config.jsonl_path)
+
+    gateway = get_gateway()
+    esp32 = getattr(gateway, "esp32", None)
+    set_notify_config = getattr(esp32, "set_notify_config", None)
+    if callable(set_notify_config):
+        set_notify_config(notify_config)
+    queue = CommandQueue()
+    app = build_app(
+        queue,
+        gateway=gateway,
+        owner_id=owner_id,
+        host=host,
+        port=port,
+        token=token,
+        dispatch_fn=make_dispatch_fn(gateway),
+        notify_config=notify_config,
+    )
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        lifespan="on",
+    )
+    server = uvicorn.Server(config)
+
+    await gateway.start(advertise_mdns=advertise_mdns)
+    logger.info(
+        "Streamable HTTP MCP daemon starting on http://%s:%d/mcp",
+        host,
+        port,
+    )
+    try:
+        await server.serve()
+    finally:
+        await gateway.stop()
+
+
+def _run_streamable_http_placeholder(*, advertise_mdns: bool = True) -> None:
+    """Run the Streamable HTTP MCP daemon."""
+    from .ownership import release_lock_if_owner
+    from .http_server import (
+        get_configured_token,
+        validate_bind_safety,
+    )
+
+    _configure_gateway_startup()
+    host, port = _resolve_mcp_http_endpoint()
+    token = get_configured_token()
+    try:
+        validate_bind_safety(host, token)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    info: LockInfo | None = None
+    try:
+        info = _acquire_startup_lock(
+            mode=_STREAMABLE_HTTP_TRANSPORT,
+            http_endpoint=f"{host}:{port}",
+            started_by="cli-serve",
+        )
+        try:
+            asyncio.run(
+                _run_streamable_http_daemon(
+                    host=host,
+                    port=port,
+                    owner_id=info["owner_id"],
+                    token=token,
+                    advertise_mdns=advertise_mdns,
+                )
+            )
+        except KeyboardInterrupt:
+            pass
+    finally:
+        if info is not None:
+            release_lock_if_owner(info, _ws_port_lock_path())
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Console-script entry point.
+
+    Parses ``--help`` / ``--version`` / ``--check`` / ``--preflight`` early
+    (without starting the server), then dispatches either the legacy
+    zero-subcommand stdio flow or the ``serve`` subcommand. Side effects
+    are intentionally scoped below argument parsing so that
+    ``import stackchan_mcp`` stays clean.
+    """
+    parser = _build_arg_parser()
+    # argparse exits with status 0 on --help / --version before reaching
+    # any of the gateway start-up below, which is the intended behaviour.
+    args = parser.parse_args(argv)
+
+    if args.check:
+        sys.exit(_run_ownership_check())
+
+    if args.preflight:
+        # ``_run_preflight`` loads ``.env`` itself; do not double-load
+        # via the path below.
+        sys.exit(_run_preflight())
+
+    if args.command is None:
+        _run_stdio_gateway(advertise_mdns=not args.no_mdns)
+        return
+
+    if args.command == "serve":
+        advertise_mdns = not (args.no_mdns or getattr(args, "serve_no_mdns", False))
+        if args.transport == _STDIO_TRANSPORT:
+            _run_stdio_gateway(advertise_mdns=advertise_mdns)
+            return
+        _run_streamable_http_placeholder(advertise_mdns=advertise_mdns)
+        return
 
 
 if __name__ == "__main__":

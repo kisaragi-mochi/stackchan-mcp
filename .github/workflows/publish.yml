@@ -109,6 +109,42 @@ jobs:
         working-directory: gateway
         run: uv lock --check
 
+      - name: Verify CHANGELOG.md has dated section for this tag
+        # Mirrors the firmware-release.yml CHANGELOG gate: refuse to
+        # publish a release tag that does not have a matching dated
+        # `## [X.Y.Z] - YYYY-MM-DD` section in CHANGELOG.md, so the
+        # promotion of `[Unreleased]` entries into a dated section is
+        # enforced rather than documented-only. The `changelog-check`
+        # gate in build.yml skips on `release:`-titled PRs (release
+        # promotion intentionally leaves [Unreleased] body unchanged
+        # between base and head); this tag-time gate is the
+        # authoritative floor for gateway releases, paired with the
+        # equivalent gate in firmware-release.yml.
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"   # e.g. v0.9.1
+          VERSION="${TAG#v}"          # e.g. 0.9.1
+          # Escape `.` for regex so a malformed heading like
+          # `## [0x9x1] - 2026-06-08` does not falsely match the
+          # dotted version on a naive grep.
+          VERSION_ESC=$(printf '%s' "$VERSION" | sed -E 's/\./\\./g')
+          # Match `## [<VERSION>] - YYYY-MM-DD` exactly (anchored line,
+          # no leading or trailing garbage). Require exactly one
+          # occurrence; zero is missing-section, more than one means
+          # a duplicate / botched promotion.
+          COUNT=$(grep -cE "^## \[${VERSION_ESC}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md || true)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error title=Missing CHANGELOG section for ${TAG}::CHANGELOG.md does not contain a dated section for this tag. Expected an exact heading like: ## [${VERSION}] - YYYY-MM-DD"
+            echo "Add the section to CHANGELOG.md (promote the [Unreleased] entries into a new dated section) before pushing the tag."
+            exit 1
+          fi
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error title=Duplicate CHANGELOG section for ${TAG}::CHANGELOG.md has ${COUNT} dated sections for ${TAG}, expected exactly 1. Consolidate the duplicates before publishing."
+            exit 1
+          fi
+          echo "CHANGELOG entry for ${TAG} verified (exactly 1 dated section)."
+
       - name: Install gateway dependencies
         working-directory: gateway
         run: uv sync --frozen
@@ -144,6 +180,18 @@ jobs:
   build-windows-wheel:
     name: Build win_amd64 wheel
     needs: build
+    # Restored in v0.9.1 after the v0.9.0 hotfix (#274) temporarily
+    # disabled this job. The byte-identical SHA256 guard against a
+    # pinned EXPECTED_OPUS_DLL_SHA256 was retired here because the
+    # current windows-latest runner image produces non-deterministic
+    # opus.dll across builds (windows-latest → windows-2025-vs2026
+    # transition; MSVC under the new image embeds non-deterministic
+    # build info). The functional smoke test in the publish job below
+    # (`Smoke test bundled opus loader`, which loads opus.dll via
+    # opuslib and runs an Opus encode round-trip) is now the publish
+    # gate. The VCPKG_PIN below still locks the supply chain to a
+    # reviewed vcpkg release tag.
+    #
     # The Windows wheel only differs from the Ubuntu build by the
     # bundled `opus.dll`, but it must be built on a Windows runner so
     # vcpkg can produce a binary that matches the runtime ABI users
@@ -165,14 +213,15 @@ jobs:
       # https://github.com/microsoft/vcpkg/releases
       # Pinned to 2026.04.27 → Opus 1.5.2 port-version 1.
       VCPKG_PIN: "2026.04.27"
-      # Expected SHA256 of the produced opus.dll. Re-derived only when
-      # VCPKG_PIN or the windows-latest runner-image MSVC version
-      # changes. To rotate: run this workflow via `workflow_dispatch`
-      # (or watch the next tag run), copy the actual hash from the
-      # "Verify opus.dll SHA256" step below, and commit. An empty
-      # value intentionally fails the comparison so a missing pin
-      # cannot silently ship.
-      EXPECTED_OPUS_DLL_SHA256: "99cd252b09891398cefab997be8cdb1cebc9a40cafa1382c88ad32069560a864"
+      # NOTE: The previous EXPECTED_OPUS_DLL_SHA256 byte-identical
+      # guard was retired in v0.9.1 (see the job-level comment above).
+      # The functional smoke test in the publish job is now the
+      # publish gate; the freshly produced opus.dll must load via
+      # opuslib and pass an Opus encode round-trip on a real Windows
+      # runner before the wheel can ship. If deterministic builds
+      # are restored upstream (vcpkg + windows runner image), the
+      # SHA pin can be reintroduced as an additional reproducibility
+      # signal alongside the functional test, not as the sole gate.
 
     steps:
       - name: Checkout repository
@@ -212,30 +261,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dest_dir | Out-Null
           Copy-Item -Force $dll "$dest_dir\opus.dll"
 
-      # Block the wheel build on opus.dll SHA256 drift. Without this
-      # gate, a tag rerun (or a runner-image refresh that changes
-      # MSVC build behaviour) could silently ship a different native
-      # binary than the one reviewed for the release, defeating the
-      # vcpkg pin above.
-      - name: Verify opus.dll SHA256
+      # Confirm vcpkg actually produced opus.dll and capture its
+      # SHA256 for informational logging. Functional verification
+      # (load opus.dll via opuslib and run an Opus encode round-trip)
+      # happens in the publish job below — see `Smoke test bundled
+      # opus loader`. The byte-identical SHA256 guard was retired in
+      # v0.9.1; see the job-level comment above for the rationale.
+      - name: Confirm opus.dll was produced
         shell: pwsh
         run: |
           $dll = "$env:GITHUB_WORKSPACE\gateway\stackchan_mcp\_libs\opus.dll"
+          if (-not (Test-Path $dll)) {
+            Write-Output "::error::opus.dll was not produced by vcpkg install. Expected at $dll."
+            exit 1
+          }
           $actual = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower()
-          $expected = $env:EXPECTED_OPUS_DLL_SHA256.ToLower()
-          Write-Output "opus.dll SHA256 (actual):   $actual"
-          Write-Output "opus.dll SHA256 (expected): $expected"
-          if ([string]::IsNullOrWhiteSpace($expected)) {
-            Write-Output "::error::EXPECTED_OPUS_DLL_SHA256 is unset. Run this workflow via workflow_dispatch, then copy the actual hash above into the EXPECTED_OPUS_DLL_SHA256 env in .github/workflows/publish.yml and commit before tagging a release."
-            exit 1
-          }
-          if ($actual -ne $expected) {
-            Write-Output "::error::opus.dll SHA256 mismatch — vcpkg-side or runner-image drift detected. Refusing to publish a different binary than the one reviewed for this VCPKG_PIN."
-            exit 1
-          }
-          Write-Output "opus.dll SHA256: verified against EXPECTED_OPUS_DLL_SHA256."
+          Write-Output "opus.dll SHA256 (informational, not used as publish gate): $actual"
           # Expose for any downstream step (e.g. release notes) that
-          # may want to surface the verified hash.
+          # may want to surface the captured hash.
           "OPUS_DLL_SHA256=$actual" | Out-File -Append -FilePath $env:GITHUB_ENV
 
       - name: Set up uv
@@ -267,25 +310,46 @@ jobs:
       - name: Build wheel (win_amd64)
         working-directory: gateway
         shell: pwsh
-        # `uv build --wheel` produces `*-py3-none-any.whl` by default;
-        # override the platform tag with cibuildwheel-style tag args via
-        # hatch's `--target-platform`-equivalent. Since hatchling does
-        # not have a CLI override for the wheel tag, rely on uv build's
-        # `--target` flag if available; otherwise fall back to renaming.
+        # `uv build --wheel` produces a `*-py3-none-any.whl` by
+        # default; rewrite the wheel's platform tag to `win_amd64` via
+        # the `wheel tags` CLI so both the filename and the internal
+        # `.dist-info/WHEEL` `Tag:` line say `win_amd64`. The earlier
+        # filename-only rename (introduced in PR #217) produced a
+        # wheel whose filename and internal metadata disagreed —
+        # wheel-validating tools would flag this as a malformed
+        # distribution. Codex review of v0.9.1 caught the
+        # inconsistency; this commit fixes it as part of the
+        # Windows wheel restore.
         run: |
-          # Use uv build to produce the wheel, then rename the
-          # platform tag from `any` to `win_amd64` so pip resolves it
-          # only on Windows x64 installs. hatchling does not auto-tag
-          # based on bundled binaries.
           uv build --wheel
+          # `wheel` is not a runtime dependency of stackchan-mcp; it
+          # is installed explicitly into the project env here so that
+          # `uv run python -m wheel tags ...` is available regardless
+          # of resolver caching behavior between runs.
+          uv pip install wheel
           $wheels = Get-ChildItem dist\*-py3-none-any.whl
           if ($wheels.Count -ne 1) {
             Write-Error "Expected exactly one py3-none-any wheel, found $($wheels.Count)"
             exit 1
           }
           $src = $wheels[0].FullName
-          $dst = $src -replace '-py3-none-any\.whl$', '-py3-none-win_amd64.whl'
-          Rename-Item -Path $src -NewName (Split-Path -Leaf $dst)
+          # Rewrite the wheel's platform tag in-place; `--remove`
+          # deletes the source `py3-none-any` wheel so only the
+          # `win_amd64` wheel remains in dist/.
+          uv run python -m wheel tags --platform-tag win_amd64 --remove $src
+          # Sanity check the produced wheel: exactly one win_amd64
+          # wheel and no leftover py3-none-any wheel should be in
+          # dist/ at this point.
+          $built = Get-ChildItem dist\*-win_amd64.whl
+          if ($built.Count -ne 1) {
+            Write-Error "Expected exactly one win_amd64 wheel after `wheel tags`, found $($built.Count)"
+            exit 1
+          }
+          $stale = Get-ChildItem dist\*-py3-none-any.whl -ErrorAction SilentlyContinue
+          if ($stale -ne $null -and $stale.Count -gt 0) {
+            Write-Error "Stale py3-none-any wheel still present after `wheel tags --remove`: $($stale -join ', ')"
+            exit 1
+          }
           Get-ChildItem dist\
 
       - name: Upload Windows wheel

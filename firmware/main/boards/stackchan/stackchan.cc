@@ -7,6 +7,7 @@
 #include "i2c_device.h"
 #include "axp2101.h"
 #include "mcp_server.h"
+#include "settings.h"
 #include "led_strip.h"
 // Issue #79: servo driver is selectable at build time via Kconfig.
 //   - CONFIG_STACKCHAN_SERVO_SCSCL  (default): GPL-3.0 SCServo_lib
@@ -34,11 +35,13 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
+#include <esp_wifi.h>
 #include <driver/i2c_master.h>
 #include <driver/gpio.h>
 #include <driver/uart.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
+#include <esp_lcd_panel_commands.h>
 #include <esp_lcd_ili9341.h>
 #include <esp_timer.h>
 #include <esp_random.h>
@@ -53,10 +56,58 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #define TAG "StackChanBoard"
+
+#ifndef STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS
+#define STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS 300
+#endif
+
+#define STACKCHAN_SCREEN_OFF_MAX_TIMEOUT_SECONDS 86400
+#if STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS < 0 || \
+    STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS > STACKCHAN_SCREEN_OFF_MAX_TIMEOUT_SECONDS
+#error "STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS must be in 0..86400"
+#endif
+#define STACKCHAN_LCD_SLEEP_TRANSITION_MS 120
+#define STACKCHAN_SCREEN_OFF_NVS_NAMESPACE "display"
+#define STACKCHAN_SCREEN_OFF_NVS_KEY "off_timeout"
+
+// Charge-control boot default (AXP2101 reg 0x18 bit1, see class Pmic below).
+// Keep the AXP2101 reset default and the pre-feature firmware behaviour unless
+// a build explicitly overrides it.
+#ifndef STACKCHAN_DEFAULT_CHARGE_ENABLED
+#define STACKCHAN_DEFAULT_CHARGE_ENABLED 1
+#endif
+
+// Automatic charge hysteresis. These values may be overridden with compiler
+// -D options. The existing one-second status-bar battery poll drives the
+// decision at a 60-second cadence; no dedicated timer or task is created.
+#ifndef STACKCHAN_CHARGE_AUTO
+#define STACKCHAN_CHARGE_AUTO 0
+#endif
+
+#ifndef STACKCHAN_CHARGE_ON_BELOW
+#define STACKCHAN_CHARGE_ON_BELOW 30
+#endif
+
+#ifndef STACKCHAN_CHARGE_OFF_ABOVE
+#define STACKCHAN_CHARGE_OFF_ABOVE 70
+#endif
+
+#if STACKCHAN_CHARGE_ON_BELOW < 0 || STACKCHAN_CHARGE_ON_BELOW > 100
+#error "STACKCHAN_CHARGE_ON_BELOW must be between 0 and 100"
+#endif
+
+#if STACKCHAN_CHARGE_OFF_ABOVE < 0 || STACKCHAN_CHARGE_OFF_ABOVE > 100
+#error "STACKCHAN_CHARGE_OFF_ABOVE must be between 0 and 100"
+#endif
+
+#if STACKCHAN_CHARGE_ON_BELOW >= STACKCHAN_CHARGE_OFF_ABOVE
+#error "STACKCHAN_CHARGE_ON_BELOW must be lower than STACKCHAN_CHARGE_OFF_ABOVE"
+#endif
 
 class Pmic : public Axp2101 {
 public:
@@ -72,6 +123,58 @@ public:
         WriteReg(0x90, 0xBF);
         WriteReg(0x94, 33 - 5);
         WriteReg(0x95, 33 - 5);
+
+        // Apply the charge-control boot default last, after every other
+        // Power Init write above. This preserves the established PMIC
+        // initialization order and changes charging only after all other
+        // controls are configured.
+        SetChargeEnabled(STACKCHAN_DEFAULT_CHARGE_ENABLED != 0);
+    }
+
+    // AXP2101 reg 0x18 bit1 = Cell Battery charge enable (datasheet
+    // §6.13.2.14: 0=disable, 1=enable, System Reset default=1).
+    // Read-Modify-Write only bit1; bit3 (Gauge Module enable), bit2
+    // (Button Battery charge enable), and bit0 (Watchdog Module enable)
+    // must survive untouched.
+    void SetChargeEnabled(bool enable) {
+        uint8_t value = ReadReg(0x18);
+        if (enable) {
+            value |= 0b00000010;
+        } else {
+            value &= static_cast<uint8_t>(~0b00000010);
+        }
+        WriteReg(0x18, value);
+    }
+
+    bool IsChargeEnabled() {
+        return (ReadReg(0x18) & 0b00000010) != 0;
+    }
+
+    uint8_t GetChargeControlRegister() {
+        return ReadReg(0x18);
+    }
+
+    // Read the same AXP2101 fuel-gauge register used by
+    // Axp2101::GetBatteryLevel(), but return a failure instead of aborting the
+    // firmware on an I2C error. Values outside the percentage range are also
+    // treated as unavailable so automatic control can fail safe to charging.
+    bool TryGetBatteryLevel(int* level) {
+        uint8_t reg = 0xA4;
+        uint8_t value = 0;
+        esp_err_t err =
+            i2c_master_transmit_receive(i2c_device_, &reg, 1, &value, 1, 100);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Battery level read failed: %s",
+                     esp_err_to_name(err));
+            return false;
+        }
+        if (value > 100) {
+            ESP_LOGW(TAG, "Battery level is invalid: %u",
+                     static_cast<unsigned>(value));
+            return false;
+        }
+        *level = value;
+        return true;
     }
 
     void SetBrightness(uint8_t brightness) {
@@ -83,6 +186,17 @@ public:
 class CustomBacklight : public Backlight {
 public:
     CustomBacklight(Pmic *pmic) : pmic_(pmic) {}
+
+    void SetBrightnessImmediate(uint8_t brightness) {
+        if (brightness > 100) {
+            brightness = 100;
+        }
+        if (transition_timer_ != nullptr) {
+            esp_timer_stop(transition_timer_);
+        }
+        target_brightness_ = brightness;
+        SetBrightnessImpl(brightness);
+    }
 
     void SetBrightnessImpl(uint8_t brightness) override {
         pmic_->SetBrightness(target_brightness_);
@@ -517,13 +631,46 @@ private:
     led_strip_handle_t ws2812_handle_ = nullptr;
     static constexpr gpio_num_t PORT_B_WS2812_DATA_PIN = GPIO_NUM_9;  // CoreS3 HY2.0-4P (Port B) digital OUTPUT
     static constexpr uint16_t PORT_B_WS2812_MAX_LEDS = 256;
+    // Port C WS2812 generic strip state (driven from MCP tools self.port_c.ws2812.*).
+    bool port_c_ws2812_ok_ = false;
+    uint16_t port_c_ws2812_led_count_ = 0;
+    led_strip_handle_t port_c_ws2812_handle_ = nullptr;
+    static constexpr gpio_num_t PORT_C_WS2812_DATA_PIN = GPIO_NUM_17;  // CoreS3 HY2.0-4P (Port C) signal 1
+    static constexpr uint16_t PORT_C_WS2812_MAX_LEDS = 256;
     Pmic* pmic_;
+    enum class ChargeAutoDecision : uint8_t {
+        kNotRun = 0,
+        kEnabledLowBattery,
+        kDisabledHighBattery,
+        kKeptBetweenThresholds,
+        kEnabledBatteryReadFailed,
+        kAutoDisabled,
+    };
+    static constexpr uint32_t CHARGE_AUTO_INTERVAL_MS = 60 * 1000;
+    std::atomic<ChargeAutoDecision> last_charge_auto_decision_{
+        (STACKCHAN_CHARGE_AUTO != 0)
+            ? ChargeAutoDecision::kNotRun
+            : ChargeAutoDecision::kAutoDisabled};
+    std::atomic<int> last_charge_auto_battery_level_{-1};
+    std::atomic<uint32_t> last_charge_auto_check_ms_{0};
     Aw9523* aw9523_;
     Ft6336* ft6336_;
     LcdDisplay* display_;
     EspVideo* camera_;
     esp_timer_handle_t touchpad_timer_;
     PowerSaveTimer* power_save_timer_;
+    esp_lcd_panel_io_handle_t lcd_panel_io_ = nullptr;
+    esp_lcd_panel_handle_t lcd_panel_ = nullptr;
+    esp_timer_handle_t screen_off_timer_ = nullptr;
+    SemaphoreHandle_t screen_power_mutex_ = nullptr;
+    std::atomic<int> screen_off_timeout_seconds_{
+        STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS};
+    std::atomic<bool> screen_is_off_{false};
+    int64_t screen_off_deadline_us_ = 0;  // guarded by screen_power_mutex_
+    int64_t panel_sleep_started_us_ = 0;  // guarded by screen_power_mutex_
+    uint8_t screen_saved_brightness_ = 75;  // guarded by screen_power_mutex_
+    bool panel_sleeping_ = false;  // guarded by screen_power_mutex_
+    bool panel_display_disabled_ = false;  // guarded by screen_power_mutex_
     ScsBus scs_bus_;
     std::unique_ptr<Py32IoExpander> io_expander_;
 
@@ -535,6 +682,12 @@ private:
     lv_obj_t* avatar_img_ = nullptr;
     esp_timer_handle_t avatar_init_timer_ = nullptr;
     std::string current_avatar_face_ = "idle";
+
+    // Board-local listening cue shown above the full-screen avatar layer.
+    lv_obj_t* listening_indicator_ = nullptr;
+    lv_obj_t* listening_indicator_dot_ = nullptr;
+    std::atomic<bool> listening_indicator_visible_{false};
+    static constexpr int LISTENING_INDICATOR_DOT_SIZE_PX = 14;
 
     // Dynamic avatar set loaded via the load_avatar_set MCP tool. Stays
     // unloaded by default — the index-based image lookups then fall back
@@ -677,6 +830,7 @@ private:
                                                        // bus hangs.
     static constexpr int SERVO_WOBBLE_AMPLITUDE_DEG = 20;
 
+    std::atomic<bool> touch_sensor_enabled_{true};
     std::unique_ptr<Si12T> si12t_;
     bool si12t_ok_ = false;
     esp_timer_handle_t touch_poll_timer_ = nullptr;
@@ -774,6 +928,12 @@ private:
         kPartial = 1,
         kReleased = 2,
         kReleasing = 3,
+        // Published when InternalSetServoTorque cannot confirm bus success
+        // for both axes. Forward-progress invariant: the next motion / manual
+        // call issues a real bus frame instead of short-circuiting. Mirrors
+        // the WritePos retries-exhausted -> position_unknown convention for
+        // the torque domain.
+        kUncertain = 4,
     };
     std::atomic<TorqueState> torque_state_{TorqueState::kEngaged};
     std::atomic<uint32_t> torque_release_epoch_{0};
@@ -789,6 +949,27 @@ private:
 #endif
     static constexpr uint32_t MOTION_TICK_MS = 20;
     static constexpr uint32_t MOTION_DEFAULT_DURATION_MS = 600;
+    // Speed-based motion API (Issue #129).
+    // MIN_STEP_SAFE_SPEED_DPS prevents the raw-integer speed_dps escape hatch
+    // from advancing less than one SCS0009 step per ServoTask tick. The
+    // physical step is 300 deg / 1024 = 0.293 deg; at MOTION_TICK_MS=20 ms
+    // this is 14.65 deg/s, rounded up to 15 deg/s for headroom. This shares
+    // the same physical origin as BOOT_INIT_TARGET_DEG_PER_SEC (#121/#141),
+    // but stays separate because the boot path carries its own duration-floor
+    // semantics. See the Issue #129 -> #134 stepped-motion observation lineage.
+    static constexpr int MIN_STEP_SAFE_SPEED_DPS = 15;
+    // MIN_SMOOTH_SPEED_DPS is the on-device measured smoothness floor
+    // (5 step/tick "transition out", measured 2026-05-15). Speeds below
+    // this look textured on SCS0009 at MOTION_TICK_MS=20 ms; the firmware
+    // permits sub-floor speeds (logged with ESP_LOGW) so callers like the
+    // gateway "low" preset (30 dps) can deliver deliberately slow motion.
+    static constexpr int MIN_SMOOTH_SPEED_DPS = 72;
+    // MAX_SPEED_DPS is the SCS0009 datasheet reliability test working speed
+    // (60 deg / 0.25 s = 240 deg/s, validated for >50k cycles at 1/2 rated load).
+    static constexpr int MAX_SPEED_DPS = 240;
+    // DEFAULT_SPEED_DPS is used when the caller passes speed_dps <= 0.
+    // Matches the gateway "mid" preset.
+    static constexpr int DEFAULT_SPEED_DPS = 120;
     static constexpr uint32_t MOTION_PER_WRITE_TIME_MS = 30;
     static constexpr uint32_t MOTION_POLL_INTERVAL_MS = 50;
     static constexpr uint32_t AUTO_TORQUE_RELEASE_MIN_MS = 500;
@@ -1078,11 +1259,26 @@ private:
     }
 
     struct ServoTorqueResult {
+        // -1 means "no bus frame was issued for this axis". In every
+        // short-circuit path (idempotent_short_circuit or wait_exhausted)
+        // the function returns before any EnableTorque() call, so both
+        // bus-return fields keep this -1 default (Issue #171).
         int yaw_bus_return = -1;
         int pitch_bus_return = -1;
         bool yaw_ok = false;
         bool pitch_ok = false;
-        bool short_circuited = false;
+        // Issue #171: the old single `short_circuited` flag was overloaded
+        // (set both for idempotent no-ops AND for wait-budget exhaustion),
+        // so callers could not distinguish degraded-bus wait-exhaustion from
+        // a legitimate no-op success. These two flags are orthogonal and
+        // mutually exclusive: at most one is ever true.
+        //   * idempotent_short_circuit: returned without a bus frame because
+        //     the per-axis state already matched the request (success no-op).
+        //   * wait_exhausted: returned without a bus frame because
+        //     WaitForKReleasingToClear() hit its budget while still
+        //     kReleasing (failure: the requested transition did not happen).
+        bool idempotent_short_circuit = false;
+        bool wait_exhausted = false;
     };
 
     class MotionDriver {
@@ -2084,6 +2280,304 @@ private:
         power_save_timer_->SetEnabled(true);
     }
 
+    void StopScreenOffTimerLocked() {
+        if (screen_off_timer_ == nullptr) {
+            return;
+        }
+        esp_err_t err = esp_timer_stop(screen_off_timer_);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Failed to stop screen-off timer: %s",
+                     esp_err_to_name(err));
+        }
+    }
+
+    void StartScreenOffTimerLocked(int64_t delay_us) {
+        if (screen_off_timer_ == nullptr || delay_us <= 0) {
+            return;
+        }
+        StopScreenOffTimerLocked();
+        esp_err_t err = esp_timer_start_once(screen_off_timer_,
+                                             static_cast<uint64_t>(delay_us));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to start screen-off timer: %s",
+                     esp_err_to_name(err));
+        }
+    }
+
+    void ArmScreenOffTimerLocked() {
+        StopScreenOffTimerLocked();
+        int timeout_seconds =
+            screen_off_timeout_seconds_.load(std::memory_order_acquire);
+        if (timeout_seconds == 0) {
+            screen_off_deadline_us_ = 0;
+            return;
+        }
+        int64_t delay_us = static_cast<int64_t>(timeout_seconds) * 1000000LL;
+        screen_off_deadline_us_ = esp_timer_get_time() + delay_us;
+        StartScreenOffTimerLocked(delay_us);
+    }
+
+    void EnterPanelSleepLocked() {
+        if (lcd_panel_ == nullptr || lcd_panel_io_ == nullptr) {
+            ESP_LOGW(TAG, "LCD handles are not ready; using backlight-only screen off");
+            return;
+        }
+
+        esp_err_t display_err = esp_lcd_panel_disp_on_off(lcd_panel_, false);
+        if (display_err == ESP_OK) {
+            panel_display_disabled_ = true;
+        } else {
+            ESP_LOGW(TAG, "LCD display-off command failed (%s); backlight remains off",
+                     esp_err_to_name(display_err));
+        }
+
+        // esp_lcd_ili9341 v1.2.0 implements disp_on_off but does not install
+        // the esp_lcd_panel_t::disp_sleep callback. Use the same panel IO to
+        // issue the ILI9342C-compatible SLPIN command. Frame memory is kept.
+        esp_err_t sleep_err = esp_lcd_panel_io_tx_param(
+            lcd_panel_io_, LCD_CMD_SLPIN, nullptr, 0);
+        if (sleep_err == ESP_OK) {
+            panel_sleeping_ = true;
+            panel_sleep_started_us_ = esp_timer_get_time();
+        } else {
+            ESP_LOGW(TAG, "LCD sleep-in command failed (%s); backlight remains off",
+                     esp_err_to_name(sleep_err));
+        }
+    }
+
+    bool ExitPanelSleepLocked() {
+        if (lcd_panel_ == nullptr || lcd_panel_io_ == nullptr) {
+            ESP_LOGW(TAG, "LCD handles are not ready; restoring backlight only");
+            return true;
+        }
+
+        if (panel_sleeping_) {
+            // ILI9342C requires 120 ms between SLPIN and SLPOUT. A quick
+            // activity immediately after timeout therefore waits only the
+            // unelapsed remainder.
+            int64_t elapsed_ms =
+                (esp_timer_get_time() - panel_sleep_started_us_) / 1000LL;
+            if (elapsed_ms < STACKCHAN_LCD_SLEEP_TRANSITION_MS) {
+                vTaskDelay(pdMS_TO_TICKS(
+                    STACKCHAN_LCD_SLEEP_TRANSITION_MS - elapsed_ms));
+            }
+
+            esp_err_t wake_err = esp_lcd_panel_io_tx_param(
+                lcd_panel_io_, LCD_CMD_SLPOUT, nullptr, 0);
+            if (wake_err != ESP_OK) {
+                ESP_LOGW(TAG, "LCD sleep-out command failed (%s); keeping backlight off",
+                         esp_err_to_name(wake_err));
+                return false;
+            }
+            panel_sleeping_ = false;
+            panel_sleep_started_us_ = 0;
+
+            // ILI9342C needs 120 ms after SLPOUT before normal display
+            // operation is guaranteed.
+            vTaskDelay(pdMS_TO_TICKS(STACKCHAN_LCD_SLEEP_TRANSITION_MS));
+        }
+
+        if (panel_display_disabled_) {
+            esp_err_t display_err = esp_lcd_panel_disp_on_off(lcd_panel_, true);
+            if (display_err != ESP_OK) {
+                ESP_LOGW(TAG, "LCD display-on command failed (%s); keeping backlight off",
+                         esp_err_to_name(display_err));
+                return false;
+            }
+            panel_display_disabled_ = false;
+        }
+        return true;
+    }
+
+    void TurnScreenOffLocked() {
+        if (screen_is_off_.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        auto backlight = static_cast<CustomBacklight*>(GetBacklight());
+        if (backlight != nullptr) {
+            screen_saved_brightness_ = backlight->brightness();
+            // CustomBacklight's normal SetBrightness path is driven by an
+            // esp_timer. Force the PMIC write here so brightness reaches zero
+            // before any panel power command is issued.
+            backlight->SetBrightnessImmediate(0);
+        }
+
+        if (display_ != nullptr) {
+            DisplayLockGuard lock(display_);
+            EnterPanelSleepLocked();
+        } else {
+            EnterPanelSleepLocked();
+        }
+        screen_is_off_.store(true, std::memory_order_release);
+        ESP_LOGI(TAG, "Screen turned off after idle timeout");
+    }
+
+    bool WakeScreenLocked() {
+        if (!screen_is_off_.load(std::memory_order_acquire)) {
+            return true;
+        }
+
+        bool panel_ready = false;
+        if (display_ != nullptr) {
+            DisplayLockGuard lock(display_);
+            panel_ready = ExitPanelSleepLocked();
+        } else {
+            panel_ready = ExitPanelSleepLocked();
+        }
+        if (!panel_ready) {
+            return false;
+        }
+
+        auto backlight = static_cast<CustomBacklight*>(GetBacklight());
+        if (backlight != nullptr) {
+            backlight->SetBrightnessImmediate(screen_saved_brightness_);
+        }
+
+        // Sleep In/Out on this panel retains frame memory, but the LVGL
+        // compositor's dirty-area tracking does not know the panel briefly
+        // stopped scanning it out. Without a forced full-area invalidate,
+        // the next natural partial redraw can flush a stale/half-composited
+        // frame onto the just-woken panel, seen as avatar double-display and
+        // horizontal tearing until an unrelated activity (e.g. an emotion
+        // change) happens to trigger a full redraw.
+        if (display_ != nullptr) {
+            DisplayLockGuard lock(display_);
+            lv_obj_invalidate(lv_screen_active());
+            ESP_LOGI(TAG, "Forcing full-screen redraw after wake");
+        }
+
+        screen_is_off_.store(false, std::memory_order_release);
+        ESP_LOGI(TAG, "Screen woke from idle timeout");
+        return true;
+    }
+
+    void ScreenOffTimerTick() {
+        if (screen_power_mutex_ == nullptr ||
+            xSemaphoreTake(screen_power_mutex_, portMAX_DELAY) != pdTRUE) {
+            return;
+        }
+
+        int timeout_seconds =
+            screen_off_timeout_seconds_.load(std::memory_order_acquire);
+        int64_t now_us = esp_timer_get_time();
+        if (timeout_seconds == 0) {
+            screen_off_deadline_us_ = 0;
+        } else if (screen_off_deadline_us_ > now_us) {
+            // An activity raced with an already-queued one-shot callback.
+            // Keep the newer deadline instead of turning the screen off.
+            StartScreenOffTimerLocked(screen_off_deadline_us_ - now_us);
+        } else {
+            TurnScreenOffLocked();
+        }
+
+        xSemaphoreGive(screen_power_mutex_);
+    }
+
+    static void ScreenOffTimerCb(void* arg) {
+        static_cast<StackChanBoard*>(arg)->ScreenOffTimerTick();
+    }
+
+    void InitializeScreenOffTimer() {
+        Settings settings(STACKCHAN_SCREEN_OFF_NVS_NAMESPACE, false);
+        int timeout_seconds = settings.GetInt(
+            STACKCHAN_SCREEN_OFF_NVS_KEY,
+            STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS);
+        if (timeout_seconds < 0 ||
+            timeout_seconds > STACKCHAN_SCREEN_OFF_MAX_TIMEOUT_SECONDS) {
+            ESP_LOGW(TAG,
+                     "Ignoring invalid persisted screen-off timeout %d; using default %d",
+                     timeout_seconds,
+                     STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS);
+            timeout_seconds = STACKCHAN_SCREEN_OFF_DEFAULT_TIMEOUT_SECONDS;
+        }
+        screen_off_timeout_seconds_.store(timeout_seconds,
+                                          std::memory_order_release);
+
+        screen_power_mutex_ = xSemaphoreCreateMutex();
+        if (screen_power_mutex_ == nullptr) {
+            ESP_LOGW(TAG, "Failed to create screen power mutex; screen-off disabled");
+            return;
+        }
+
+        const esp_timer_create_args_t timer_args = {
+            .callback = &StackChanBoard::ScreenOffTimerCb,
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "screen_off",
+            .skip_unhandled_events = true,
+        };
+        esp_err_t err = esp_timer_create(&timer_args, &screen_off_timer_);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to create screen-off timer: %s",
+                     esp_err_to_name(err));
+            return;
+        }
+
+        if (xSemaphoreTake(screen_power_mutex_, portMAX_DELAY) == pdTRUE) {
+            ArmScreenOffTimerLocked();
+            xSemaphoreGive(screen_power_mutex_);
+        }
+        ESP_LOGI(TAG, "Screen-off timeout: %d seconds%s", timeout_seconds,
+                 timeout_seconds == 0 ? " (disabled)" : "");
+    }
+
+    void HandleScreenActivity() {
+        if (screen_power_mutex_ == nullptr ||
+            xSemaphoreTake(screen_power_mutex_, portMAX_DELAY) != pdTRUE) {
+            return;
+        }
+        WakeScreenLocked();
+        ArmScreenOffTimerLocked();
+        xSemaphoreGive(screen_power_mutex_);
+    }
+
+    bool SetScreenOffTimeoutSeconds(int timeout_seconds) {
+        if (timeout_seconds < 0 ||
+            timeout_seconds > STACKCHAN_SCREEN_OFF_MAX_TIMEOUT_SECONDS) {
+            return false;
+        }
+
+        {
+            Settings settings(STACKCHAN_SCREEN_OFF_NVS_NAMESPACE, true);
+            settings.SetInt(STACKCHAN_SCREEN_OFF_NVS_KEY, timeout_seconds);
+        }
+
+        if (screen_power_mutex_ == nullptr ||
+            xSemaphoreTake(screen_power_mutex_, portMAX_DELAY) != pdTRUE) {
+            screen_off_timeout_seconds_.store(timeout_seconds,
+                                              std::memory_order_release);
+            return true;
+        }
+
+        screen_off_timeout_seconds_.store(timeout_seconds,
+                                          std::memory_order_release);
+        if (timeout_seconds == 0) {
+            WakeScreenLocked();
+        }
+        ArmScreenOffTimerLocked();
+        xSemaphoreGive(screen_power_mutex_);
+        return true;
+    }
+
+    cJSON* GetScreenOffTimeoutJson(bool applied = true) const {
+        int timeout_seconds =
+            screen_off_timeout_seconds_.load(std::memory_order_acquire);
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", applied);
+        cJSON_AddBoolToObject(root, "applied", applied);
+        cJSON_AddNumberToObject(root, "timeout_seconds", timeout_seconds);
+        cJSON_AddBoolToObject(root, "persistent", true);
+        cJSON_AddStringToObject(root, "persistence", "nvs");
+        cJSON_AddBoolToObject(
+            root, "enabled",
+            timeout_seconds != 0 && screen_off_timer_ != nullptr);
+        cJSON_AddBoolToObject(
+            root, "screen_off",
+            screen_is_off_.load(std::memory_order_acquire));
+        return root;
+    }
+
     void InitializeI2c() {
         // Initialize I2C peripheral
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -2167,6 +2661,55 @@ private:
         return ESP_OK;
     }
 
+    esp_err_t InitPortCWs2812(uint16_t led_count) {
+        if (port_c_ws2812_ok_ && port_c_ws2812_led_count_ == led_count) {
+            return ESP_OK;  // idempotent: same led_count is a no-op
+        }
+        if (port_c_ws2812_handle_ != nullptr) {
+            led_strip_del(port_c_ws2812_handle_);
+            port_c_ws2812_handle_ = nullptr;
+            port_c_ws2812_ok_ = false;
+            port_c_ws2812_led_count_ = 0;
+        }
+
+        led_strip_config_t strip_config = {
+            .strip_gpio_num = PORT_C_WS2812_DATA_PIN,
+            .max_leds = led_count,
+            .led_model = LED_MODEL_WS2812,
+            .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+            .flags = { .invert_out = false },
+        };
+        // The led_strip driver auto-allocates an RMT TX channel. ESP32-S3 has
+        // multiple TX channels, and StackChan uses RMT only for the Port B/C
+        // strips, so both WS2812 handles can coexist.
+        led_strip_rmt_config_t rmt_config = {
+            .clk_src = RMT_CLK_SRC_DEFAULT,
+            .resolution_hz = 10 * 1000 * 1000,  // 10 MHz, standard WS2812 bit timing
+            .mem_block_symbols = 0,              // 0 = driver default block size
+            .flags = { .with_dma = false },
+        };
+        esp_err_t err = led_strip_new_rmt_device(&strip_config, &rmt_config, &port_c_ws2812_handle_);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "port_c.ws2812.init Port C GPIO %d led_strip_new_rmt_device failed: %s",
+                     (int)PORT_C_WS2812_DATA_PIN, esp_err_to_name(err));
+            return err;
+        }
+
+        err = led_strip_clear(port_c_ws2812_handle_);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "port_c.ws2812.init Port C GPIO %d led_strip_clear failed: %s",
+                     (int)PORT_C_WS2812_DATA_PIN, esp_err_to_name(err));
+            led_strip_del(port_c_ws2812_handle_);
+            port_c_ws2812_handle_ = nullptr;
+            return err;
+        }
+        port_c_ws2812_led_count_ = led_count;
+        port_c_ws2812_ok_ = true;
+        ESP_LOGI(TAG, "port_c.ws2812 initialized: %u LEDs on Port C GPIO %d",
+                 (unsigned)led_count, (int)PORT_C_WS2812_DATA_PIN);
+        return ESP_OK;
+    }
+
     void I2cDetect() {
         uint8_t address;
         printf("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f\r\n");
@@ -2188,15 +2731,259 @@ private:
         }
     }
 
+    static const char* ChargeAutoDecisionName(ChargeAutoDecision decision) {
+        switch (decision) {
+            case ChargeAutoDecision::kEnabledLowBattery:
+                return "enabled_low_battery";
+            case ChargeAutoDecision::kDisabledHighBattery:
+                return "disabled_high_battery";
+            case ChargeAutoDecision::kKeptBetweenThresholds:
+                return "kept_between_thresholds";
+            case ChargeAutoDecision::kEnabledBatteryReadFailed:
+                return "enabled_battery_read_failed";
+            case ChargeAutoDecision::kAutoDisabled:
+                return "auto_disabled";
+            case ChargeAutoDecision::kNotRun:
+            default:
+                return "not_run";
+        }
+    }
+
+    bool ReadBatteryLevel(int* level) {
+        return pmic_ != nullptr && pmic_->TryGetBatteryLevel(level);
+    }
+
+    // Apply the automatic policy to a battery sample. Charging is the resting
+    // state at startup; protection engages only at the upper threshold.
+    void ApplyAutomaticChargePolicy(int level, bool level_available) {
+        last_charge_auto_battery_level_.store(
+            level_available ? level : -1, std::memory_order_relaxed);
+
+        if (!level_available) {
+            pmic_->SetChargeEnabled(true);
+            last_charge_auto_decision_.store(
+                ChargeAutoDecision::kEnabledBatteryReadFailed,
+                std::memory_order_release);
+            ESP_LOGW(TAG,
+                     "Battery level unavailable; charging enabled as fail-safe");
+            return;
+        }
+
+        ChargeAutoDecision decision;
+        if (level <= STACKCHAN_CHARGE_ON_BELOW) {
+            pmic_->SetChargeEnabled(true);
+            decision = ChargeAutoDecision::kEnabledLowBattery;
+        } else if (level >= STACKCHAN_CHARGE_OFF_ABOVE) {
+            pmic_->SetChargeEnabled(false);
+            decision = ChargeAutoDecision::kDisabledHighBattery;
+        } else {
+            // Hysteresis band: intentionally make no PMIC write.
+            decision = ChargeAutoDecision::kKeptBetweenThresholds;
+        }
+
+        last_charge_auto_decision_.store(decision,
+                                         std::memory_order_release);
+        ESP_LOGI(TAG, "Automatic charge check: level=%d decision=%s",
+                 level, ChargeAutoDecisionName(decision));
+    }
+
+    // Reuse the existing one-second status-bar battery poll, but only make an
+    // automatic decision approximately once per 60 seconds. Unsigned
+    // subtraction keeps the interval correct when the 32-bit millisecond
+    // counter wraps. The startup call bypasses the interval exactly once.
+    void MaybeApplyAutomaticChargePolicy(int level, bool level_available,
+                                         bool startup = false) {
+        if (STACKCHAN_CHARGE_AUTO == 0) {
+            return;
+        }
+
+        uint32_t now_ms =
+            static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        if (startup) {
+            last_charge_auto_check_ms_.store(now_ms,
+                                             std::memory_order_relaxed);
+        } else {
+            uint32_t last_ms =
+                last_charge_auto_check_ms_.load(std::memory_order_relaxed);
+            do {
+                if (static_cast<uint32_t>(now_ms - last_ms) <
+                    CHARGE_AUTO_INTERVAL_MS) {
+                    return;
+                }
+            } while (!last_charge_auto_check_ms_.compare_exchange_weak(
+                last_ms, now_ms, std::memory_order_relaxed));
+        }
+
+        ApplyAutomaticChargePolicy(level, level_available);
+    }
+
     void InitializeAxp2101() {
         ESP_LOGI(TAG, "Init AXP2101");
         pmic_ = new Pmic(i2c_bus_, 0x34);
+        if (STACKCHAN_CHARGE_AUTO != 0) {
+            int level = -1;
+            bool level_available = ReadBatteryLevel(&level);
+            MaybeApplyAutomaticChargePolicy(level, level_available, true);
+        } else {
+            ESP_LOGI(TAG,
+                     "Automatic charge control disabled at build time");
+        }
     }
 
     void InitializeAw9523() {
         ESP_LOGI(TAG, "Init AW9523");
         aw9523_ = new Aw9523(i2c_bus_, 0x58);
         vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    bool EnsureListeningIndicatorObjectLocked() {
+        if (listening_indicator_ != nullptr) {
+            if (lv_obj_is_valid(listening_indicator_)) {
+                if (listening_indicator_dot_ != nullptr &&
+                    lv_obj_is_valid(listening_indicator_dot_)) {
+                    return true;
+                }
+                StopListeningIndicatorPulseLocked();
+                lv_obj_del(listening_indicator_);
+            } else {
+                StopListeningIndicatorPulseLocked();
+            }
+        }
+        listening_indicator_ = nullptr;
+        listening_indicator_dot_ = nullptr;
+
+        lv_obj_t* screen = lv_screen_active();
+        if (screen == nullptr) {
+            return false;
+        }
+
+        listening_indicator_ = lv_obj_create(screen);
+        if (listening_indicator_ == nullptr) {
+            return false;
+        }
+
+        lv_obj_set_size(listening_indicator_, 36, 30);
+        lv_obj_align(listening_indicator_, LV_ALIGN_TOP_RIGHT, -8, 8);
+        lv_obj_clear_flag(listening_indicator_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(listening_indicator_, 10, 0);
+        lv_obj_set_style_bg_color(listening_indicator_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(listening_indicator_, LV_OPA_70, 0);
+        lv_obj_set_style_border_width(listening_indicator_, 0, 0);
+        lv_obj_set_style_pad_all(listening_indicator_, 0, 0);
+
+        listening_indicator_dot_ = lv_obj_create(listening_indicator_);
+        if (listening_indicator_dot_ == nullptr) {
+            lv_obj_del(listening_indicator_);
+            listening_indicator_ = nullptr;
+            listening_indicator_dot_ = nullptr;
+            return false;
+        }
+        lv_obj_set_size(listening_indicator_dot_,
+                        LISTENING_INDICATOR_DOT_SIZE_PX,
+                        LISTENING_INDICATOR_DOT_SIZE_PX);
+        lv_obj_clear_flag(listening_indicator_dot_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(listening_indicator_dot_, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(listening_indicator_dot_,
+                                  lv_color_hex(0xE0352B), 0);
+        lv_obj_set_style_bg_opa(listening_indicator_dot_, LV_OPA_COVER, 0);
+        lv_obj_set_style_opa(listening_indicator_dot_, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(listening_indicator_dot_, 0, 0);
+        lv_obj_set_style_pad_all(listening_indicator_dot_, 0, 0);
+        lv_obj_center(listening_indicator_dot_);
+
+        lv_obj_add_flag(listening_indicator_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(listening_indicator_);
+        ESP_LOGI(TAG, "Listening indicator created on active screen");
+        return true;
+    }
+
+    static void SetListeningDotOpacity(void* obj, int32_t opa) {
+        auto* dot = static_cast<lv_obj_t*>(obj);
+        if (dot == nullptr || !lv_obj_is_valid(dot)) {
+            return;
+        }
+        lv_obj_set_style_opa(dot, static_cast<lv_opa_t>(opa), 0);
+    }
+
+    void StopListeningIndicatorPulseLocked() {
+        if (listening_indicator_dot_ == nullptr) {
+            return;
+        }
+        lv_anim_delete(listening_indicator_dot_, nullptr);
+        if (lv_obj_is_valid(listening_indicator_dot_)) {
+            lv_obj_set_style_opa(listening_indicator_dot_, LV_OPA_COVER, 0);
+        }
+    }
+
+    void StartListeningIndicatorPulseLocked() {
+        if (listening_indicator_dot_ == nullptr ||
+            !lv_obj_is_valid(listening_indicator_dot_)) {
+            return;
+        }
+
+        StopListeningIndicatorPulseLocked();
+
+        lv_anim_t anim;
+        lv_anim_init(&anim);
+        lv_anim_set_var(&anim, listening_indicator_dot_);
+        lv_anim_set_values(&anim, LV_OPA_COVER, LV_OPA_40);
+        lv_anim_set_exec_cb(&anim, SetListeningDotOpacity);
+        lv_anim_set_duration(&anim, 700);
+        lv_anim_set_reverse_duration(&anim, 700);
+        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_start(&anim);
+    }
+
+    void BringListeningIndicatorToFrontLocked() {
+        if (listening_indicator_ == nullptr) {
+            return;
+        }
+        if (!lv_obj_is_valid(listening_indicator_)) {
+            StopListeningIndicatorPulseLocked();
+            listening_indicator_ = nullptr;
+            listening_indicator_dot_ = nullptr;
+            listening_indicator_visible_.store(false, std::memory_order_release);
+            return;
+        }
+        lv_obj_move_foreground(listening_indicator_);
+    }
+
+    void SetListeningIndicatorVisibleLocked(bool visible) {
+        if (visible) {
+            if (!EnsureListeningIndicatorObjectLocked()) {
+                listening_indicator_visible_.store(false, std::memory_order_release);
+                return;
+            }
+            lv_obj_clear_flag(listening_indicator_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(listening_indicator_);
+            StartListeningIndicatorPulseLocked();
+            listening_indicator_visible_.store(true, std::memory_order_release);
+            return;
+        }
+
+        if (listening_indicator_ != nullptr) {
+            StopListeningIndicatorPulseLocked();
+            if (lv_obj_is_valid(listening_indicator_)) {
+                lv_obj_add_flag(listening_indicator_, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                listening_indicator_ = nullptr;
+                listening_indicator_dot_ = nullptr;
+            }
+        }
+        listening_indicator_visible_.store(false, std::memory_order_release);
+    }
+
+    void UpdateListeningIndicatorForState(bool is_listening) {
+        if (display_ == nullptr) {
+            return;
+        }
+        if (listening_indicator_visible_.load(std::memory_order_acquire) ==
+            is_listening) {
+            return;
+        }
+        DisplayLockGuard lock(display_);
+        SetListeningIndicatorVisibleLocked(is_listening);
     }
 
     void PollTouchpad() {
@@ -2218,6 +3005,7 @@ private:
         // 無限持続するのを防ぐ。 StopListening 後は listening_started_ms を 0 に
         // 戻して再発火を抑止 (次に listening 突入したら再セット)。
         bool is_listening = (app.GetDeviceState() == kDeviceStateListening);
+        UpdateListeningIndicatorForState(is_listening);
         if (is_listening && !was_listening) {
             listening_started_ms = now_ms;
             ESP_LOGI(TAG, "Listening entered at %d ms (timeout in %d ms)",
@@ -2235,6 +3023,9 @@ private:
 
         ft6336_->UpdateTouchPoint();
         auto& touch_point = ft6336_->GetTouchPoint();
+        if (touch_point.num > 0) {
+            HandleScreenActivity();
+        }
 
         // 检测触摸开始
         if (touch_point.num > 0 && !was_touched) {
@@ -2378,6 +3169,8 @@ private:
         esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
         esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
 
+        lcd_panel_io_ = panel_io;
+        lcd_panel_ = panel;
         display_ = new SpiLcdDisplay(panel_io, panel,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
@@ -3155,26 +3948,82 @@ private:
 #endif
         };
 
-        auto log_result = [&](bool short_circuited) {
-            result.short_circuited = short_circuited;
+        // Issue #171: classify each exit path with a single 3-valued tag so
+        // that idempotent_short_circuit and wait_exhausted can never both be
+        // set. A one-bool flag could not express the two orthogonal outcomes;
+        // a single enum makes "both true" structurally unrepresentable.
+        //   * kBusAction:     a real EnableTorque() bus write was attempted
+        //                     (or the servo subsystem was unavailable); the
+        //                     outcome is carried by yaw_ok/pitch_ok. Neither
+        //                     short-circuit flag is set.
+        //   * kIdempotent:    returned without a bus frame, state already
+        //                     matched the request (success no-op).
+        //   * kWaitExhausted: returned without a bus frame, the kReleasing
+        //                     wait budget was exhausted (failure).
+        enum class ExitKind { kBusAction, kIdempotent, kWaitExhausted };
+
+        auto log_result = [&](ExitKind kind) {
+            result.idempotent_short_circuit = (kind == ExitKind::kIdempotent);
+            result.wait_exhausted = (kind == ExitKind::kWaitExhausted);
+            // Defensive: the enum makes this impossible, but assert anyway so
+            // any future direct field mutation is caught in debug builds.
+            assert(!(result.idempotent_short_circuit && result.wait_exhausted));
             ESP_LOGI(TAG,
                      "set_servo_torque (reason=%s): servo_ok=%d "
                      "yaw_enabled=%d (r=%d) pitch_enabled=%d (r=%d) "
-                     "short_circuited=%d",
+                     "idempotent_short_circuit=%d wait_exhausted=%d",
                      ReleaseReasonName(reason),
                      servo_ok_ ? 1 : 0,
                      yaw_enabled ? 1 : 0, result.yaw_bus_return,
                      pitch_enabled ? 1 : 0, result.pitch_bus_return,
-                     short_circuited ? 1 : 0);
+                     result.idempotent_short_circuit ? 1 : 0,
+                     result.wait_exhausted ? 1 : 0);
         };
 
-        auto finish = [&](bool short_circuited) -> ServoTorqueResult {
-            log_result(short_circuited);
+        auto finish = [&](ExitKind kind) -> ServoTorqueResult {
+            log_result(kind);
             return result;
         };
 
+        auto publish_after_bus_attempt = [&](TorqueState pre_bus_state) {
+            const bool any_axis_bus_failed =
+                !result.yaw_ok || !result.pitch_ok;
+            if (!any_axis_bus_failed) {
+                // Success-path cached-state ownership is pre-existing and
+                // tracked separately under Issue #172.
+                PublishTorqueState();
+                return;
+            }
+            TorqueState expected = pre_bus_state;
+            if (torque_state_.compare_exchange_strong(
+                    expected,
+                    TorqueState::kUncertain,
+                    std::memory_order_release,
+                    std::memory_order_acquire)) {
+                ESP_LOGW(TAG,
+                         "set_servo_torque (reason=%s): publishing kUncertain; "
+                         "bus confirmation failed for yaw_failed=%d (r=%d) "
+                         "pitch_failed=%d (r=%d)",
+                         ReleaseReasonName(reason),
+                         result.yaw_ok ? 0 : 1, result.yaw_bus_return,
+                         result.pitch_ok ? 0 : 1, result.pitch_bus_return);
+            } else {
+                ESP_LOGW(TAG,
+                         "set_servo_torque (reason=%s): kUncertain publish "
+                         "skipped; torque_state_ advanced from %d to %d "
+                         "(likely MarkReleasing()); leaving concurrent state "
+                         "intact. bus_return yaw=%d pitch=%d",
+                         ReleaseReasonName(reason),
+                         static_cast<int>(pre_bus_state),
+                         static_cast<int>(expected),
+                         result.yaw_bus_return, result.pitch_bus_return);
+            }
+        };
+
         if (!servo_ok_ || scs_bus_mutex_ == nullptr) {
-            return finish(false);
+            // Servo subsystem unavailable: not a short-circuit and not a
+            // wait timeout. yaw_ok/pitch_ok stay false, so ok is false.
+            return finish(ExitKind::kBusAction);
         }
 
         // Fully-symmetric re-engage remains bus-ordered even when it becomes
@@ -3195,13 +4044,16 @@ private:
                                  "not clearing within wait budget; skipping "
                                  "bus frames, caller may retry.",
                                  ReleaseReasonName(reason));
-                        log_result(true);
+                        // Pre-mutex wait budget exhausted: no bus frame went
+                        // out, the requested ON did not happen (Issue #171).
+                        log_result(ExitKind::kWaitExhausted);
                         return result;
                     }
-                    // After the wait, state may be kEngaged (OFF failed and
-                    // rolled back) or kReleased (OFF succeeded). Fall through
-                    // to the existing (true, true) logic, which short-circuits
-                    // on kEngaged and proceeds normally on kReleased/kPartial.
+                    // After the wait, state may be kEngaged (OFF rolled
+                    // back), kReleased (OFF succeeded), or kUncertain (OFF
+                    // bus confirmation failed). Fall through to the existing
+                    // (true, true) logic, which short-circuits on kEngaged and
+                    // proceeds normally on kReleased/kPartial/kUncertain.
                 }
             }
 
@@ -3227,7 +4079,9 @@ private:
                                  "frames, caller may retry.",
                                  ReleaseReasonName(reason),
                                  attempt);
-                        log_result(true);
+                        // Post-mutex re-check wait budget exhausted: no bus
+                        // frame, requested ON did not happen (Issue #171).
+                        log_result(ExitKind::kWaitExhausted);
                         return result;
                     }
                     continue;
@@ -3235,10 +4089,15 @@ private:
 
                 if (torque_state_.load(std::memory_order_acquire) ==
                     TorqueState::kEngaged) {
-                    log_result(true);
+                    // Already engaged (reached here only after any kReleasing
+                    // wait already cleared): legitimate no-op success, so ok
+                    // stays true (Issue #171).
+                    log_result(ExitKind::kIdempotent);
                     xSemaphoreGive(scs_bus_mutex_);
                     return result;
                 }
+                const TorqueState pre_bus_state =
+                    torque_state_.load(std::memory_order_acquire);
                 result.yaw_bus_return =
                     scs_bus_.EnableTorque(SERVO_YAW_ID, 1);
                 result.pitch_bus_return =
@@ -3250,8 +4109,9 @@ private:
                 if (result.pitch_ok) {
                     pitch_torque_enabled_ = true;
                 }
-                PublishTorqueState();
-                log_result(false);
+                publish_after_bus_attempt(pre_bus_state);
+                // Real bus write attempted; ok is governed by yaw_ok/pitch_ok.
+                log_result(ExitKind::kBusAction);
                 xSemaphoreGive(scs_bus_mutex_);
                 return result;
             }
@@ -3261,7 +4121,9 @@ private:
                      "all %d post-mutex retries; skipping bus frames.",
                      ReleaseReasonName(reason),
                      kMaxManualReengageRetries);
-            log_result(true);
+            // All retries exhausted while still kReleasing: no bus frame, the
+            // requested ON did not happen (Issue #171).
+            log_result(ExitKind::kWaitExhausted);
             return result;
         } else {
             if (!yaw_enabled && !pitch_enabled) {
@@ -3270,7 +4132,9 @@ private:
                     torque_state_.load(std::memory_order_acquire) ==
                     TorqueState::kReleased;
                 if (already_released) {
-                    log_result(true);
+                    // Already released for an OFF request: legitimate no-op
+                    // success, so ok stays true (Issue #171).
+                    log_result(ExitKind::kIdempotent);
                     xSemaphoreGive(scs_bus_mutex_);
                     return result;
                 }
@@ -3286,8 +4150,10 @@ private:
                 if (reason == ReleaseReason::kAutoIdle &&
                     (yaw_motion_.moving || pitch_motion_.moving ||
                      servo_wobble_active_.load(std::memory_order_acquire))) {
+                    // Auto-idle deferring because motion is still in progress:
+                    // a benign no-op (no wait budget consumed), not a timeout.
                     xSemaphoreGive(motion_mutex_);
-                    return finish(true);
+                    return finish(ExitKind::kIdempotent);
                 }
                 if (!yaw_enabled) {
                     yaw_motion_.moving = false;
@@ -3327,10 +4193,14 @@ private:
                              (unsigned)expected_release_epoch,
                              (int)current_state);
                     xSemaphoreGive(scs_bus_mutex_);
-                    log_result(true);
+                    // Stale auto-release OFF superseded by a newer epoch/state:
+                    // the OFF is already obsolete, a benign no-op (Issue #171).
+                    log_result(ExitKind::kIdempotent);
                     return result;
                 }
             }
+            const TorqueState pre_bus_state =
+                torque_state_.load(std::memory_order_acquire);
             result.yaw_bus_return = scs_bus_.EnableTorque(
                 SERVO_YAW_ID, yaw_enabled ? 1 : 0);
             result.pitch_bus_return = scs_bus_.EnableTorque(
@@ -3342,8 +4212,9 @@ private:
             if (result.pitch_ok) {
                 pitch_torque_enabled_ = pitch_enabled;
             }
-            PublishTorqueState();
-            log_result(false);
+            publish_after_bus_attempt(pre_bus_state);
+            // Real bus write attempted; ok is governed by yaw_ok/pitch_ok.
+            log_result(ExitKind::kBusAction);
             xSemaphoreGive(scs_bus_mutex_);
             return result;
         }
@@ -3372,7 +4243,8 @@ private:
             }
         }
 
-        // state is kPartial or kReleased -- safe to re-engage now.
+        // state is kPartial, kReleased, or kUncertain -- safe to
+        // re-engage now.
         InternalSetServoTorque(true, true, ReleaseReason::kReengagement);
     }
 
@@ -3412,10 +4284,17 @@ private:
             last_motion_end_valid_ = false;
         }
         // Keep the idle window scoped to the currently engaged interval.
-        // Released/partial/releasing states must not age a stale timer into
-        // the next re-engage.
-        if (torque_state_.load(std::memory_order_acquire) !=
-            TorqueState::kEngaged) {
+        // Released/partial/releasing states must not age a stale timer
+        // into the next re-engage. kUncertain is treated as engaged for
+        // auto-release purposes: if the kAutoIdle OFF bus frame was lost
+        // on the UART path, the auto-release retry must continue so the
+        // device does not strand with torque physically ON; if the OFF
+        // was actually delivered, the next retry short-circuits via the
+        // idempotent path (Issue #170 follow-up).
+        auto current_state =
+            torque_state_.load(std::memory_order_acquire);
+        if (current_state != TorqueState::kEngaged &&
+            current_state != TorqueState::kUncertain) {
             last_motion_end_valid_ = false;
             return;
         }
@@ -3455,7 +4334,12 @@ private:
                 torque_state_.load(std::memory_order_acquire);
             if (state_after == TorqueState::kReleased) {
                 last_motion_end_valid_ = false;
-            } else if (r.short_circuited) {
+            } else if (r.idempotent_short_circuit || r.wait_exhausted) {
+                // Either short-circuit flag means the OFF returned without a
+                // completed bus frame (Issue #171 split the old
+                // short_circuited flag; for this kAutoIdle path only the
+                // idempotent flag can fire, but the OR keeps the "no bus
+                // action" intent explicit and future-proof).
                 uint32_t current_epoch =
                     torque_release_epoch_.load(std::memory_order_acquire);
                 if (current_epoch == my_pre_epoch) {
@@ -3533,6 +4417,41 @@ private:
         motion_driver_->StartMove(yaw_deg, pitch_deg, duration_ms,
                                   prefer_linear);
         xSemaphoreGive(motion_mutex_);
+    }
+
+    void WriteHeadAngles(int yaw_deg, int pitch_deg, int speed_dps) {
+        if (!servo_ok_ || motion_driver_ == nullptr) {
+            ESP_LOGW(TAG, "WriteHeadAngles(speed_dps) skipped: servo not initialized");
+            return;
+        }
+        int safe_speed = speed_dps;
+        if (safe_speed <= 0) {
+            safe_speed = DEFAULT_SPEED_DPS;
+        } else if (safe_speed < MIN_STEP_SAFE_SPEED_DPS) {
+            ESP_LOGW(TAG, "WriteHeadAngles: speed_dps=%d below MIN_STEP_SAFE_SPEED_DPS=%d, clamping",
+                     speed_dps, MIN_STEP_SAFE_SPEED_DPS);
+            safe_speed = MIN_STEP_SAFE_SPEED_DPS;
+        } else if (safe_speed < MIN_SMOOTH_SPEED_DPS) {
+            // Below the on-device measured smoothness floor -- motion will look
+            // textured on SCS0009 at MOTION_TICK_MS=20 ms. This is intentionally
+            // permitted (the gateway "low" preset is 30 dps, deliberately below
+            // the floor for slow, expressive motion per Issue #129 design).
+            // Log once so callers can see they are below the smooth zone.
+            ESP_LOGW(TAG, "WriteHeadAngles: speed_dps=%d below MIN_SMOOTH_SPEED_DPS=%d (textured motion is expected)",
+                     speed_dps, MIN_SMOOTH_SPEED_DPS);
+        } else if (safe_speed > MAX_SPEED_DPS) {
+            ESP_LOGW(TAG, "WriteHeadAngles: speed_dps=%d above MAX_SPEED_DPS=%d, clamping",
+                     speed_dps, MAX_SPEED_DPS);
+            safe_speed = MAX_SPEED_DPS;
+        }
+
+        int yaw_delta = std::abs(yaw_deg - static_cast<int>(motion_driver_->GetYawDeg()));
+        int pitch_delta = std::abs(pitch_deg - static_cast<int>(motion_driver_->GetPitchDeg()));
+        int max_delta = std::max(yaw_delta, pitch_delta);
+        uint32_t duration_ms = std::max<uint32_t>(
+            MOTION_TICK_MS,
+            static_cast<uint32_t>(max_delta) * 1000U / static_cast<uint32_t>(safe_speed));
+        WriteHeadAngles(yaw_deg, pitch_deg, duration_ms);
     }
 
     // Servo wobble: yaw -A -> +A -> -A -> 0. Each step is dispatched only
@@ -3705,6 +4624,9 @@ private:
     }
 
     void HandleTap(uint64_t duration_ms) {
+        if (!touch_sensor_enabled_.load(std::memory_order_acquire)) {
+            return;
+        }
         LogTouchEvent("TAP", duration_ms);
         last_event_ = TouchEvent::TAP;
         last_event_us_ = esp_timer_get_time();
@@ -3712,15 +4634,20 @@ private:
         // not pop the avatar back over the WiFi config / settings screens.
         SetAvatarExpressionIfActive("surprised");
         ScheduleIdleRevert();
+        Application::GetInstance().SendStackChanEvent("touch", "tap", duration_ms);
     }
 
     void HandleStroke(uint64_t duration_ms) {
+        if (!touch_sensor_enabled_.load(std::memory_order_acquire)) {
+            return;
+        }
         LogTouchEvent("STROKE", duration_ms);
         last_event_ = TouchEvent::STROKE;
         last_event_us_ = esp_timer_get_time();
         SetAvatarExpressionIfActive("embarrassed");
         StartServoWobble();
         ScheduleIdleRevert();
+        Application::GetInstance().SendStackChanEvent("touch", "stroke", duration_ms);
     }
 
     // 200 ms periodic poll. Reads the sensor, applies a 2-sample debounce on
@@ -3745,6 +4672,9 @@ private:
         last_zone_snapshot_[2] = s.zone[2];
 
         bool any_pressed = s.zone[0] || s.zone[1] || s.zone[2];
+        if (any_pressed) {
+            HandleScreenActivity();
+        }
 
         // Asymmetric debounce:
         //   press   confirm = 2 samples ( 200 ms) — fast tap detection
@@ -3809,6 +4739,13 @@ private:
             }
             cooldown_until_us_ = now_us + (uint64_t)COOLDOWN_MS * 1000ULL;
         }
+    }
+
+    void InitializeTouchSettings() {
+        Settings settings("touch", false);
+        bool enabled = settings.GetBool("enabled", true);
+        touch_sensor_enabled_.store(enabled, std::memory_order_release);
+        ESP_LOGI(TAG, "Touch sensor setting loaded: enabled=%d", enabled ? 1 : 0);
     }
 
     void InitializeSi12tTouch() {
@@ -3951,6 +4888,7 @@ private:
         if (!EnsureAvatarObject()) return false;
         lv_image_set_src(avatar_img_, dsc);
         lv_obj_move_foreground(avatar_img_);
+        BringListeningIndicatorToFrontLocked();
         return true;
     }
 
@@ -4850,9 +5788,262 @@ private:
         }
     }
 
+    static bool IsGatewayUrlForced() {
+#if defined(CONFIG_FORCE_DEFAULT_WEBSOCKET_URL) && defined(CONFIG_DEFAULT_WEBSOCKET_URL)
+        return CONFIG_DEFAULT_WEBSOCKET_URL[0] != '\0';
+#else
+        return false;
+#endif
+    }
+
+    static bool IsGatewayFallbackUrlForced() {
+#if defined(CONFIG_FORCE_DEFAULT_WEBSOCKET_URL) && defined(CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL)
+        return CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL[0] != '\0';
+#else
+        return false;
+#endif
+    }
+
+    static bool IsGatewayTokenForced() {
+#if defined(CONFIG_FORCE_DEFAULT_WEBSOCKET_URL) && defined(CONFIG_DEFAULT_WEBSOCKET_TOKEN)
+        return CONFIG_DEFAULT_WEBSOCKET_TOKEN[0] != '\0';
+#else
+        return false;
+#endif
+    }
+
+    static bool IsGatewayForceMode() {
+        return IsGatewayUrlForced() || IsGatewayFallbackUrlForced() || IsGatewayTokenForced();
+    }
+
+    static bool IsGatewayDiscoveryCompiledIn() {
+#if defined(CONFIG_STACKCHAN_MDNS_DISCOVERY) && CONFIG_STACKCHAN_MDNS_DISCOVERY
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    static bool IsGatewayDiscoveryEnabled(const std::string& url) {
+        // Only a forced primary URL suppresses the NVS/mDNS candidate path.
+        return IsGatewayDiscoveryCompiledIn() && !IsGatewayUrlForced() && url.empty();
+    }
+
+    static void AddGatewayForcedKeys(cJSON* root) {
+        cJSON* forced_keys = cJSON_CreateArray();
+        if (IsGatewayUrlForced()) {
+            cJSON_AddItemToArray(forced_keys, cJSON_CreateString("url"));
+        }
+        if (IsGatewayFallbackUrlForced()) {
+            cJSON_AddItemToArray(forced_keys, cJSON_CreateString("fallback_url"));
+        }
+        if (IsGatewayTokenForced()) {
+            cJSON_AddItemToArray(forced_keys, cJSON_CreateString("token"));
+        }
+        cJSON_AddItemToObject(root, "forced_keys", forced_keys);
+    }
+
+    static void AddGatewayForcedKeyNote(cJSON* notes,
+                                        const char* key,
+                                        bool provided,
+                                        bool forced) {
+        if (!provided || !forced) {
+            return;
+        }
+        std::string note = std::string(key) +
+            " is overridden by the Kconfig default at connect time until a non-force build is flashed.";
+        cJSON_AddItemToArray(notes, cJSON_CreateString(note.c_str()));
+    }
+
+    static void AddGatewayRuntimeContext(cJSON* root, const std::string& url) {
+        bool force_mode = IsGatewayForceMode();
+        cJSON_AddBoolToObject(root, "force_mode", force_mode);
+        AddGatewayForcedKeys(root);
+        cJSON_AddBoolToObject(root, "discovery_compiled_in", IsGatewayDiscoveryCompiledIn());
+        cJSON_AddBoolToObject(root, "discovery_enabled", IsGatewayDiscoveryEnabled(url));
+    }
+
     void RegisterMcpTools() {
         auto& mcp_server = McpServer::GetInstance();
         ESP_LOGI(TAG, "Registering StackChan MCP tools...");
+
+        mcp_server.AddTool(
+            "self.screen.set_off_timeout",
+            "Set the StackChan idle screen-off timeout in seconds. The value "
+            "is saved to NVS and applied immediately. Use 0 to disable idle "
+            "screen-off and wake the screen if it is currently off. Valid "
+            "range: 0..86400 seconds.",
+            PropertyList({
+                Property("seconds", kPropertyTypeInteger, 0,
+                         STACKCHAN_SCREEN_OFF_MAX_TIMEOUT_SECONDS)
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int timeout_seconds = properties["seconds"].value<int>();
+                bool applied = SetScreenOffTimeoutSeconds(timeout_seconds);
+                return GetScreenOffTimeoutJson(applied);
+            });
+
+        mcp_server.AddTool(
+            "self.screen.get_off_timeout",
+            "Get the effective NVS-backed StackChan idle screen-off timeout, "
+            "whether it is enabled, and whether the screen is currently off.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                return GetScreenOffTimeoutJson();
+            });
+
+        mcp_server.AddTool(
+            "self.gateway_config.get",
+            "Read the NVS-backed WebSocket gateway connection settings. "
+            "Returns websocket.url, websocket.fallback_url, token_set (never "
+            "the token value), forced_keys, force_mode, discovery_enabled, "
+            "and the current connected_url when a WebSocket candidate is "
+            "connected. Empty websocket.url enables mDNS discovery when "
+            "discovery support is compiled in and the primary URL is not "
+            "forced; websocket.fallback_url is tried after discovery and is "
+            "suitable for an out-of-LAN relay. forced_keys lists any of url, "
+            "fallback_url, and token that a non-empty Kconfig default "
+            "overrides at connect time; force_mode=true means at least one "
+            "key is forced.",
+            PropertyList(),
+            [](const PropertyList&) -> ReturnValue {
+                Settings settings("websocket", false);
+                std::string url = settings.GetString("url");
+                std::string fallback_url = settings.GetString("fallback_url");
+                bool token_set = !settings.GetString("token").empty();
+                std::string connected_url = Application::GetInstance().GetConnectedGatewayUrl();
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "url", url.c_str());
+                cJSON_AddStringToObject(root, "fallback_url", fallback_url.c_str());
+                cJSON_AddBoolToObject(root, "token_set", token_set);
+                AddGatewayRuntimeContext(root, url);
+                if (connected_url.empty()) {
+                    cJSON_AddNullToObject(root, "connected_url");
+                } else {
+                    cJSON_AddStringToObject(root, "connected_url", connected_url.c_str());
+                }
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.gateway_config.set",
+            "Update the NVS-backed WebSocket gateway connection settings. "
+            "Optional string fields: url, fallback_url, token. At least one "
+            "field must be provided. Passing an empty string clears that NVS "
+            "key. Leave url empty to enable mDNS discovery on the next "
+            "reconnect when discovery support is compiled in and the primary "
+            "URL is not forced; fallback_url is tried after discovery and is "
+            "suitable for an out-of-LAN relay. The change is persisted but "
+            "does not disconnect, reconnect, or reboot the device; it takes "
+            "effect on the next reconnect. forced_keys lists any of url, "
+            "fallback_url, and token that a non-empty Kconfig default "
+            "overrides at connect time; force_mode=true means at least one "
+            "key is forced, so updates to those keys are ignored until a "
+            "non-force build is flashed.",
+            PropertyList({Property("url", kPropertyTypeString, std::string()),
+                          Property("fallback_url", kPropertyTypeString, std::string()),
+                          Property("token", kPropertyTypeString, std::string())}),
+            [](const PropertyList& properties) -> ReturnValue {
+                const auto& url_property = properties["url"];
+                const auto& fallback_url_property = properties["fallback_url"];
+                const auto& token_property = properties["token"];
+                bool url_provided = url_property.was_provided();
+                bool fallback_url_provided = fallback_url_property.was_provided();
+                bool token_provided = token_property.was_provided();
+                if (!url_provided && !fallback_url_provided && !token_provided) {
+                    throw std::invalid_argument(
+                        "At least one of url, fallback_url, or token must be provided");
+                }
+
+                Settings settings("websocket", true);
+                std::string url = settings.GetString("url");
+                std::string fallback_url = settings.GetString("fallback_url");
+                std::string token = settings.GetString("token");
+
+                cJSON* updated_keys = cJSON_CreateArray();
+                auto apply_string = [&](const char* response_key,
+                                        const char* nvs_key,
+                                        bool provided,
+                                        const std::string& requested_value,
+                                        std::string& current_value) {
+                    if (!provided) {
+                        return;
+                    }
+                    if (requested_value.empty()) {
+                        settings.EraseKey(nvs_key);
+                        current_value.clear();
+                    } else {
+                        settings.SetString(nvs_key, requested_value);
+                        current_value = requested_value;
+                    }
+                    cJSON_AddItemToArray(updated_keys, cJSON_CreateString(response_key));
+                };
+
+                apply_string("url", "url", url_provided,
+                             url_property.value<std::string>(), url);
+                apply_string("fallback_url", "fallback_url", fallback_url_provided,
+                             fallback_url_property.value<std::string>(), fallback_url);
+                apply_string("token", "token", token_provided,
+                             token_property.value<std::string>(), token);
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddItemToObject(root, "updated_keys", updated_keys);
+                cJSON_AddStringToObject(root, "url", url.c_str());
+                cJSON_AddStringToObject(root, "fallback_url", fallback_url.c_str());
+                cJSON_AddBoolToObject(root, "token_set", !token.empty());
+                AddGatewayRuntimeContext(root, url);
+                cJSON_AddStringToObject(root, "takes_effect", "next_reconnect");
+
+                cJSON* notes = cJSON_CreateArray();
+                if (!url.empty() && !IsGatewayUrlForced()) {
+                    cJSON_AddItemToArray(
+                        notes,
+                        cJSON_CreateString(
+                            "mDNS discovery is disabled until websocket.url is cleared."));
+                }
+                AddGatewayForcedKeyNote(notes, "url", url_provided, IsGatewayUrlForced());
+                AddGatewayForcedKeyNote(notes, "fallback_url", fallback_url_provided,
+                                        IsGatewayFallbackUrlForced());
+                AddGatewayForcedKeyNote(notes, "token", token_provided, IsGatewayTokenForced());
+                cJSON_AddItemToObject(root, "notes", notes);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.robot.get_touch_sensor_enabled",
+            "Read the NVS-backed head-touch sensor enable flag. When disabled, "
+            "HandleTap / HandleStroke skip both the local motion response and "
+            "the stackchan/event emission.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "enabled",
+                                      touch_sensor_enabled_.load(std::memory_order_acquire));
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.robot.set_touch_sensor_enabled",
+            "Update the NVS-backed head-touch sensor enable flag. Disabling "
+            "takes effect immediately and persists across reboot; subsequent "
+            "HandleTap / HandleStroke calls skip both the local motion "
+            "response and the stackchan/event emission.",
+            PropertyList({Property("enabled", kPropertyTypeBoolean)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                bool enabled = properties["enabled"].value<bool>();
+                Settings settings("touch", true);
+                settings.SetBool("enabled", enabled);
+                touch_sensor_enabled_.store(enabled, std::memory_order_release);
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddBoolToObject(root, "enabled", enabled);
+                cJSON_AddStringToObject(root, "takes_effect", "immediate");
+                cJSON_AddStringToObject(root, "persistence", "nvs");
+                return root;
+            });
 
         // Set head angles (yaw, pitch in degrees)
         // SCS0009: 1 step = 0.3125 degrees, so 1 degree = 3.2 steps (= 16/5)
@@ -4862,7 +6053,7 @@ private:
         // spot) above, plus Issue #80 / #98.
         mcp_server.AddTool(
             "self.robot.set_head_angles",
-            "Set the head angles of the robot. yaw: horizontal (-90 to 90). pitch: vertical. M5Stack-recommended operating range is 5 to 85 degrees per https://docs.m5stack.com/en/StackChan (\"Motion Angle Notice\"). The firmware also accepts values up to 88 degrees (the hard clamp guards against the audible sub-stall observed at pitch=89 on real hardware), but values outside 5-85 degrees are not officially endorsed and may stress the servo over time. Requests below 0 degrees or above 88 degrees are silently clamped with an ESP_LOGW. See README \"Hardware safety notes\".",
+            "Set the head angles of the robot. yaw: horizontal (-90 to 90). pitch: vertical. M5Stack-recommended operating range is 5 to 85 degrees per https://docs.m5stack.com/en/StackChan (\"Motion Angle Notice\"). The firmware also accepts values up to 88 degrees (the hard clamp guards against the audible sub-stall observed at pitch=89 on real hardware), but values outside 5-85 degrees are not officially endorsed and may stress the servo over time. Requests below 0 degrees or above 88 degrees are silently clamped with an ESP_LOGW. Optional speed_dps: angular speed in degrees per second. If omitted or zero, the existing duration-based default applies; positive values below 15 dps are clamped to the step-safe floor. See README \"Hardware safety notes\".",
             // Pitch schema range is intentionally permissive across the
             // entire `int` value range (std::numeric_limits<int>::min/max):
             // the authoritative Tier 1 enforcement lives in the handler
@@ -4881,10 +6072,14 @@ private:
             PropertyList({Property("yaw", kPropertyTypeInteger, 0, -90, 90),
                           Property("pitch", kPropertyTypeInteger, 0,
                                    std::numeric_limits<int>::min(),
+                                   std::numeric_limits<int>::max()),
+                          Property("speed_dps", kPropertyTypeInteger, 0,
+                                   std::numeric_limits<int>::min(),
                                    std::numeric_limits<int>::max())}),
             [this](const PropertyList& properties) -> ReturnValue {
                 int yaw = properties["yaw"].value<int>();
                 int pitch = properties["pitch"].value<int>();
+                int speed_dps = properties["speed_dps"].value<int>();
                 // Issue #80 / #98: two-tier pitch guard.
                 //
                 // Tier 1 (hard clamp): silently clamp to [SAFE_PITCH_MIN,
@@ -4913,7 +6108,11 @@ private:
                 }
                 int yaw_pos = YawDegToPos(yaw);
                 int pitch_pos = PitchDegToPos(pitch);
-                WriteHeadAngles(yaw, pitch);
+                if (speed_dps > 0) {
+                    WriteHeadAngles(yaw, pitch, speed_dps);
+                } else {
+                    WriteHeadAngles(yaw, pitch);
+                }
                 bool yaw_motion_started = false;
                 bool pitch_motion_started = false;
                 if (servo_ok_) {
@@ -4931,6 +6130,57 @@ private:
                 cJSON_AddNumberToObject(root, "pitch_pos", pitch_pos);
                 cJSON_AddNumberToObject(root, "yaw_motion_started", yaw_motion_started ? 1 : 0);
                 cJSON_AddNumberToObject(root, "pitch_motion_started", pitch_motion_started ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.wifi.set_power_save",
+            "Set the ESP32 WiFi power-save mode at runtime. Mode \"none\" disables modem sleep so high-rate command streams (for example, the pose-stream follower) avoid the ~800 ms TCP send jitter caused by the DTIM beacon cycle, at the cost of higher idle WiFi power consumption. Mode \"min_modem\" restores the xiaozhi-esp32 default light modem sleep for normal interactive use. Returns {ok, previous, current}.",
+            PropertyList({Property("mode", kPropertyTypeString)}),
+            [](const PropertyList& properties) -> ReturnValue {
+                std::string mode_str = properties["mode"].value<std::string>();
+                wifi_ps_type_t target;
+                if (mode_str == "none") {
+                    target = WIFI_PS_NONE;
+                } else if (mode_str == "min_modem") {
+                    target = WIFI_PS_MIN_MODEM;
+                } else if (mode_str == "max_modem") {
+                    target = WIFI_PS_MAX_MODEM;
+                } else {
+                    cJSON* root = cJSON_CreateObject();
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "invalid mode (expected 'none' | 'min_modem' | 'max_modem')");
+                    return root;
+                }
+
+                auto ps_str = [](wifi_ps_type_t mode) -> const char* {
+                    switch (mode) {
+                    case WIFI_PS_NONE:
+                        return "none";
+                    case WIFI_PS_MIN_MODEM:
+                        return "min_modem";
+                    case WIFI_PS_MAX_MODEM:
+                        return "max_modem";
+                    default:
+                        return "unknown";
+                    }
+                };
+
+                wifi_ps_type_t previous = WIFI_PS_MIN_MODEM;
+                esp_err_t get_result = esp_wifi_get_ps(&previous);
+                esp_err_t set_result = esp_wifi_set_ps(target);
+                const char* previous_str = get_result == ESP_OK ? ps_str(previous) : "unknown";
+
+                ESP_LOGI(TAG, "wifi.set_power_save: target=%s previous=%s set_result=%d get_result=%d",
+                         ps_str(target), previous_str, (int)set_result, (int)get_result);
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", set_result == ESP_OK);
+                cJSON_AddStringToObject(root, "previous", previous_str);
+                cJSON_AddStringToObject(root, "current", set_result == ESP_OK ? ps_str(target) : ps_str(previous));
+                if (set_result != ESP_OK) {
+                    cJSON_AddNumberToObject(root, "esp_err", (int)set_result);
+                }
                 return root;
             });
 
@@ -5048,13 +6298,22 @@ private:
                 cJSON_AddNumberToObject(root, "pitch_bus_return",
                                         torque_result.pitch_bus_return);
                 cJSON_AddBoolToObject(root, "servo_ok", servo_ok_);
+                // Issue #171: ok counts an idempotent no-op as success but a
+                // wait-budget exhaustion as failure (the requested torque
+                // transition did not actually happen on the bus).
                 cJSON_AddBoolToObject(
                     root, "ok",
-                    servo_ok_ && (torque_result.short_circuited ||
+                    servo_ok_ && (torque_result.idempotent_short_circuit ||
                                   (torque_result.yaw_ok &&
                                    torque_result.pitch_ok)));
-                cJSON_AddBoolToObject(root, "short_circuited",
-                                      torque_result.short_circuited);
+                // Issue #171: the old single `short_circuited` field is
+                // removed (no alias). These two orthogonal, mutually
+                // exclusive flags let callers distinguish a degraded-bus
+                // wait-exhaustion from an idempotent no-op success.
+                cJSON_AddBoolToObject(root, "idempotent_short_circuit",
+                                      torque_result.idempotent_short_circuit);
+                cJSON_AddBoolToObject(root, "wait_exhausted",
+                                      torque_result.wait_exhausted);
                 if (!servo_ok_) {
                     cJSON_AddStringToObject(root, "error",
                                             "Servo bus not initialized.");
@@ -5672,10 +6931,15 @@ private:
             "from a prior command). For typical 'write register address, "
             "then read' patterns, use self.i2c.write_read instead. Returns "
             "{\"ok\":true, \"bytes\":[...]} or "
-            "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK.",
+            "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK. Optional "
+            "`scl_speed_hz` (default 400000) sets the I2C clock for this "
+            "transaction; lower it (e.g. 200000) for slower Units such as the "
+            "RCWL-9620 ultrasonic ranger that fail at 400 kHz with "
+            "ESP_ERR_INVALID_STATE.",
             PropertyList({
                 Property("addr", kPropertyTypeInteger, 0x08, 0x77),
-                Property("n_bytes", kPropertyTypeInteger, 1, 256)
+                Property("n_bytes", kPropertyTypeInteger, 1, 256),
+                Property("scl_speed_hz", kPropertyTypeInteger, 400000, 100000, 1000000)
             }),
             [this](const PropertyList& props) -> ReturnValue {
                 cJSON* root = cJSON_CreateObject();
@@ -5685,7 +6949,7 @@ private:
                 i2c_device_config_t cfg = {
                     .dev_addr_length = I2C_ADDR_BIT_LEN_7,
                     .device_address = addr,
-                    .scl_speed_hz = 400000,
+                    .scl_speed_hz = static_cast<uint32_t>(props["scl_speed_hz"].value<int>()),
                 };
                 i2c_master_dev_handle_t dev;
                 esp_err_t err = i2c_master_bus_add_device(port_a_i2c_bus_, &cfg, &dev);
@@ -5731,10 +6995,15 @@ private:
             "external Port A bus only; on-board ICs (PMIC, AW9523, touch, "
             "etc.) on the internal bus are not reachable. Returns "
             "{\"ok\":true} on ACK or "
-            "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK.",
+            "{\"ok\":false, \"error\":\"ESP_ERR_TIMEOUT\"} on NACK. Optional "
+            "`scl_speed_hz` (default 400000) sets the I2C clock for this "
+            "transaction; lower it (e.g. 200000) for slower Units such as the "
+            "RCWL-9620 ultrasonic ranger that fail at 400 kHz with "
+            "ESP_ERR_INVALID_STATE.",
             PropertyList({
                 Property("addr", kPropertyTypeInteger, 0x08, 0x77),
-                i2c_write_bytes_prop
+                i2c_write_bytes_prop,
+                Property("scl_speed_hz", kPropertyTypeInteger, 400000, 100000, 1000000)
             }),
             [this](const PropertyList& props) -> ReturnValue {
                 cJSON* root = cJSON_CreateObject();
@@ -5744,7 +7013,7 @@ private:
                 i2c_device_config_t cfg = {
                     .dev_addr_length = I2C_ADDR_BIT_LEN_7,
                     .device_address = addr,
-                    .scl_speed_hz = 400000,
+                    .scl_speed_hz = static_cast<uint32_t>(props["scl_speed_hz"].value<int>()),
                 };
                 i2c_master_dev_handle_t dev;
                 esp_err_t err = i2c_master_bus_add_device(port_a_i2c_bus_, &cfg, &dev);
@@ -5788,11 +7057,16 @@ private:
             "register pointer, then read' pattern: pass write_bytes=[reg_addr] "
             "to read from a specific register. Returns "
             "{\"ok\":true, \"bytes\":[...]} or "
-            "{\"ok\":false, \"error\":\"...\"} on failure.",
+            "{\"ok\":false, \"error\":\"...\"} on failure. Optional "
+            "`scl_speed_hz` (default 400000) sets the I2C clock for this "
+            "transaction; lower it (e.g. 200000) for slower Units such as the "
+            "RCWL-9620 ultrasonic ranger that fail at 400 kHz with "
+            "ESP_ERR_INVALID_STATE.",
             PropertyList({
                 Property("addr", kPropertyTypeInteger, 0x08, 0x77),
                 i2c_wr_write_bytes_prop,
-                Property("n_bytes", kPropertyTypeInteger, 1, 256)
+                Property("n_bytes", kPropertyTypeInteger, 1, 256),
+                Property("scl_speed_hz", kPropertyTypeInteger, 400000, 100000, 1000000)
             }),
             [this](const PropertyList& props) -> ReturnValue {
                 cJSON* root = cJSON_CreateObject();
@@ -5803,7 +7077,7 @@ private:
                 i2c_device_config_t cfg = {
                     .dev_addr_length = I2C_ADDR_BIT_LEN_7,
                     .device_address = addr,
-                    .scl_speed_hz = 400000,
+                    .scl_speed_hz = static_cast<uint32_t>(props["scl_speed_hz"].value<int>()),
                 };
                 i2c_master_dev_handle_t dev;
                 esp_err_t err = i2c_master_bus_add_device(port_a_i2c_bus_, &cfg, &dev);
@@ -6094,6 +7368,355 @@ private:
                 return root;
             });
 
+        // ---- Generic Port C WS2812 strip tools ----
+        // Expose the CoreS3 Port C signal 1 (GPIO 17) as a generic
+        // WS2812-compatible strip driver. This is independent from self.led.*,
+        // which drives the 12-LED base strip through the PY32 I2C path.
+
+        mcp_server.AddTool(
+            "self.port_c.ws2812.init",
+            "Initialize a WS2812-compatible LED strip connected to Port C "
+            "(CoreS3 HY2.0-4P signal 1, GPIO 17). led_count is the "
+            "number of LEDs in the strip (1..256). This allocates the "
+            "ESP-IDF led_strip RMT backend and must succeed before calling "
+            "self.port_c.ws2812.set_pixel, set_strip, refresh, or clear. "
+            "Repeated calls with the same led_count are no-ops; a different "
+            "led_count tears down and rebuilds the strip handle. Returns "
+            "{\"available\":true,\"ok\":true,\"led_count\":N} on success or "
+            "{\"available\":false,\"ok\":false,\"led_count\":N,"
+            "\"error\":\"ESP_ERR_...\"} on failure. The strip protocol is "
+            "3.3 V CMOS data on GPIO 17; most modern WS2812B-V5/B2 strips "
+            "tolerate this, while older strict 5 V V_IH variants may need "
+            "an external level shifter.",
+            PropertyList({
+                Property("led_count", kPropertyTypeInteger, 1, PORT_C_WS2812_MAX_LEDS)
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                uint16_t led_count = static_cast<uint16_t>(props["led_count"].value<int>());
+                esp_err_t err = InitPortCWs2812(led_count);
+                bool ok = (err == ESP_OK);
+                cJSON_AddBoolToObject(root, "available", ok);
+                cJSON_AddBoolToObject(root, "ok", ok);
+                cJSON_AddNumberToObject(root, "led_count", led_count);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "port_c.ws2812.init led_count=%u ok=%d",
+                         (unsigned)led_count, ok ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.port_c.ws2812.set_pixel",
+            "Set one LED in the Port C WS2812 strip buffer. Call "
+            "self.port_c.ws2812.init first; until init succeeds this returns "
+            "{\"available\":false,\"ok\":false}. index is 0..255, but the "
+            "effective range is 0..(led_count-1); out-of-range requests "
+            "return ok=false with error=\"index out of range\". r, g, and b "
+            "are 0..255. By default the color is buffered only; pass "
+            "refresh=true to immediately latch it to the strip, or call "
+            "self.port_c.ws2812.refresh after several buffered updates. "
+            "Runtime led_strip failures return ok=false with error. Port C "
+            "outputs 3.3 V CMOS data on GPIO 17; older strict 5 V WS2812 "
+            "variants may require a level shifter.",
+            PropertyList({
+                Property("index", kPropertyTypeInteger, 0, PORT_C_WS2812_MAX_LEDS - 1),
+                Property("r", kPropertyTypeInteger, 0, 255),
+                Property("g", kPropertyTypeInteger, 0, 255),
+                Property("b", kPropertyTypeInteger, 0, 255),
+                Property("refresh", kPropertyTypeBoolean, false)
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", port_c_ws2812_ok_);
+                if (!port_c_ws2812_ok_ || port_c_ws2812_handle_ == nullptr) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error",
+                                            "Port C WS2812 strip not initialized.");
+                    return root;
+                }
+                int index = props["index"].value<int>();
+                if (index >= port_c_ws2812_led_count_) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "index out of range");
+                    ESP_LOGW(TAG, "port_c.ws2812.set_pixel index=%d out of range (led_count=%u)",
+                             index, (unsigned)port_c_ws2812_led_count_);
+                    return root;
+                }
+                uint8_t r = ClampByte(props["r"].value<int>());
+                uint8_t g = ClampByte(props["g"].value<int>());
+                uint8_t b = ClampByte(props["b"].value<int>());
+                bool refresh = props["refresh"].value<bool>();
+                esp_err_t err = led_strip_set_pixel(port_c_ws2812_handle_, index, r, g, b);
+                if (err == ESP_OK && refresh) {
+                    err = led_strip_refresh(port_c_ws2812_handle_);
+                }
+                bool ok = (err == ESP_OK);
+                cJSON_AddBoolToObject(root, "ok", ok);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "port_c.ws2812.set_pixel index=%d rgb=(%u,%u,%u) refresh=%d ok=%d",
+                         index, r, g, b, refresh ? 1 : 0, ok ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.port_c.ws2812.set_strip",
+            "Set multiple LEDs in the Port C WS2812 strip and refresh "
+            "immediately. Call self.port_c.ws2812.init first; until init "
+            "succeeds this returns {\"available\":false,\"ok\":false}. "
+            "colors is a JSON-encoded array of [r,g,b] integer triples, "
+            "for example \"[[255,0,0],[0,255,0],[0,0,255]]\". Entries are "
+            "applied from LED index 0; up to led_count entries are written, "
+            "extras are ignored, and missing trailing entries preserve the "
+            "previous buffered values. The payload is validate-then-write: "
+            "a malformed entry leaves the strip buffer unchanged. This tool "
+            "auto-refreshes and is the preferred path for animation frames. "
+            "Runtime led_strip failures return ok=false with error. Port C "
+            "outputs 3.3 V CMOS data on GPIO 17; older strict 5 V WS2812 "
+            "variants may require a level shifter.",
+            PropertyList({Property("colors", kPropertyTypeString)}),
+            [this](const PropertyList& props) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", port_c_ws2812_ok_);
+                if (!port_c_ws2812_ok_ || port_c_ws2812_handle_ == nullptr) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddNumberToObject(root, "written", 0);
+                    cJSON_AddStringToObject(root, "error",
+                                            "Port C WS2812 strip not initialized.");
+                    return root;
+                }
+
+                std::string json = props["colors"].value<std::string>();
+                cJSON* arr = cJSON_Parse(json.c_str());
+                if (arr == nullptr || !cJSON_IsArray(arr)) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddNumberToObject(root, "written", 0);
+                    cJSON_AddStringToObject(root, "error",
+                                            "colors must be a JSON array of [r,g,b] triples");
+                    if (arr != nullptr) cJSON_Delete(arr);
+                    return root;
+                }
+
+                int n = cJSON_GetArraySize(arr);
+                if (n > port_c_ws2812_led_count_) n = port_c_ws2812_led_count_;
+                std::vector<uint8_t> rgb;
+                rgb.reserve(static_cast<size_t>(n) * 3);
+                bool parse_ok = true;
+                for (int i = 0; i < n; i++) {
+                    cJSON* triple = cJSON_GetArrayItem(arr, i);
+                    if (!cJSON_IsArray(triple) || cJSON_GetArraySize(triple) != 3) {
+                        parse_ok = false;
+                        break;
+                    }
+                    uint8_t r = 0, g = 0, b = 0;
+                    if (!JsonByte(cJSON_GetArrayItem(triple, 0), &r) ||
+                        !JsonByte(cJSON_GetArrayItem(triple, 1), &g) ||
+                        !JsonByte(cJSON_GetArrayItem(triple, 2), &b)) {
+                        parse_ok = false;
+                        break;
+                    }
+                    rgb.push_back(r);
+                    rgb.push_back(g);
+                    rgb.push_back(b);
+                }
+                cJSON_Delete(arr);
+
+                if (!parse_ok) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddNumberToObject(root, "written", 0);
+                    cJSON_AddStringToObject(root, "error",
+                                            "Each entry must be a [r,g,b] triple of integers 0..255");
+                    ESP_LOGW(TAG, "port_c.ws2812.set_strip rejected malformed colors payload");
+                    return root;
+                }
+
+                esp_err_t err = ESP_OK;
+                for (int i = 0; i < n; i++) {
+                    size_t offset = static_cast<size_t>(i) * 3;
+                    err = led_strip_set_pixel(port_c_ws2812_handle_, i,
+                                              rgb[offset + 0],
+                                              rgb[offset + 1],
+                                              rgb[offset + 2]);
+                    if (err != ESP_OK) {
+                        break;
+                    }
+                }
+                if (err == ESP_OK) {
+                    err = led_strip_refresh(port_c_ws2812_handle_);
+                }
+
+                bool ok = (err == ESP_OK);
+                cJSON_AddBoolToObject(root, "ok", ok);
+                cJSON_AddNumberToObject(root, "written", ok ? n : 0);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "port_c.ws2812.set_strip written=%d ok=%d",
+                         ok ? n : 0, ok ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.port_c.ws2812.refresh",
+            "Refresh the Port C WS2812 strip, latching the current buffered "
+            "colors out on CoreS3 HY2.0-4P signal 1 GPIO 17. Call "
+            "self.port_c.ws2812.init first; until init succeeds this returns "
+            "{\"available\":false,\"ok\":false}. Use this after one or more "
+            "self.port_c.ws2812.set_pixel calls made with refresh=false. "
+            "Runtime led_strip failures return ok=false with error. Port C "
+            "outputs 3.3 V CMOS data; older strict 5 V WS2812 variants may "
+            "require a level shifter.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", port_c_ws2812_ok_);
+                if (!port_c_ws2812_ok_ || port_c_ws2812_handle_ == nullptr) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error",
+                                            "Port C WS2812 strip not initialized.");
+                    return root;
+                }
+                esp_err_t err = led_strip_refresh(port_c_ws2812_handle_);
+                bool ok = (err == ESP_OK);
+                cJSON_AddBoolToObject(root, "ok", ok);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "port_c.ws2812.refresh ok=%d", ok ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.port_c.ws2812.clear",
+            "Turn off every LED in the Port C WS2812 strip and refresh "
+            "immediately on CoreS3 HY2.0-4P signal 1 GPIO 17. Call "
+            "self.port_c.ws2812.init first; until init succeeds this returns "
+            "{\"available\":false,\"ok\":false}. This is equivalent to "
+            "self.port_c.ws2812.set_strip with an all-zero array of length "
+            "led_count, and it clears the driver's sticky per-pixel buffer. "
+            "Runtime led_strip failures return ok=false with error. Port C "
+            "outputs 3.3 V CMOS data; older strict 5 V WS2812 variants may "
+            "require a level shifter.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", port_c_ws2812_ok_);
+                if (!port_c_ws2812_ok_ || port_c_ws2812_handle_ == nullptr) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error",
+                                            "Port C WS2812 strip not initialized.");
+                    return root;
+                }
+                esp_err_t err = led_strip_clear(port_c_ws2812_handle_);
+                bool ok = (err == ESP_OK);
+                cJSON_AddBoolToObject(root, "ok", ok);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+                }
+                ESP_LOGI(TAG, "port_c.ws2812.clear ok=%d", ok ? 1 : 0);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.power.set_charge_enabled",
+            "Enable or disable AXP2101 cell battery charging (register "
+            "0x18 bit1, Read-Modify-Write; the fuel gauge enable bit and "
+            "every other bit are preserved). Takes effect immediately "
+            "over I2C and is read back from the PMIC before returning. "
+            "When automatic charge control is enabled, this manual setting "
+            "is temporary and may be overwritten by the startup decision "
+            "or the next approximately 60-second automatic decision. When "
+            "automatic control is disabled at build time, the setting is "
+            "still not persisted to NVS and the compile-time boot default "
+            "(STACKCHAN_DEFAULT_CHARGE_ENABLED) applies on reboot. "
+            "Disabling charging only stops "
+            "current flowing into the cell; it does not cut USB power to "
+            "the system (VBUS keeps powering VSYS through a separate "
+            "path per the AXP2101 datasheet).",
+            PropertyList({Property("enabled", kPropertyTypeBoolean)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                bool enabled = properties["enabled"].value<bool>();
+                pmic_->SetChargeEnabled(enabled);
+                bool actual = pmic_->IsChargeEnabled();
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", actual == enabled);
+                cJSON_AddBoolToObject(root, "charge_enabled", actual);
+                cJSON_AddNumberToObject(root, "reg_0x18", pmic_->GetChargeControlRegister());
+                cJSON_AddStringToObject(root, "takes_effect", "immediate");
+                cJSON_AddStringToObject(root, "persistence", "volatile_resets_on_boot");
+                cJSON_AddBoolToObject(root, "auto_enabled",
+                                      STACKCHAN_CHARGE_AUTO != 0);
+                cJSON_AddBoolToObject(root,
+                                      "manual_may_be_overridden_by_auto",
+                                      STACKCHAN_CHARGE_AUTO != 0);
+                cJSON_AddStringToObject(
+                    root, "automatic_control_note",
+                    (STACKCHAN_CHARGE_AUTO != 0)
+                        ? "Manual setting may be overwritten by the next automatic decision."
+                        : "Automatic charge control is disabled.");
+                ESP_LOGI(TAG, "set_charge_enabled: requested=%d actual=%d",
+                         enabled, actual);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.power.get_charge_state",
+            "Read the current AXP2101 charge-control state. charge_enabled "
+            "and reg_0x18 are a fresh Read of register 0x18 (bit1 = cell "
+            "battery charge enable). charging, discharging, and "
+            "charge_done come from the existing Axp2101 accessors (register "
+            "0x01). battery_level is the fuel-gauge percentage from "
+            "register 0xA4. The response also reports whether automatic "
+            "control is enabled, its inclusive ON/OFF thresholds, and the "
+            "last automatic decision (including threshold-band hold and "
+            "battery-read-failure fail-safe results). Manual charge changes may "
+            "be overwritten by a later automatic decision while auto is "
+            "enabled. Battery voltage/current are intentionally not "
+            "reported because this implementation does not have confirmed "
+            "AXP2101 live-voltage/current ADC readback registers or a "
+            "conversion formula, and this tool intentionally does not add "
+            "a driver for the separate INA226 monitor.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "charge_enabled", pmic_->IsChargeEnabled());
+                cJSON_AddNumberToObject(root, "reg_0x18", pmic_->GetChargeControlRegister());
+                cJSON_AddBoolToObject(root, "charging", pmic_->IsCharging());
+                cJSON_AddBoolToObject(root, "discharging", pmic_->IsDischarging());
+                cJSON_AddBoolToObject(root, "charge_done", pmic_->IsChargingDone());
+                int battery_level = -1;
+                bool battery_level_available =
+                    ReadBatteryLevel(&battery_level);
+                cJSON_AddNumberToObject(root, "battery_level", battery_level);
+                cJSON_AddBoolToObject(root, "battery_level_available",
+                                      battery_level_available);
+                cJSON_AddBoolToObject(root, "auto_enabled",
+                                      STACKCHAN_CHARGE_AUTO != 0);
+                cJSON_AddNumberToObject(root, "auto_on_below",
+                                        STACKCHAN_CHARGE_ON_BELOW);
+                cJSON_AddNumberToObject(root, "auto_off_above",
+                                        STACKCHAN_CHARGE_OFF_ABOVE);
+                cJSON_AddNumberToObject(root, "auto_interval_seconds", 60);
+                ChargeAutoDecision last_decision =
+                    last_charge_auto_decision_.load(
+                        std::memory_order_acquire);
+                cJSON_AddStringToObject(
+                    root, "last_auto_decision",
+                    ChargeAutoDecisionName(last_decision));
+                cJSON_AddNumberToObject(
+                    root, "last_auto_battery_level",
+                    last_charge_auto_battery_level_.load(
+                        std::memory_order_relaxed));
+                cJSON_AddBoolToObject(root,
+                                      "manual_may_be_overridden_by_auto",
+                                      STACKCHAN_CHARGE_AUTO != 0);
+                return root;
+            });
+
         ESP_LOGI(TAG, "StackChan MCP tools registered");
     }
 
@@ -6117,8 +7740,10 @@ public:
         InitializeCamera();
         InitializeFt6336TouchPad();
         GetBacklight()->RestoreBrightness();
+        InitializeScreenOffTimer();
         InitializeIOExpander();
         InitializeServo();
+        InitializeTouchSettings();
         InitializeSi12tTouch();
         I2cDetect();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
@@ -6152,6 +7777,13 @@ public:
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
+        level = -1;
+        bool level_available = ReadBatteryLevel(&level);
+        MaybeApplyAutomaticChargePolicy(level, level_available);
+        if (!level_available) {
+            return false;
+        }
+
         static bool last_discharging = false;
         charging = pmic_->IsCharging();
         discharging = pmic_->IsDischarging();
@@ -6160,7 +7792,6 @@ public:
             last_discharging = discharging;
         }
 
-        level = pmic_->GetBatteryLevel();
         return true;
     }
 
@@ -6169,6 +7800,11 @@ public:
             power_save_timer_->WakeUp();
         }
         WifiBoard::SetPowerSaveLevel(level);
+    }
+
+    virtual void OnUserActivity() override {
+        power_save_timer_->WakeUp();
+        HandleScreenActivity();
     }
 
     // Phase 4 audio (Issue #76): drive avatar mouth animation alongside TTS

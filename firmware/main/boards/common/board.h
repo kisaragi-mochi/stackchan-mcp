@@ -89,6 +89,12 @@ public:
     virtual void OnTtsStart() {}
     virtual void OnTtsStop() {}
 
+    // User-initiated activity hook. The default is intentionally a no-op so
+    // boards without an independent screen-idle policy keep their existing
+    // behaviour. StackChan uses this common hook from touch, voice-session,
+    // and MCP dispatch paths to wake and re-arm its screen-off timer.
+    virtual void OnUserActivity() {}
+
     // Phase 4.5 avatar (saiverse-stackchan-addon): dynamic avatar set fetch
     // notification dispatched from Application::OnIncomingJson. The cJSON
     // object carries url / token / mode / checksum / expected_size fields

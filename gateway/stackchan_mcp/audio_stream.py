@@ -23,7 +23,9 @@ should move onto the connection object.
 
 from __future__ import annotations
 
+import inspect
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
@@ -38,10 +40,19 @@ logger = logging.getLogger(__name__)
 # ``listen_lock``; this module only owns the buffer itself.
 
 _recording_session_id: str | None = None
+_recording_owner: str | None = None
 _recording_frames: list[bytes] = []
+_recording_frame_hook: Callable[[bytes], Awaitable[None] | None] | None = None
+_recording_buffer_frames = True
 
 
-def start_recording(session_id: str) -> None:
+def start_recording(
+    session_id: str,
+    *,
+    owner: str = "listen",
+    frame_hook: Callable[[bytes], Awaitable[None] | None] | None = None,
+    buffer_frames: bool = True,
+) -> None:
     """Open a fresh recording slot for ``session_id``.
 
     Any frames already buffered are discarded so a previous call that
@@ -49,19 +60,24 @@ def start_recording(session_id: str) -> None:
     capture. The orchestrator wraps start/stop in a try/finally to
     guarantee the slot is closed even on error.
     """
-    global _recording_session_id, _recording_frames
+    global _recording_session_id, _recording_owner
+    global _recording_frames, _recording_frame_hook, _recording_buffer_frames
     if _recording_session_id is not None:
         # Defensive: the lock should prevent this, but if it ever
         # fires we leak no audio — just log loudly so the regression
         # is visible.
         logger.warning(
-            "start_recording called while session=%s was still active; "
-            "dropping %d buffered frames",
+            "start_recording called while owner=%s session=%s was still "
+            "active; dropping %d buffered frames",
+            _recording_owner,
             _recording_session_id,
             len(_recording_frames),
         )
     _recording_session_id = session_id
+    _recording_owner = owner
     _recording_frames = []
+    _recording_frame_hook = frame_hook
+    _recording_buffer_frames = buffer_frames
 
 
 def stop_recording() -> list[bytes]:
@@ -71,16 +87,32 @@ def stop_recording() -> list[bytes]:
     cleared whether or not frames were captured so the next call to
     :func:`start_recording` starts clean.
     """
-    global _recording_session_id, _recording_frames
+    global _recording_session_id, _recording_owner
+    global _recording_frames, _recording_frame_hook, _recording_buffer_frames
     frames = _recording_frames
     _recording_session_id = None
+    _recording_owner = None
     _recording_frames = []
+    _recording_frame_hook = None
+    _recording_buffer_frames = True
     return frames
+
+
+def stop_recording_if_owner(owner: str) -> list[bytes]:
+    """Close the recording slot only if it is held by ``owner``."""
+    if _recording_owner != owner:
+        return []
+    return stop_recording()
 
 
 def is_recording() -> bool:
     """Return ``True`` when a recording slot is currently open."""
     return _recording_session_id is not None
+
+
+def recording_owner() -> str | None:
+    """Return the owner label for the active recording slot, if any."""
+    return _recording_owner
 
 
 def is_recording_session(session_id: str) -> bool:
@@ -135,11 +167,21 @@ async def handle_audio_frame(data: bytes, session_id: str) -> None:
             _recording_session_id,
         )
         return
-    _recording_frames.append(data)
+    if _recording_buffer_frames:
+        _recording_frames.append(data)
+    if _recording_frame_hook is not None:
+        try:
+            result = _recording_frame_hook(data)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("audio frame hook failed: %s", exc)
+    action = "buffered" if _recording_buffer_frames else "delivered"
     logger.debug(
-        "audio_frame session=%s bytes=%d buffered (recording active)",
+        "audio_frame session=%s bytes=%d %s (recording active)",
         session_id,
         len(data),
+        action,
     )
 
 

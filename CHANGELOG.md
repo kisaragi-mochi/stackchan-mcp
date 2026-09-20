@@ -30,15 +30,386 @@ documented-only.
 
 ## [Unreleased]
 
+### Docs
+
+- Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
+  frame-geometry consistency, full-frame exports from layered sources,
+  the avatar-set fetch window, and blink cadence tuning.
+
+### Gateway
+
+- Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
+  alongside Irodori: official REST API with `eleven_v3` as the default
+  model, per-speaker voice ids via `STACKCHAN_ELEVEN_VOICE_<SPEAKER>`
+  environment variables, and MP3 decoding through the decoder path shared
+  with Irodori. The API key is read from the environment only and is never
+  persisted or logged. (#372)
+- `take_photo` now returns the captured JPEG as an inline `image/jpeg`
+  MCP content block alongside the unchanged text receipt, so LLM clients
+  see the frame directly instead of only a file path. Inlining is limited
+  to JPEGs inside the capture directory and at most 200 KB; any failure
+  degrades to the original text-only receipt. (#373)
+- `get_status` now reports the WebSocket `session_id` alongside the
+  connection flags. The id changes on every (re)connection, so a polling
+  host can detect a device reboot even when the reconnect lands between
+  polls and `connected` never reads false.
+- Dispatch `set_off_timeout` / `get_off_timeout` MCP calls through to the
+  device's `self.screen.set_off_timeout` / `self.screen.get_off_timeout`
+  tools, so the new firmware screen-off timeout is reachable over the
+  gateway.
+
 ### Firmware
 
-- Added: active firmware-side WebSocket keepalive that detects silent
+- Added an active firmware-side WebSocket keepalive that detects silent
   network breaks and triggers the existing reconnect path. A periodic
   Ping (every 15 s) probes the connection; the Pong response refreshes
-  a liveness timestamp via the new `WebSocket::OnPong` callback
-  (esp-ml307 #49). If no frame of any kind arrives within 60 s, the
-  connection is considered dead and a graceful reconnect is forced —
-  no device reboot required. Closes #239.
+  a liveness timestamp via `WebSocket::OnPong` (esp-ml307 #49). If no
+  frame arrives within 60 s, the connection is considered dead and a
+  graceful reconnect is forced without a device reboot. (#239)
+- Added a persistent StackChan screen-off timeout (300 seconds by default,
+  `0` to disable) with touch, voice-session (including gateway `say`), avatar,
+  emotion, and MCP wake paths. Activity resets both screen-off and system
+  power-save deadlines. Includes `self.screen.set_off_timeout` /
+  `self.screen.get_off_timeout` controls.
+- Added opt-in, compile-time configurable AXP2101 charge hysteresis for StackChan. The feature is disabled by default; when enabled, startup first allows charging, protection disables it at 70% or above, and charging resumes at 30% or below. An unreadable fuel gauge fails safe to charging enabled. `self.power.set_charge_enabled` and `self.power.get_charge_state` provide manual control and state inspection.
+
+## [0.17.0] - 2026-07-12
+
+### Gateway
+
+- Added runtime-adjustable beat-mode onset sensitivity for venue tuning; the
+  default maps to the real-device verified 0.004 RMS floor, and metadata
+  snapshots report both the selected sensitivity and effective floor. (#301)
+- Added gateway-only beat mode MCP tools for continuous ambient audio capture
+  through the existing `listen` wire path, dependency-free BPM estimation,
+  beat-synced head sway/base-ring LED flashes, polling metadata snapshots, and
+  WAV clip export from a bounded rolling buffer. (#301)
+- Beat mode now requests the raw `listen` capture profile so ambient music
+  reaches the gateway without device-side speech AFE suppression. (#349)
+- Lowered the beat tracker's minimum onset RMS floor (0.025 → 0.004 full
+  scale) to match real-device microphone levels; onset detection now works
+  against actual ambient music (verified on device). The adaptive threshold
+  continues to prevent false onsets in quiet rooms. (#301)
+
+## [firmware-v1.16.0] - 2026-07-12
+
+### Firmware
+
+- Added an optional inbound `listen.profile` field with `voice` (default) and
+  `raw` modes; raw streams pre-AFE microphone PCM through the existing Opus
+  audio path for beat analysis. (#349)
+
+## [0.16.0] - 2026-07-11
+
+### Gateway
+
+- Added a `color_order` option (`grb` default, `rgb`) for Port B/C WS2812
+  gateway tools and `stackchan_follow_led_stream`, allowing RGB-wired LEDs to
+  render correct colors by swapping R/G in the gateway before relay. (#343)
+- Added `stackchan_follow_led_stream`, a gateway-side WebSocket LED-frame
+  subscriber for driving the base ring or a Port B WS2812 strip from external
+  `event` / `continuous` color frames. (#335)
+- Log ESP32 WebSocket disconnect close codes, reasons, close class, last-frame
+  age, and connection lifetime, and make the gateway keepalive policy explicit.
+  (#338)
+- Exposed the Port C WS2812 device tools and added `port_c` as a
+  `stackchan_follow_led_stream` target. (#340)
+
+## [firmware-v1.15.0] - 2026-07-11
+
+### Firmware
+
+- Added `self.port_c.ws2812.{init,set_pixel,set_strip,refresh,clear}` for a
+  WS2812-compatible strip on Grove Port C signal 1 (GPIO 17). (#340)
+
+## [0.15.0] - 2026-07-09
+
+### Gateway
+
+- Re-dispatch the emoji-selected avatar face after successful speech playback,
+  so emoji+text `say` calls keep the expression visible after lip-sync stops.
+  (#296)
+
+## [firmware-v1.14.0] - 2026-07-09
+
+### Firmware
+
+- Added a small on-screen listening indicator on the stack-chan LCD while STT
+  capture is active. (#332)
+
+## [firmware-v1.13.1] - 2026-07-06
+
+### Firmware
+
+- Fixed server-driven listen activation on an already connected WebSocket to arm
+  the logical audio session in place instead of rebuilding the transport, so the
+  gateway capture window remains bound to the live connection. (#328)
+
+## [0.14.0] - 2026-07-03
+
+### Gateway
+
+- Auto-render the idle avatar after a new ESP32 device session finishes
+  initialization and tool discovery, unless `set_avatar` was already sent
+  on that connection. (#77)
+- Fail in-flight `load_avatar_set` calls with `disconnected` immediately
+  when the ESP32 connection drops, instead of waiting for the avatar
+  load timeout. (#228)
+- Scoped the gateway ownership lock per WS port (`owner-<ws_port>.lock`
+  instead of the machine-global `owner.lock`), so one gateway per device
+  can run on separate WS ports on the same host without the second
+  gateway being rejected at startup. Single-instance use is unaffected
+  (the default lock is simply named `owner-8765.lock`) and a duplicate
+  start on the same port is still rejected; `--check` reads the per-port
+  lock. (#320)
+- Fixed `/capture` rejecting photo uploads with HTTP 413 on aiohttp >= 3.14.
+  The capture app raised the per-request body cap with `client_max_size=0`
+  (so `/pcm` can stream long PCM), but aiohttp's multipart reader treats `0`
+  as a zero-byte limit — unlike `request.read()`/`.post()` — so every upload
+  carrying a non-empty `question` field was rejected with 413. Use a large
+  finite `client_max_size` instead; `/capture`'s real limit stays the explicit
+  per-route byte cap.
+- Hardened `/capture` to tolerate a non-UTF-8 `question` field (decode with
+  `errors="replace"`) instead of failing the upload with HTTP 500.
+
+## [0.13.0] - 2026-07-02
+
+### Gateway
+
+- Added optional user-local `user-defaults.toml` support for gateway-side
+  MCP argument defaults, starting with `stackchan_follow_pose_stream`. Explicit
+  MCP call arguments still take precedence, while absent, empty, or invalid
+  config files fall back to schema defaults. (#311)
+- Added `set_touch_sensor_enabled` and `get_touch_sensor_enabled` MCP
+  wrappers for the firmware head-touch enable flag. (#312)
+- `stackchan_follow_pose_stream` now exposes `smoothing_window` as an
+  MCP tool argument (integer, default 5, range 1..20; 1 = passthrough).
+  Callers whose upstream pose source already applies smoothing can
+  disable the redundant gateway-side moving average. Omitting the
+  argument preserves the previous behaviour. (#309)
+- Lowered `stackchan_follow_pose_stream.downsample_hz` schema maximum
+  from 60 to 20 to match the SCS0009 servo's observed sustained
+  `WritePos` rate. Continuous command rates above ~20 Hz triggered
+  UART hangs during real-device dogfood. **BREAKING**: callers that
+  previously set values above 20 will now be rejected with
+  "downsample_hz must be a number in (0, 20]". The schema default
+  (20) is unchanged, so calls that omit the argument behave the
+  same. (#315)
+- Added `edge-tts` TTS engine — a subprocess-based engine using
+  Microsoft's Edge TTS CLI and ffmpeg, registered as `edge-tts`.
+  Provides natural English and multilingual voices (`voicevox` is
+  Japanese-only by default). Setup: install `edge-tts` CLI on PATH
+  (e.g. `pip install edge-tts`) plus `ffmpeg`. Default voice is
+  `en-GB-SoniaNeural`, overridable per-call via the new
+  `say(speaker_name=...)` argument (added to the say() schema as a
+  string field, distinct from `speaker_id` integer and the `voice`
+  engine selector) or globally via the `STACKCHAN_EDGE_TTS_DEFAULT_VOICE`
+  env var. (#317)
+- Exposed the optional Port A I2C `scl_speed_hz` argument in the gateway
+  schemas for `i2c_read`, `i2c_write`, and `i2c_write_read`, matching the
+  firmware-side 100000..1000000 Hz range so schema-driven MCP clients can
+  discover slower per-transaction I2C clocks. Behaviour is unchanged when
+  omitted. (#321)
+
+## [firmware-v1.13.0] - 2026-07-02
+
+### Firmware
+
+- Added an optional `scl_speed_hz` property (default `400000`, range
+  `100000`–`1000000`) to the Port A I2C tools `self.i2c.read`,
+  `self.i2c.write`, and `self.i2c.write_read`, applied to the per-call
+  `i2c_master_bus_add_device` config. This lets slow Units that cannot
+  sustain the hardcoded 400 kHz clock be driven without recompiling the
+  firmware (e.g. the RCWL-9620 ultrasonic ranger, which ACKs a probe but
+  fails the transfer with `ESP_ERR_INVALID_STATE` at 400 kHz and only
+  reads stably at 100 kHz). Behaviour is unchanged when the property is
+  omitted. (#319)
+- Added the NVS-backed `touch.enabled` field, handler guards, and
+  `self.robot.set_touch_sensor_enabled` /
+  `self.robot.get_touch_sensor_enabled` MCP tools so users can disable
+  head-touch detection while stopping both local reactions and
+  `stackchan/event` emission. (#312)
+
+## [0.12.0] - 2026-06-20
+
+### Gateway
+
+- Added `stackchan_follow_pose_stream` MCP tool. Subscribes to an
+  arbitrary external WebSocket pose-stream and drives the
+  Stack-chan head to follow incoming yaw/pitch frames 1:1 within
+  the SCS0009 working range (yaw ±90°, pitch 5..85°), with
+  downsampling, moving-average smoothing, per-axis flip,
+  angular-velocity clamping, initial-pose seeding from the device
+  on connect, and WebSocket reconnect with exponential backoff.
+  `action` switches between `start` / `stop` / `status`. The
+  upstream server's protocol (zero-offset commands, source
+  dispatching, transport) is intentionally outside this gateway's
+  scope. Lifecycle operations remain callable while the ESP32 is
+  disconnected (HTTP transport `BYPASS_TOOLS` allow-list entry).
+  (#304)
+- `stackchan_follow_pose_stream` now toggles ESP32 WiFi power-save
+  to `none` while a stream is active and restores the previously
+  observed mode (or `min_modem` as a fallback) on stop. This
+  eliminates the ~800 ms TCP send jitter caused by the IEEE 802.11
+  DTIM beacon cycle when `set_head_angles` is dispatched in tight
+  loops. Real-device verification confirmed round-trip drops from
+  a bimodal 20 ms / 800-1100 ms distribution down to a steady
+  15-100 ms band, and the sustained command rate rises from
+  4-10 Hz up to the spec'd 20+ Hz cap. Outcome is surfaced via
+  the tool's `status` response under `wifi_ps_apply_result` /
+  `wifi_ps_restore_result`. Failures are tolerated and never block
+  start / stop. (#304)
+- `start_follow` / `stop_follow` lifecycle ops are now serialised
+  with a module `asyncio.Lock`; `start_follow` also holds a local
+  reference to the follower it created so a racing stop cannot
+  make the final `status()` call dereference `None`.
+  `get_follow_status` remains lock-free (snapshot read). This
+  resolves #305 in line with the design tracked there.
+- `stackchan_follow_pose_stream` retries the start-time WiFi PS
+  apply on the in-stream and connect-time seed paths when the
+  device was disconnected at start, and invalidates the cached
+  seed + WiFi PS state when `set_head_angles` reports a
+  device-disconnect error so the next reachable frame re-seeds
+  from the live head pose before issuing a command. Hardening for
+  the related clean ESP32 mid-stream reboot case is tracked
+  separately in #307. (#304)
+
+## [firmware-v1.12.0] - 2026-06-20
+
+### Firmware
+
+- Added `self.wifi.set_power_save({mode})` MCP tool on the
+  stackchan board. Wraps `esp_wifi_set_ps` / `esp_wifi_get_ps`
+  with a string-keyed enum (`none` / `min_modem` / `max_modem`)
+  and returns `{ok, previous, current}` so the gateway can toggle
+  ESP32 WiFi power-save at runtime. Used by
+  `stackchan_follow_pose_stream` to disable modem sleep while a
+  pose-stream subscription is active. (#304)
+
+## [0.11.0] - 2026-06-13
+
+### Gateway
+
+- Added `gateway_config_get` and `gateway_config_set` MCP wrappers for the
+  firmware runtime WebSocket gateway configuration tools. (#292)
+- Added gateway-side MCP wrappers for
+  `self.port_b.ws2812.{init,set_pixel,set_strip,refresh,clear}`, forwarding
+  Port B (GPIO 9) WS2812 calls to firmware and JSON-encoding
+  `set_strip.colors` for the device MCP property layer. (#224)
+- Add emoji-driven expression handling to `say`: a supported emoji
+  switches the avatar face in the same MCP call, Irodori receives emoji
+  verbatim for voice style, and non-emoji-aware engines strip emoji before
+  synthesis. Emoji-only text changes the face and reports speech skipped
+  after stripping. (#289)
+- Add the Irodori TTS engine as a second selectable synthesis engine
+  alongside VOICEVOX. It calls an external MP3 synthesis service (decoded
+  to PCM via the new `tts-irodori` extra) and reuses the existing
+  `say` → Opus → WebSocket pipeline. The endpoint and optional API key
+  are read from the environment only (`STACKCHAN_IRODORI_URL` is required,
+  no default), and a new `STACKCHAN_TTS_ENGINE` variable can change the
+  default engine; VOICEVOX stays the default when it is unset. (#286)
+- Harden ownership lock stale detection by recording and verifying the
+  owning process start time, preventing recycled PIDs from being treated
+  as the original live gateway. (#253)
+
+## [firmware-v1.11.0] - 2026-06-13
+
+### Firmware
+
+- Added `self.gateway_config.get` and `self.gateway_config.set` MCP tools for
+  reading and updating the NVS-backed WebSocket gateway URL, fallback URL, and
+  token presence at runtime without exposing the token value. (#292)
+- Added standalone CMake host-test infrastructure for firmware pure C++ helpers,
+  covering mDNS gateway candidate extraction edge cases. (#279)
+- Clamp positive `speed_dps` values below 15 dps to the step-safe floor in
+  `WriteHeadAngles`, avoiding sub-step servo interpolation while preserving the
+  existing slow-motion preset behavior. (#252)
+
+## [0.10.0] - 2026-06-09
+
+### Gateway
+
+- Add periodic IP-change detection to the mDNS advertiser; the gateway now
+  re-registers its mDNS service automatically when the host's primary IPv4
+  changes (DHCP lease renewal, Wi-Fi switch, sleep/wake, dock/undock).
+  Recovery latency is bounded by approximately `2 × refresh_interval` (one
+  polling interval to observe the address change, plus one debounce-confirm
+  interval before re-registering; default 30 s → worst case ~60 s).
+  Pair with Firmware v1.10.0+ for automatic device-side recovery — earlier
+  firmware versions may still get stuck on the stale mDNS instance until
+  manual reboot. (#277)
+
+### Examples
+
+- Added `examples/cloudflare-relay/` — optional Cloudflare Workers
+  relay example for reaching the gateway from outside the local LAN.
+  Includes a WebSocket proxy Worker with constant-time Bearer token
+  authentication, deployment instructions, and a shared-secret
+  rotation guide. The Worker uses only generally-available Cloudflare
+  primitives (Workers WS API, Cloudflare Tunnel public hostnames).
+
+## [firmware-v1.10.0] - 2026-06-09
+
+### Firmware
+
+- mDNS gateway discovery now considers all supported `_stackchan-mcp._tcp.local.`
+  service instances in one browse, not only the first. Combined with Gateway
+  v0.10.0+ mDNS IP refresh, the device recovers automatically from a gateway
+  host-IP change even while a stale mDNS instance is still in the cache. The
+  existing `websocket_protocol.cc` per-candidate fallback (5→30 s reconnect
+  backoff) handles the additional candidates. (#277)
+
+## [0.9.1] - 2026-06-08
+
+### Gateway
+
+- Restored: Windows `win_amd64` wheel build (bundled native
+  `libopus`) by retiring the byte-identical SHA256 guard against the
+  pinned `EXPECTED_OPUS_DLL_SHA256` (which had become non-matchable
+  under the `windows-latest` → `windows-2025-vs2026` runner-image
+  transition — MSVC under the new image embeds non-deterministic
+  build info, so the produced `opus.dll` differs across runs). The
+  publish gate is now the functional smoke test in the publish job
+  (load `opus.dll` via `opuslib` and run an Opus encode round-trip
+  on a real Windows runner). The `VCPKG_PIN` (the reviewed vcpkg
+  release tag) still locks the supply chain to a known port. Pairs
+  with reverting the v0.9.0 hotfix
+  ([PR #274](https://github.com/kisaragi-mochi/stackchan-mcp/pull/274))
+  that temporarily disabled the `build-windows-wheel` job and
+  removed it from the publish job's `needs`.
+
+## [firmware-v1.9.0] - 2026-06-08
+
+### Firmware
+
+- Added: `Application::SendStackChanEvent(...)` and appended touch-event
+  emission after the existing Si12T tap / stroke local reaction flow so
+  connected gateways can receive additive `stackchan-event` WebSocket
+  frames. (#260)
+
+- Added `WriteHeadAngles(yaw, pitch, speed_dps)` overload for speed-based motion control on the user-driven `move_head` path. Existing duration-based overload preserved; boot-init path unchanged in this PR. Adds `MAX_SPEED_DPS=240` (SCS0009 datasheet ceiling) safety clamp and `MIN_SMOOTH_SPEED_DPS=72` documented smoothness floor (sub-floor speeds are permitted with an `ESP_LOGW` warning so the gateway `"low"` preset can deliver deliberately slow motion). (#129)
+
+- Add `kUncertain` state to `TorqueState`: an `EnableTorque(OFF)` (or
+  `ON`) attempt that loses its ACK no longer publishes `kEngaged` from
+  cached state. Subsequent motion or manual `set_servo_torque(...)`
+  calls now issue a real bus frame instead of short-circuiting on stale
+  state, guaranteeing forward progress without requiring a PMIC OFF/ON
+  cycle. The `kUncertain` publish itself is guarded by a
+  `compare_exchange` against a pre-bus state observation, so a
+  concurrent `MarkReleasing()` is not erased. The
+  `MaybeAutoReleaseTorque()` guard treats `kUncertain` as engaged so
+  the #168 Phase 4 cumulative-WritePos mitigation continues to retry
+  the OFF after an ACK loss rather than stranding torque physically
+  ON; the retry short-circuits via the idempotent path if the OFF was
+  actually delivered. Closes the Phase 4 ACK-loss trade-off carved
+  out from #168. (#170)
+
+- Changed: split `set_servo_torque` MCP response field `short_circuited` into orthogonal `idempotent_short_circuit` and `wait_exhausted` flags to distinguish degraded-bus wait-budget exhaustion (where no `EnableTorque` bus frame went out) from idempotent no-op success (where state already matched the request). The `ok` field now correctly returns `false` on wait-exhaustion. **Breaking change** for callers reading the old `short_circuited` field directly. (#171)
+
+- Fixed: empty WebSocket gateway discovery results now fall through to the shared reconnect failure path, clearing the intentional-close latch so retries continue after a gateway restart.
+
+- Fixed: post-handshake WebSocket disconnects re-arm the existing reconnect timer without double-advancing backoff.
+
 - Changed: the device no longer auto-enters Listening after a TTS
   utterance ends. The `Application::OnIncomingJson` handler for the
   `tts.stop` event used to fall through to
@@ -247,7 +618,216 @@ documented-only.
   to ease real slow-AP debugging. Contributed via
   [PR #186](https://github.com/kisaragi-mochi/stackchan-mcp/pull/186).
 
+- mDNS browse reliability fixes (Issue #245):
+  - Raise the caller-side `DiscoverStackchanGateway` timeout from 1500ms to 5000ms to accommodate typical Wi-Fi multicast round trips
+  - Add a 3-attempt in-call retry loop with a 200ms gap around `mdns_query_ptr` to mitigate single-packet multicast drops
+  - Disable Wi-Fi power-save (`esp_wifi_set_ps(WIFI_PS_NONE)`) around the browse window and restore the previous mode after the browse completes, to reduce multicast frame loss while the STA is otherwise in `LOW_POWER (MAX_MODEM)`
+  - Boot-time passive browse pre-warm (Issue #245 Step C) is deferred for evaluation after Steps A/B/D have been verified in the field
+
+## [0.9.0] - 2026-06-08
+
 ### Gateway
+
+- Changed: restructured the README EN/JP `Optional: enable event
+  notifications` section as a tri-channel guide. Each of `channels`,
+  `jsonl`, and `legacy_event` now has its own subsection with the
+  `notify.yml` enable block, a delivered payload example, and the
+  intended use case. The supported event subtypes are listed in a
+  structure that allows additional `touch` subtypes or new
+  top-level types to be appended without rewriting the section.
+  (#268)
+
+- Fixed: align the `stdio_server.py` `InitializationOptions.server_name`
+  and `StackChanServer` constructor argument from the legacy
+  `stackchan-mcp` string to the canonical `stackchanmcp` (no hyphen)
+  introduced in PR #266 (#265). Without this rename the host MCP
+  client logs `Channel notifications skipped: server stackchan-mcp
+  not in --channels list for this session` and the Channels delivery
+  path is blocked end-to-end. The `STACKCHAN_CHANNEL_INSTRUCTIONS`
+  prompt example tag is also synced to the on-the-wire form
+  `<channel source="plugin:stackchanmcp:stackchanmcp" ...>`, and the
+  README EN/JP `Optional: enable event notifications` section is
+  rewritten to match the post-PR-#266 reality:
+  `plugin:stackchanmcp@kisaragi-mochi-channels` as the canonical
+  `--channels` form, a Plugin installation step using
+  `claude plugin install`, a Host environment setup step covering
+  `.mcp.json` `mcpServers` key alignment, `settings.local.json`
+  `enabledMcpjsonServers` whitelist, and the system-wide
+  `/Library/Application Support/ClaudeCode/managed-settings.json`
+  `allowedChannelPlugins` entry, the
+  `--dangerously-load-development-channels` requirement noted as
+  currently required (approved-allowlist-only without this flag has
+  been verified not to deliver notifications), and a Migration
+  section listing the rename targets for users on the older
+  `stackchan-mcp` (hyphenated) server-name form. (#271)
+
+- Changed: rephrased the default notification message templates from
+  mechanical event-name labels (`(head pat)` / `(head stroke,
+  {duration_ms}ms)`) to experiential English (`head was tapped` / `head
+  was stroked for {duration_ms}ms`) so the receiving LLM agent reads
+  them as first-person narration. `notify.example.yml` now demonstrates
+  the override surface with a casual-tone example instead of mirroring
+  the defaults, and both README.md and README.ja.md gain a "Customizing
+  event message wording" subsection documenting the experiential framing
+  intent, the override mechanism, and a worked example. Existing
+  `action` values (`head_pat` / `head_stroke`) are kept stable for
+  downstream consumers. `test_event_dispatch.py` content expectations
+  now reference `DEFAULT_MESSAGE_TEMPLATES[("touch", "tap")].template`
+  directly, decoupling dispatch-path tests from future wording edits.
+  (#270)
+
+- BREAKING: gateway event emission paths now default to all OFF instead of
+  legacy `stackchan/event` notifications plus JSONL logging. Added three
+  independent opt-in switches (`legacy_event`, `channels`, `jsonl`) via
+  `~/.config/stackchan-mcp/notify.yml`, plus an additive `action` field in
+  event payloads for the human-axis avatar action. To restore the previous
+  behavior, create:
+
+  ```yaml
+  legacy_event:
+    enabled: true
+  jsonl:
+    enabled: true
+    path: ~/.claude/stackchan-events.jsonl
+  ```
+
+  README now documents the host-side receiver setup required to consume
+  the Channels path: load this repository as a Claude Code plugin via
+  `claude --plugin-dir <repo-checkout>` so Claude Code subscribes to the
+  advertised `claude/channel` capability. Marketplace publication is
+  tracked as a follow-up. The JSONL fallback remains for hosts without
+  a Channels receiver.
+
+  The Channels notification instructions now use `source="stackchan-mcp"`
+  to match the plugin / MCP server identifier (Claude Code derives the
+  channel source from the loaded plugin name, not from notification
+  params). README EN/JP also document that pre-plugin `~/.claude.json`
+  wiring does not receive `<channel ...>` injections, that switching
+  paths requires releasing the existing ESP32 ownership lock, and that
+  `legacy_event` / `jsonl` remain compatible for users who keep the
+  pre-plugin wiring.
+
+  The README startup command for the Channels path now includes the
+  required `--channels server:stackchan-mcp` argument (loading the plugin via
+  `--plugin-dir` alone is insufficient: Claude Code only attaches a
+  channel source and injects `<channel source="stackchan-mcp" ...>`
+  blocks when the server is explicitly registered in the session's
+  channels list). When allowlist restrictions block development
+  servers, the documented fallback is
+  `--dangerously-load-development-channels server:stackchan-mcp`. (#266)
+
+- Added: `stackchan/event` experimental MCP capability and server-initiated
+  notification bridge for firmware-originated touch events (`tap` /
+  `stroke`) forwarded from additive `stackchan-event` WebSocket frames.
+  Pinned the `mcp` runtime dependency to `>=1.27,<2.0` and added a
+  startup compatibility guard for the private SDK members the bridge
+  depends on (`Server._experimental_handlers` /
+  `Server._handle_message`) so any incompatible future SDK shape fails
+  fast with a clear error instead of silent breakage. (#260)
+
+- Added: JSONL event log helper that appends each validated
+  `stackchan-event` frame to `~/.claude/stackchan-events.jsonl`
+  (override via `STACKCHAN_EVENTS_PATH`) so MCP client hooks can pick
+  events up between the firmware reaction and the next conversational
+  turn. Entries older than 7 days are pruned exactly once on gateway
+  startup via an atomic rename. Persistence failures are logged and
+  swallowed; the MCP notification path remains the primary delivery
+  channel for capability-aware clients. (#260 follow-up)
+
+- Added: function-dark #178 Phase B chunk 1 command queue module with an
+  environment-configurable bounded FIFO, correlation metadata for response
+  routing, a single-flight dispatcher loop, and a standardized queue-full
+  error payload helper.
+
+- Added: #178 Phase B chunk 2 ownership lock diagnostics metadata
+  (`mode`, `http_endpoint`, `started_by`) while preserving #177-format
+  stdio lock files and existing-format `--check` output.
+
+- Added: #178 Phase B chunk 3 `stackchan-mcp serve` CLI with permanent
+  `--transport stdio` compatibility and a Streamable HTTP daemon
+  placeholder that releases ownership before the chunk 4 wiring lands.
+
+- feat(gateway): Streamable HTTP daemon transport with bounded command
+  queue and saturation backpressure. (#178)
+
+- docs(gateway): daemon setup and Phase B migration notes. (#178)
+
+- Fixed: mDNS advertise list now drops interface IPs that equal their
+  subnet's network address. Previously such an address slipped past the
+  existing network/broadcast filter when it appeared in the prefix-less
+  socket source, causing zeroconf to crash with `EADDRNOTAVAIL` and
+  hang gateway startup in `async_wait_for_start`. The IPv4 enumerator
+  now adopts the ifaddr prefix for matching socket-source addresses,
+  and `AsyncZeroconf` is constrained to the advertised IPv4 set via
+  `interfaces=`. (#267)
+
+- Fixed: #178 Phase B stage 3 HTTP daemon — cancel-safe queue dispatch
+  drops items for cancelled HTTP requests before ESP32 dispatch and
+  drains pending items on lifespan shutdown with a JSON-RPC
+  server-shutdown error. Narrowed unauthenticated `/healthz` to a
+  liveness-only payload and moved device, queue, and owner detail to
+  the authenticated `/status` endpoint (now includes `owner_id`).
+  (#178)
+
+- Fixed: #178 Phase B chunk 2+3 ownership lock cleanup safety. The
+  streamable-http `serve` placeholder now guards its `finally` cleanup with
+  an `acquired` flag so an `OwnershipError` raised by an existing owner is
+  not followed by an erroneous `release_lock()` that would unlink the
+  existing owner's lock file. The shared `_acquire_startup_lock` helper
+  now wraps the post-claim ack-print plus `atexit.register` step in a
+  `try/except BaseException` that releases the just-claimed lock and
+  re-raises, so a stderr-write failure (or any other intermediate failure
+  between `acquire_lock` returning and the caller's own `try/finally`)
+  cannot strand a live-pid lock — this safety now covers both the stdio
+  gateway path and the streamable-http placeholder. `acquire_lock` itself
+  also now rejects `http_endpoint` and `started_by` metadata when
+  `mode="stdio"` so daemon-mode diagnostics cannot silently leak into
+  `#177`-baseline stdio lock files via public API misuse. `read_lock` now
+  treats invalid or unknown optional metadata (for example a future-mode
+  value or a non-string `http_endpoint`) as missing fields rather than as
+  a full read failure, so the four required `#177` base fields remain
+  authoritative for the claim/refuse decision and `acquire_lock` cannot
+  silently unlink a live owner's lock under schema drift. The shared
+  ownership-cleanup path is now owner-scoped via a new
+  `release_lock_if_owner(info)` helper that only unlinks the lock file
+  when `owner_id`, `pid`, and `start_ts` still match the caller's
+  claimed `LockInfo`. Both the `atexit.register` callback inside
+  `_acquire_startup_lock` and the explicit `finally` cleanup in the
+  stdio gateway and streamable-http placeholder now use this
+  owner-aware release, so a stale exit-callback from a previously-
+  released first process cannot unlink a successor process's live
+  lock. The legacy `release_lock()` primitive is kept for backward
+  compatibility but is no longer used by chunk 2+3 CLI cleanup paths.
+
+- Add ownership lock for concurrent gateway startup (refuse-mode MVP).
+  Second process refuses with deterministic stderr error and exit code 1
+  instead of silently breaking the first owner's WebSocket. Lock file:
+  `~/.stackchan-mcp/owner.lock`. Use `stackchan-mcp --check` to inspect
+  current owner. The previous configuration/port diagnostic remains
+  available as `stackchan-mcp --preflight`. Queue and preempt modes are
+  follow-ups. (#177)
+
+- Added optional `speed` parameter to `move_head` MCP tool. Accepts `"low"` / `"mid"` / `"high"` presets or a raw degrees-per-second integer. Internal resolution forwards `speed_dps` to the firmware; omitting `speed` preserves prior behavior. (#129)
+
+- Fixed: mDNS advertiser no longer interferes with the host OS Bonjour
+  hostname. The SRV `server` field is now a fixed `stackchan-mcp.local.`
+  instead of the system hostname, so the Python zeroconf library does
+  not register A records that overlap with the OS Bonjour responder
+  (previously this could cause macOS to change the user's
+  `LocalHostName`, e.g. `MacBook-Pro` -> `MacBook-Pro-2`).
+
+- Fixed: when zeroconf assigns a modified instance name (e.g. a stale
+  registration from an ungraceful shutdown is still visible on the
+  network), the advertiser now logs a clear WARNING instead of silently
+  renaming. The firmware browses by service type so the advertisement
+  remains discoverable; the warning surfaces operationally so the stale
+  state is visible to the operator.
+
+- Added: SIGTERM signal handler in the CLI entry point so `kill <pid>`
+  triggers graceful shutdown and mDNS unregistration via
+  `gateway.stop()`. Previously SIGTERM bypassed the `try/finally` that
+  unregisters the mDNS service, leaving stale registrations on the
+  network until their TTL expired.
 
 - Added: optional device-driven listen audio capture forwarding via
   `STACKCHAN_AUDIO_HOOK_URL`. When set, inbound device-initiated
@@ -284,6 +864,32 @@ documented-only.
   [PR #232](https://github.com/kisaragi-mochi/stackchan-mcp/pull/232).
 
 - Added: the gateway now advertises `_stackchan-mcp._tcp.local.` over mDNS/DNS-SD by default so fresh firmware can discover the WebSocket endpoint on the local network. A new `--no-mdns` flag disables advertising.
+
+- Added: `POST /pcm` HTTP endpoint on the capture server that consumes
+  external PCM uploads and pipes them through `send_pcm_stream` to the
+  device. Lets non-MCP producers (sound-effect players, alternative TTS
+  stacks, browser bridges) hand audio to stack-chan over plain HTTP
+  without registering a `TTSEngine`. Accepts raw PCM with the source
+  sample rate carried in an `X-Sample-Rate` header, requires
+  Bearer-token auth, streams chunks to the device as they arrive so
+  latency stays low for long uploads. Contributed via
+  [PR #214](https://github.com/kisaragi-mochi/stackchan-mcp/pull/214).
+
+- Fixed: aiohttp's default 1 MiB `client_max_size` cap on the capture
+  `web.Application` was aborting `POST /pcm` requests mid-stream for
+  long PCM uploads (multi-minute TTS, live mixes, persistent audio
+  feeds). The cap is meaningful only as a body-size limit for buffered
+  request bodies, and `/pcm` is intentionally a streaming endpoint —
+  the byte total of an utterance is bounded by the producer, not by
+  what fits in a single buffer. Setting `client_max_size=0` on the
+  capture app disables the cap. A per-route 8 MiB cap
+  (`CAPTURE_MAX_BYTES`) is added to `/capture` to retain a body-size
+  guard there, since that endpoint streams JPEG uploads to disk;
+  oversized uploads are rejected with `413 Payload Too Large` (with
+  partial files cleaned up). The PCM route remains uncapped because
+  external producers intentionally stream arbitrarily long audio
+  there. Contributed via
+  [PR #215](https://github.com/kisaragi-mochi/stackchan-mcp/pull/215).
 
 - Added: `send_pcm_stream(gateway, async_iter, source_rate=...)`
   incremental variant of `send_pcm_audio`. Consumes an async
@@ -371,6 +977,10 @@ documented-only.
   constraint explicitly.
 
 ### Docs
+
+- Add Issue #178 Phase A spike doc — HTTP transport choice analysis
+  (SSE vs streamable HTTP), API sketch, #177 / #169 / #73 compatibility
+  checks. Implementation deferred to follow-up PRs. (#178)
 
 - Added: tracked `AGENTS.md` files at four levels (root, `gateway/`,
   `firmware/`, `firmware/main/boards/stackchan/`) with review guidelines
@@ -1260,7 +1870,26 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.8.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.16.0...v0.17.0
+[firmware-v1.16.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.15.0...firmware-v1.16.0
+[0.16.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.15.0...v0.16.0
+[firmware-v1.15.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.14.0...firmware-v1.15.0
+[0.15.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.14.0...v0.15.0
+[firmware-v1.14.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.13.1...firmware-v1.14.0
+[firmware-v1.13.1]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.13.0...firmware-v1.13.1
+[0.14.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.12.0...v0.13.0
+[firmware-v1.13.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.12.0...firmware-v1.13.0
+[0.12.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.11.0...v0.12.0
+[firmware-v1.12.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.11.0...firmware-v1.12.0
+[0.11.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.10.0...v0.11.0
+[firmware-v1.11.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.10.0...firmware-v1.11.0
+[0.10.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.1...v0.10.0
+[firmware-v1.10.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.9.0...firmware-v1.10.0
+[0.9.1]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.8.0...v0.9.0
+[firmware-v1.9.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.8.0...firmware-v1.9.0
 [firmware-v1.8.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.7.0...firmware-v1.8.0
 [0.8.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.7.0...v0.8.0
 [firmware-v1.7.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.6.0...firmware-v1.7.0

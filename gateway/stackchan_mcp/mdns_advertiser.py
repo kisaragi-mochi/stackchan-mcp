@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import socket
@@ -132,16 +133,13 @@ def _is_wildcard_host(host: str) -> bool:
 
 
 def _build_service_hostname() -> str:
-    label = socket.gethostname().split(".", 1)[0]
-    safe_label = "".join(
-        char.lower()
-        if char.isascii() and (char.isalnum() or char == "-")
-        else "-"
-        for char in label
-    ).strip("-")
-    if not safe_label:
-        return FALLBACK_SERVICE_HOSTNAME
-    return f"{safe_label}.local."
+    """Return a service-specific mDNS hostname for the SRV record.
+
+    Uses a fixed name to avoid advertising A records that overlap with
+    the system's own Bonjour hostname registration, which can trigger
+    macOS to change the user's LocalHostName.
+    """
+    return FALLBACK_SERVICE_HOSTNAME
 
 
 def _iter_ifaddr_ipv4_addresses() -> list[tuple[str, int | None]]:
@@ -198,8 +196,29 @@ def _iter_socket_ipv4_addresses() -> list[tuple[str, int | None]]:
 
 
 def _enumerate_usable_ipv4_addresses() -> list[str]:
+    ifaddr_entries = _iter_ifaddr_ipv4_addresses()
+    socket_entries = _iter_socket_ipv4_addresses()
+
+    # The socket-based source carries no subnet prefix, so on its own it cannot
+    # exclude network/broadcast addresses. When the same address also appears
+    # in the ifaddr source (which does carry a prefix), adopt that prefix so
+    # ``_is_network_or_broadcast_address`` can recognise and drop the entry.
+    # Without this, a host whose ``getaddrinfo``-resolved set includes an
+    # interface's subnet network base (which can happen when an interface ends
+    # up with its own subnet's network address as its host IP) would be
+    # advertised and then crash the zeroconf socket with ``EADDRNOTAVAIL``.
+    prefix_by_address = {
+        address: prefix
+        for address, prefix in ifaddr_entries
+        if prefix is not None
+    }
+    enriched_socket_entries = [
+        (address, prefix_by_address.get(address, prefix))
+        for address, prefix in socket_entries
+    ]
+
     return _select_advertised_addresses(
-        [*_iter_ifaddr_ipv4_addresses(), *_iter_socket_ipv4_addresses()]
+        [*ifaddr_entries, *enriched_socket_entries]
     )
 
 
@@ -220,6 +239,26 @@ def _resolve_concrete_host_ipv4_addresses(host: str) -> list[str]:
     return _select_advertised_addresses([(address, None) for address in addresses])
 
 
+def _resolve_addresses_for_host(host: str) -> list[str]:
+    """Resolve advertised addresses for ``host`` using the same logic as
+    :func:`build_advertisement`.
+
+    Wildcard hosts (``0.0.0.0`` / ``*`` / ``""``) enumerate every usable
+    non-loopback IPv4 address on the machine; concrete hosts only resolve
+    addresses for that specific host. The refresh loop calls this helper so
+    its comparison set matches what a fresh ``build_advertisement(...)``
+    would actually register — without this, a host started with a concrete
+    HOST in a multi-NIC / Tailscale environment would see every poll as an
+    "address change" against an unrelated extra interface and churn the
+    registration on every refresh interval.
+    """
+    return (
+        _enumerate_usable_ipv4_addresses()
+        if _is_wildcard_host(host)
+        else _resolve_concrete_host_ipv4_addresses(host)
+    )
+
+
 def build_advertisement(
     *,
     host: str,
@@ -235,11 +274,7 @@ def build_advertisement(
         return None
 
     normalized_path = path if path.startswith("/") else f"/{path}"
-    addresses = (
-        _enumerate_usable_ipv4_addresses()
-        if _is_wildcard_host(host)
-        else _resolve_concrete_host_ipv4_addresses(host)
-    )
+    addresses = _resolve_addresses_for_host(host)
     if not addresses:
         logger.warning(
             "mDNS advertisement skipped: no usable non-loopback IPv4 address "
@@ -262,17 +297,67 @@ def build_advertisement(
 class MdnsAdvertiser:
     """Registers the gateway's WebSocket endpoint via mDNS/DNS-SD."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, refresh_interval: float = 30.0) -> None:
+        if refresh_interval < 10.0 or refresh_interval > 300.0:
+            raise ValueError("refresh_interval must be between 10.0 and 300.0 seconds")
+        self._lock: asyncio.Lock = asyncio.Lock()
         self._zeroconf: Any | None = None
         self._service_info: Any | None = None
+        self._refresh_task: asyncio.Task | None = None
+        self._last_advertised_addresses: tuple[str, ...] | None = None
+        self._refresh_interval: float = refresh_interval
+        self._start_args: dict[str, Any] | None = None
 
     async def start(self, *, host: str, port: int, path: str = "/") -> None:
+        task = self._refresh_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=1.0)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+
+        async with self._lock:
+            self._refresh_task = None
+            if self._zeroconf is not None:
+                await self._close_zeroconf_locked()
+            self._start_args = {"host": host, "port": port, "path": path}
+            try:
+                advertisement = await self._start_locked(host=host, port=port, path=path)
+            except Exception:
+                self._start_args = None
+                self._last_advertised_addresses = None
+                raise
+            if advertisement is None:
+                self._start_args = None
+                self._last_advertised_addresses = None
+                return
+            self._last_advertised_addresses = tuple(advertisement.parsed_addresses)
+            self._refresh_task = asyncio.create_task(self._refresh_loop())
+
+    async def _start_locked(
+        self, *, host: str, port: int, path: str = "/"
+    ) -> MdnsAdvertisement | None:
         advertisement = build_advertisement(host=host, port=port, path=path)
         if advertisement is None:
-            return
+            return None
 
+        await self._register_advertisement_locked(advertisement)
+        return advertisement
+
+    async def _register_advertisement_locked(
+        self, advertisement: MdnsAdvertisement
+    ) -> None:
         AsyncZeroconf, ServiceInfo = _load_zeroconf_classes()
-        zeroconf = AsyncZeroconf()
+        # Constrain zeroconf to the IPv4 interfaces we actually advertise on.
+        # The default ``InterfaceChoice.All`` makes zeroconf bind a socket on
+        # every host IPv4 address it can find, which on a host with several
+        # interfaces can include addresses the kernel refuses ``sendto`` on
+        # (the engine then never finishes starting, and the gateway hangs in
+        # ``async_wait_for_start``). Passing the same set of addresses we put
+        # into the SRV record keeps zeroconf in sync with our advertisement
+        # and skips the unusable interfaces entirely.
+        zeroconf = AsyncZeroconf(interfaces=advertisement.parsed_addresses)
         info = ServiceInfo(
             advertisement.service_type,
             advertisement.service_name,
@@ -283,19 +368,53 @@ class MdnsAdvertiser:
         )
         try:
             await zeroconf.async_register_service(info, allow_name_change=True)
-        except Exception:
+        except BaseException:
+            # Catch BaseException (not just Exception) so that an
+            # ``asyncio.CancelledError`` arriving mid-registration —
+            # e.g. an external ``stop()`` or a double-``start()`` racing
+            # this registration — still closes the partially-constructed
+            # ``AsyncZeroconf``. Otherwise the bound multicast sockets
+            # and any partial registration would leak past the cancelled
+            # task. ``raise`` preserves the cancellation semantics for
+            # the surrounding ``async with self._lock`` caller.
             await zeroconf.async_close()
             raise
         self._zeroconf = zeroconf
         self._service_info = info
+        registered_name = getattr(info, "name", advertisement.service_name)
+        if registered_name != advertisement.service_name:
+            logger.warning(
+                "mDNS service registered under a modified name %s (requested %s). "
+                "A previous gateway instance may not have shut down cleanly and its "
+                "registration is still visible on the network. The ESP32 still "
+                "discovers this gateway by service type, so auto-discovery keeps "
+                "working; the stale entry clears when its mDNS TTL expires.",
+                registered_name,
+                advertisement.service_name,
+            )
         logger.info(
-            "mDNS advertising %s on port %d with addresses %s",
-            getattr(info, "name", advertisement.service_name),
+            "mDNS advertising %s on port %d with addresses %s reason=register",
+            registered_name,
             advertisement.port,
             ", ".join(advertisement.parsed_addresses),
         )
 
     async def stop(self) -> None:
+        task = self._refresh_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=1.0)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+
+        async with self._lock:
+            await self._close_zeroconf_locked()
+            self._refresh_task = None
+            self._last_advertised_addresses = None
+            self._start_args = None
+
+    async def _close_zeroconf_locked(self) -> None:
         zeroconf = self._zeroconf
         info = self._service_info
         self._zeroconf = None
@@ -308,3 +427,91 @@ class MdnsAdvertiser:
                 await zeroconf.async_unregister_service(info)
         finally:
             await zeroconf.async_close()
+
+    async def _reconfigure(self) -> None:
+        async with self._lock:
+            if self._start_args is None:
+                return
+            old_addresses = self._last_advertised_addresses
+            advertisement = build_advertisement(**self._start_args)
+            if advertisement is None:
+                logger.info(
+                    "mDNS reconfigure skipped: build_advertisement returned None "
+                    "(transient empty address state); refresh loop continues "
+                    "reason=transient_empty_address_state old=%s",
+                    old_addresses,
+                )
+                return
+
+            # Clear the cached advertised set BEFORE closing so that even a
+            # failure inside ``_close_zeroconf_locked()`` itself (e.g. the
+            # old interface has vanished mid-cycle and ``async_unregister``
+            # / ``async_close`` raise) still leaves the refresh loop in a
+            # "must retry" state. If the subsequent close raises, or the
+            # re-registration raises, or the host IP later reverts to
+            # ``old_addresses``, the refresh loop's
+            # ``current != _last_advertised_addresses`` check would
+            # otherwise compare against the stale value and stay quiet —
+            # the advertisement would remain dead until a manual restart.
+            # Setting this to ``None`` here guarantees the next refresh
+            # tick observes a divergence and retries registration
+            # regardless of which address state the host happens to be in.
+            self._last_advertised_addresses = None
+            await self._close_zeroconf_locked()
+            await self._register_advertisement_locked(advertisement)
+            new_addresses = tuple(advertisement.parsed_addresses)
+            self._last_advertised_addresses = new_addresses
+            registered_name = getattr(
+                self._service_info,
+                "name",
+                advertisement.service_name,
+            )
+            logger.info(
+                "mDNS reconfigured: reason=address_changed old=%s new=%s "
+                "registered_name=%s",
+                old_addresses,
+                new_addresses,
+                registered_name,
+            )
+
+    async def _refresh_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self._refresh_interval)
+                start_args = self._start_args
+                if start_args is None:
+                    continue
+                host = start_args["host"]
+                current_addresses = tuple(_resolve_addresses_for_host(host))
+                old_addresses = self._last_advertised_addresses
+                if current_addresses == old_addresses:
+                    continue
+
+                logger.info(
+                    "mDNS refresh observed address change: reason=address_changed "
+                    "old=%s new=%s debounce=started",
+                    old_addresses,
+                    current_addresses,
+                )
+                await asyncio.sleep(self._refresh_interval)
+                start_args = self._start_args
+                if start_args is None:
+                    continue
+                host = start_args["host"]
+                confirmed_addresses = tuple(_resolve_addresses_for_host(host))
+                if confirmed_addresses != current_addresses:
+                    logger.info(
+                        "mDNS refresh dropped transient address change: "
+                        "reason=debounce_mismatch old=%s first=%s second=%s",
+                        old_addresses,
+                        current_addresses,
+                        confirmed_addresses,
+                    )
+                    continue
+
+                await self._reconfigure()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("mDNS refresh loop error; continuing")
+                continue

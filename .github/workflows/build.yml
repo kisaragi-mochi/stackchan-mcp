@@ -48,6 +48,23 @@ jobs:
             firmware/build/merged-binary.bin
             firmware/releases/v2.2.6_stackchan.zip
 
+  firmware-host-test:
+    name: Firmware host test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure firmware host tests
+        run: cmake -S firmware/host_test -B /tmp/firmware-host-test-build
+
+      - name: Build firmware host tests
+        run: cmake --build /tmp/firmware-host-test-build
+
+      - name: Run firmware host tests
+        run: ctest --test-dir /tmp/firmware-host-test-build --output-on-failure
+
   gateway-test:
     name: Gateway test
     runs-on: ubuntu-latest
@@ -146,7 +163,15 @@ jobs:
   changelog-check:
     name: CHANGELOG check
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # Skip on `release:`-titled PRs: release-promotion PRs move
+    # entries from [Unreleased] into a new dated release section, so
+    # the [Unreleased] body is legitimately unchanged between base
+    # and head when the previous release had already drained it. The
+    # release-time gate in `firmware-release.yml` (and the
+    # `Verify CHANGELOG.md ...` step in `publish.yml`) is the
+    # authoritative check that the promoted section exists for the
+    # tag being pushed.
+    if: github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'release:')
 
     steps:
       - name: Checkout repository
