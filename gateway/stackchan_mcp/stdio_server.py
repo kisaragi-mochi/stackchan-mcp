@@ -10,13 +10,14 @@ from contextlib import AsyncExitStack
 import inspect
 import json
 import logging
+import os
 from typing import Any, Literal, cast
 
 import anyio
 from mcp.server import InitializationOptions, NotificationOptions, Server
 from mcp.server.session import ServerSession
 from mcp.server.stdio import stdio_server
-from mcp.types import Notification, TextContent, Tool
+from mcp.types import ImageContent, Notification, TextContent, Tool
 
 from . import __version__
 from .gateway import get_gateway
@@ -840,7 +841,7 @@ async def _dispatch_mcp_tool(
     name: str,
     arguments: dict[str, Any],
     gateway: Any,
-) -> list[TextContent]:
+) -> list[TextContent | ImageContent]:
     """Run one StackChan MCP tool against the provided gateway instance."""
     if name == "get_status":
         status = gateway.esp32.get_status()
@@ -1210,11 +1211,77 @@ async def _dispatch_mcp_tool(
                 if isinstance(item, dict) and item.get("type") == "text":
                     texts.append(item.get("text", ""))
             if texts:
-                return [TextContent(type="text", text="\n".join(texts))]
+                joined = "\n".join(texts)
+                if name == "take_photo":
+                    return _photo_contents(joined)
+                return [TextContent(type="text", text=joined)]
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     return [TextContent(type="text", text=str(result))]
+
+
+#: Refuse to inline images beyond this size — tool receipts should stay
+#: small for LLM clients (base64 of 200 KB ≈ 270 KB of text). ESP32
+#: camera JPEGs are a few KB, so this cap only guards against
+#: pathological captures.
+_PHOTO_INLINE_MAX_BYTES = 200 * 1024
+
+
+def _photo_contents(result_text: str) -> list[TextContent | ImageContent]:
+    """take_photo receipt → text + inline ImageContent.
+
+    The capture JSON carries ``image_path``. Returning the JPEG as an MCP
+    image block alongside the text lets LLM clients actually see the
+    frame instead of only reading a file path they may not be able to
+    reach. Any failure to inline degrades to the original text-only
+    receipt.
+
+    ``image_path`` originates in a device response, so only files inside
+    the capture directory are eligible — the gateway must not inline an
+    arbitrary readable local file on a malformed or hostile device's say-so.
+    """
+    import base64
+
+    from .capture_server import CAPTURE_DIR
+
+    out: list[TextContent | ImageContent] = [
+        TextContent(type="text", text=result_text)
+    ]
+    try:
+        payload = json.loads(result_text)
+        image_path = payload.get("image_path") if isinstance(payload, dict) else None
+        if isinstance(image_path, str) and image_path:
+            resolved = os.path.realpath(image_path)
+            capture_root = os.path.realpath(CAPTURE_DIR)
+            if not resolved.startswith(capture_root + os.sep):
+                logger.warning(
+                    "take_photo inline image skipped: %s is outside the "
+                    "capture directory",
+                    image_path,
+                )
+                return out
+            with open(resolved, "rb") as f:
+                raw = f.read()
+            if raw[:2] == b"\xff\xd8" and len(raw) <= _PHOTO_INLINE_MAX_BYTES:
+                out.append(
+                    ImageContent(
+                        type="image",
+                        data=base64.b64encode(raw).decode(),
+                        mimeType="image/jpeg",
+                    )
+                )
+            else:
+                logger.info(
+                    "take_photo inline image skipped: %s is %s",
+                    image_path,
+                    "not a JPEG"
+                    if raw[:2] != b"\xff\xd8"
+                    else f"{len(raw)} bytes (cap {_PHOTO_INLINE_MAX_BYTES})",
+                )
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("take_photo inline image skipped: %s", exc)
+    return out
 
 
 def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
@@ -2304,7 +2371,8 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         "voice": {
                             "type": "string",
                             "description": (
-                                "Engine identifier (e.g. 'voicevox', 'irodori'). "
+                                "Engine identifier (e.g. 'voicevox', 'irodori', "
+                                "'elevenlabs'). "
                                 "Default 'voicevox'."
                             ),
                             "default": "voicevox",
@@ -2818,7 +2886,9 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
         ]
 
     @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
+    async def call_tool(
+        name: str, arguments: dict[str, Any] | None
+    ) -> list[TextContent | ImageContent]:
         """Handle a tool call by relaying to ESP32."""
         arguments = arguments or {}
         return await _dispatch_mcp_tool(name, arguments, get_gateway())

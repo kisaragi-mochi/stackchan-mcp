@@ -175,3 +175,32 @@ def encode_opus_frames(
     for pcm_frame in chunk_pcm_into_frames(pcm, samples_per_frame):
         opus_frame = encoder.encode(pcm_frame, samples_per_frame)
         yield opus_frame
+
+
+def _decode_mp3_to_pcm16_mono(mp3_bytes: bytes) -> tuple[int, bytes]:
+    """Decode an MP3 blob into ``(sample_rate, raw_pcm)``.
+
+    The PCM is returned as signed 16-bit little-endian mono. ``miniaudio``
+    is imported lazily here so the rest of the TTS framework stays
+    importable when no MP3-based engine extra is installed; the failure
+    only surfaces when synthesis is actually attempted.
+
+    miniaudio decodes natively to interleaved signed-16-bit samples, so
+    we ask for mono directly and let it downmix; only the sample rate may
+    differ from the device's, which the caller resamples.
+    """
+    try:
+        import miniaudio  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - exercised via integration
+        raise RuntimeError(
+            "miniaudio is not installed. Install an MP3-based engine extra "
+            "('pip install stackchan-mcp[tts-irodori]' or "
+            "'pip install stackchan-mcp[tts-elevenlabs]') to enable it."
+        ) from exc
+
+    decoded = miniaudio.decode(
+        mp3_bytes,
+        output_format=miniaudio.SampleFormat.SIGNED16,
+        nchannels=1,
+    )
+    return decoded.sample_rate, decoded.samples.tobytes()

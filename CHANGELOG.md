@@ -38,6 +38,17 @@ documented-only.
 
 ### Gateway
 
+- Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
+  alongside Irodori: official REST API with `eleven_v3` as the default
+  model, per-speaker voice ids via `STACKCHAN_ELEVEN_VOICE_<SPEAKER>`
+  environment variables, and MP3 decoding through the decoder path shared
+  with Irodori. The API key is read from the environment only and is never
+  persisted or logged. (#372)
+- `take_photo` now returns the captured JPEG as an inline `image/jpeg`
+  MCP content block alongside the unchanged text receipt, so LLM clients
+  see the frame directly instead of only a file path. Inlining is limited
+  to JPEGs inside the capture directory and at most 200 KB; any failure
+  degrades to the original text-only receipt. (#373)
 - `get_status` now reports the WebSocket `session_id` alongside the
   connection flags. The id changes on every (re)connection, so a polling
   host can detect a device reboot even when the reconnect lands between
@@ -54,6 +65,7 @@ documented-only.
   emotion, and MCP wake paths. Activity resets both screen-off and system
   power-save deadlines. Includes `self.screen.set_off_timeout` /
   `self.screen.get_off_timeout` controls.
+- Added opt-in, compile-time configurable AXP2101 charge hysteresis for StackChan. The feature is disabled by default; when enabled, startup first allows charging, protection disables it at 70% or above, and charging resumes at 30% or below. An unreadable fuel gauge fails safe to charging enabled. `self.power.set_charge_enabled` and `self.power.get_charge_state` provide manual control and state inspection.
 
 ## [0.17.0] - 2026-07-12
 

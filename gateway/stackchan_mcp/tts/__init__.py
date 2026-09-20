@@ -60,9 +60,16 @@ def _register_edge_tts() -> None:
     get_registry().register(EdgeTTSEngine())
 
 
+def _register_elevenlabs() -> None:
+    from .elevenlabs import ElevenLabsEngine
+
+    get_registry().register(ElevenLabsEngine())
+
+
 _try_register(_register_voicevox, "voicevox")
 _try_register(_register_irodori, "irodori")
 _try_register(_register_edge_tts, "edge-tts")
+_try_register(_register_elevenlabs, "elevenlabs")
 
 
 __all__ = [
