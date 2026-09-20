@@ -172,7 +172,7 @@ Same shape, under `mcpServers`.
 |---|---|
 | `get_status` | Gateway connection state (ESP32 connected? device info?) |
 | `get_device_info` | ESP32 device status (battery, volume, WiFi, etc.) |
-| `take_photo(question?)` | Trigger camera capture; returns saved JPEG path |
+| `take_photo(question?)` | Trigger camera capture; returns the saved JPEG path plus the image itself as an inline MCP image block |
 | `set_volume(volume)` | Speaker volume 0-100 |
 | `set_brightness(brightness)` | Screen brightness 0-100 |
 | `set_charge_protection(enabled)` | Persistently enable/disable the opt-in battery-protection hysteresis. Set `false` before going out when you want the PMIC to finish a full charge. |

@@ -16,7 +16,14 @@ from urllib.parse import urlparse
 import jsonschema
 from mcp.server.streamable_http import MCP_SESSION_ID_HEADER
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp.types import CallToolRequest, CallToolResult, ErrorData, ServerResult, TextContent
+from mcp.types import (
+    CallToolRequest,
+    CallToolResult,
+    ErrorData,
+    ImageContent,
+    ServerResult,
+    TextContent,
+)
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
@@ -44,7 +51,7 @@ DISCONNECTED_DEVICE_PAYLOAD = {
 SERVER_SHUTDOWN_ERROR_CODE = -32000
 SERVER_SHUTDOWN_ERROR_MESSAGE = "stackchan MCP HTTP server is shutting down"
 
-DispatchFn = Callable[[QueueItem], Awaitable[list[TextContent]]]
+DispatchFn = Callable[[QueueItem], Awaitable[list[TextContent | ImageContent]]]
 
 
 def get_configured_token() -> str | None:
@@ -78,7 +85,7 @@ def validate_bind_safety(host: str, token: str | None) -> None:
 def make_dispatch_fn(gateway: Any) -> DispatchFn:
     """Build the single-flight ESP32 dispatcher used by the command queue."""
 
-    async def dispatch(item: QueueItem) -> list[TextContent]:
+    async def dispatch(item: QueueItem) -> list[TextContent | ImageContent]:
         if not gateway.esp32.device_connected:
             return [
                 TextContent(
@@ -236,7 +243,7 @@ def _install_queue_tool_handler(
 
 
 def _skip_done_dispatch(dispatch_fn: DispatchFn) -> DispatchFn:
-    async def dispatch(item: QueueItem) -> list[TextContent]:
+    async def dispatch(item: QueueItem) -> list[TextContent | ImageContent]:
         if item.response_future.done():
             return []
         return await dispatch_fn(item)
@@ -276,7 +283,7 @@ def _server_shutdown_error() -> ErrorData:
     )
 
 
-def _tool_result(content: list[TextContent]) -> ServerResult:
+def _tool_result(content: list[TextContent | ImageContent]) -> ServerResult:
     return ServerResult(
         CallToolResult(
             content=content,

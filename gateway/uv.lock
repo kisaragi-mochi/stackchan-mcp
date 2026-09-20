@@ -2098,6 +2098,11 @@ tts = [
     { name = "httpx" },
     { name = "opuslib" },
 ]
+tts-elevenlabs = [
+    { name = "httpx" },
+    { name = "miniaudio" },
+    { name = "opuslib" },
+]
 tts-irodori = [
     { name = "httpx" },
     { name = "miniaudio" },
@@ -2121,6 +2126,7 @@ requires-dist = [
     { name = "faster-whisper", marker = "extra == 'stt-faster-whisper'", specifier = ">=1.0" },
     { name = "httpx", marker = "extra == 'tts'", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.27,<2.0" },
+    { name = "miniaudio", marker = "extra == 'tts-elevenlabs'", specifier = ">=1.59" },
     { name = "miniaudio", marker = "extra == 'tts-irodori'", specifier = ">=1.59" },
     { name = "openai", marker = "extra == 'stt-openai'", specifier = ">=1.0" },
     { name = "opuslib", marker = "extra == 'stt'", specifier = ">=3" },
@@ -2131,13 +2137,14 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6" },
     { name = "stackchan-mcp", extras = ["stt"], marker = "extra == 'stt-faster-whisper'" },
     { name = "stackchan-mcp", extras = ["stt"], marker = "extra == 'stt-openai'" },
+    { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-elevenlabs'" },
     { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-irodori'" },
     { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-voicevox'" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0,<3.0" },
     { name = "websockets", specifier = ">=12" },
     { name = "zeroconf", specifier = ">=0.149" },
 ]
-provides-extras = ["tts", "tts-voicevox", "tts-irodori", "stt", "stt-faster-whisper", "stt-openai"]
+provides-extras = ["tts", "tts-voicevox", "tts-irodori", "tts-elevenlabs", "stt", "stt-faster-whisper", "stt-openai"]
 
 [package.metadata.requires-dev]
 dev = [

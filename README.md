@@ -48,7 +48,7 @@ This repository is a monorepo.
 |---|---|---|
 | `get_status` | Gateway connection state | ✅ |
 | `get_device_info` | ESP32 device state (battery / volume / WiFi / etc.) | ✅ |
-| `take_photo(question?)` | Capture a frame, save as JPEG, return the path | ✅ |
+| `take_photo(question?)` | Capture a frame, save as JPEG, return the path + inline image block | ✅ |
 | `set_volume(volume)` | Speaker volume (0-100) | ✅ |
 | `set_brightness(brightness)` | Screen brightness (0-100) | ✅ |
 | `move_head(yaw, pitch, speed?)` | Move the neck (servos). `pitch` is constrained to `5..85` — the M5Stack-recommended operating range. For the wider firmware hard clamp (`0..88`), use the firmware-side `set_head_angles` device tool instead. | ✅ |
@@ -606,6 +606,44 @@ export STACKCHAN_TTS_ENGINE=irodori
 
 VOICEVOX remains the default when `STACKCHAN_TTS_ENGINE` is unset, and an
 explicit `voice` argument always overrides the default.
+
+#### Alternative engine: ElevenLabs
+
+ElevenLabs is a cloud TTS engine that plugs into the same `say`
+pipeline (the MP3 reply is decoded to 16 kHz mono PCM, then encoded to
+Opus). Unlike VOICEVOX/Irodori there is nothing to self-host — you need
+an [ElevenLabs](https://elevenlabs.io/) account and API key, and each
+`say` call bills your ElevenLabs quota.
+
+Install the extra:
+
+```bash
+pip install 'stackchan-mcp[tts-elevenlabs]'
+```
+
+Configure via environment variables (the key is read from the
+environment only — never commit it):
+
+| Environment variable | Default | Notes |
+|---|---|---|
+| `ELEVENLABS_API_KEY` | _(required)_ | Your ElevenLabs API key. `STACKCHAN_ELEVENLABS_KEY` is also accepted and wins when both are set. |
+| `STACKCHAN_ELEVEN_VOICE_<NAME>` | _(none)_ | Voice map: each variable names one speaker, e.g. `STACKCHAN_ELEVEN_VOICE_RACHEL=<voice id>` makes `speaker_name="rachel"` work. |
+| `STACKCHAN_ELEVEN_DEFAULT_SPEAKER` | _(none)_ | Speaker used when a call omits `speaker_name`. If unset and exactly one voice is mapped, that voice is the default. |
+| `STACKCHAN_ELEVEN_MODEL` | `eleven_v3` | ElevenLabs model identifier. |
+
+Select ElevenLabs per call — the speaker selector is the string
+`speaker_name` (not the numeric `speaker_id`, which is VOICEVOX-shaped);
+a raw ElevenLabs voice ID is also accepted and passed through verbatim:
+
+```
+say(text="Hello!", voice="elevenlabs", speaker_name="rachel")
+```
+
+Or make it the default engine:
+
+```bash
+export STACKCHAN_TTS_ENGINE=elevenlabs
+```
 
 ### 5. Optional: STT setup (faster-whisper)
 
