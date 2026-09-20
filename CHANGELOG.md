@@ -35,7 +35,7 @@ documented-only.
 - Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
   frame-geometry consistency, full-frame exports from layered sources,
   the avatar-set fetch window, and blink cadence tuning.
-  
+
 ### Gateway
 
 - Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
@@ -56,7 +56,7 @@ documented-only.
 
 ### Firmware
 
-- Added opt-in, compile-time configurable AXP2101 charge hysteresis for StackChan. The feature is disabled by default; when enabled, startup first allows charging, protection disables it at 70% or above, and charging resumes at 30% or below. An unreadable fuel gauge fails safe to charging enabled. `self.power.set_charge_enabled` and `self.power.get_charge_state` provide manual control and state inspection.
+- Added opt-in AXP2101 charge protection for StackChan. Charging starts enabled at boot, protection disables it at the persisted upper threshold (70% by default), resumes it at the persisted lower threshold (30% by default), and fails safe to charging enabled when the fuel gauge is unreadable. The NVS-backed `charge_protection` toggle defaults off, its thresholds are runtime-configurable, and MCP tools expose persistent configuration, manual control, and state inspection.
 
 ## [0.17.0] - 2026-07-12
 

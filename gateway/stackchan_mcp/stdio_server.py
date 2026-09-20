@@ -1038,6 +1038,18 @@ async def _dispatch_mcp_tool(
             "self.screen.set_brightness",
             arguments,
         ),
+        "set_charge_protection": (
+            "self.power.set_charge_protection",
+            arguments,
+        ),
+        "get_charge_protection": (
+            "self.power.get_charge_protection",
+            {},
+        ),
+        "set_charge_thresholds": (
+            "self.power.set_charge_thresholds",
+            arguments,
+        ),
         "move_head": (
             "self.robot.set_head_angles",
             arguments,
@@ -1356,6 +1368,67 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                     },
                     "required": ["brightness"],
+                },
+            ),
+            Tool(
+                name="set_charge_protection",
+                description=(
+                    "Persist and immediately apply battery charge protection. "
+                    "Protection is opt-in by default and uses the persisted "
+                    "ON/OFF thresholds. Disable it temporarily before going out to "
+                    "allow the AXP2101 charger to reach its own full-charge "
+                    "termination; enable it again to resume protection."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True for persistent threshold protection; "
+                                "false to allow charging to the PMIC's "
+                                "full-charge termination."
+                            ),
+                        },
+                    },
+                    "required": ["enabled"],
+                },
+            ),
+            Tool(
+                name="get_charge_protection",
+                description=(
+                    "Get the persistent and effective charge_protection "
+                    "setting, thresholds, and current charger-enable state. "
+                    "The setting is opt-in when it has never been saved."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="set_charge_thresholds",
+                description=(
+                    "Persist and immediately apply charge-protection thresholds. "
+                    "on_below must be lower than off_above."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "on_below": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Enable charging at or below this percentage.",
+                        },
+                        "off_above": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Disable charging at or above this percentage.",
+                        },
+                    },
+                    "required": ["on_below", "off_above"],
                 },
             ),
             Tool(

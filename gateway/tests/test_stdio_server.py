@@ -108,6 +108,180 @@ async def test_get_head_angles_relays_to_esp32(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_tools_includes_charge_protection_tools():
+    """Charge protection tools expose toggle, query, and threshold schemas."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools = {tool.name: tool for tool in result.root.tools}
+    assert "set_charge_protection" in tools
+    assert "get_charge_protection" in tools
+    assert "set_charge_thresholds" in tools
+
+    set_tool = tools["set_charge_protection"]
+    assert set_tool.inputSchema == {
+        "type": "object",
+        "properties": {
+            "enabled": {
+                "type": "boolean",
+                "description": (
+                    "True for persistent threshold protection; false to allow "
+                    "charging to the PMIC's full-charge termination."
+                ),
+            },
+        },
+        "required": ["enabled"],
+    }
+    assert "opt-in" in set_tool.description
+    assert "going out" in set_tool.description
+
+    get_tool = tools["get_charge_protection"]
+    assert get_tool.inputSchema == {"type": "object", "properties": {}}
+    assert "persistent and effective" in get_tool.description
+
+    thresholds_tool = tools["set_charge_thresholds"]
+    assert thresholds_tool.inputSchema == {
+        "type": "object",
+        "properties": {
+            "on_below": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Enable charging at or below this percentage.",
+            },
+            "off_above": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Disable charging at or above this percentage.",
+            },
+        },
+        "required": ["on_below", "off_above"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("gateway_tool", "request_args", "device_tool", "device_args"),
+    [
+        (
+            "set_charge_protection",
+            {"enabled": False},
+            "self.power.set_charge_protection",
+            {"enabled": False},
+        ),
+        (
+            "get_charge_protection",
+            {},
+            "self.power.get_charge_protection",
+            {},
+        ),
+        (
+            "set_charge_thresholds",
+            {"on_below": 35, "off_above": 75},
+            "self.power.set_charge_thresholds",
+            {"on_below": 35, "off_above": 75},
+        ),
+    ],
+)
+async def test_charge_protection_tools_relay_and_preserve_response(
+    monkeypatch,
+    gateway_tool,
+    request_args,
+    device_tool,
+    device_args,
+):
+    """Set forwards its boolean, get forwards {}, and response text survives."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "ok": True,
+                                "charge_protection": False,
+                                "persistent": True,
+                            }
+                        ),
+                    }
+                ],
+            }, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": gateway_tool, "arguments": request_args},
+        )
+    )
+
+    assert calls == [(device_tool, device_args)]
+    assert json.loads(result.root.content[0].text) == {
+        "ok": True,
+        "charge_protection": False,
+        "persistent": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "gateway_tool",
+    ["set_charge_protection", "get_charge_protection", "set_charge_thresholds"],
+)
+async def test_charge_protection_tools_propagate_device_error(
+    monkeypatch, gateway_tool
+):
+    """Firmware/transport errors are returned in the normal gateway format."""
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            return None, {"message": "charge protection unavailable"}
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": gateway_tool,
+                "arguments": (
+                    {"enabled": False}
+                    if gateway_tool == "set_charge_protection"
+                    else {"on_below": 35, "off_above": 75}
+                    if gateway_tool == "set_charge_thresholds"
+                    else {}
+                ),
+            },
+        )
+    )
+
+    assert json.loads(result.root.content[0].text) == {
+        "error": "charge protection unavailable"
+    }
+
+
+@pytest.mark.asyncio
 async def test_list_tools_includes_gateway_config_tools():
     """gateway_config_get/set are exposed with the expected schemas."""
     server = create_server()

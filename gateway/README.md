@@ -175,6 +175,9 @@ Same shape, under `mcpServers`.
 | `take_photo(question?)` | Trigger camera capture; returns the saved JPEG path plus the image itself as an inline MCP image block |
 | `set_volume(volume)` | Speaker volume 0-100 |
 | `set_brightness(brightness)` | Screen brightness 0-100 |
+| `set_charge_protection(enabled)` | Persistently enable/disable the opt-in battery-protection hysteresis. Set `false` before going out when you want the PMIC to finish a full charge. |
+| `get_charge_protection` | Read the persistent/effective protection setting and current charger-enable state. |
+| `set_charge_thresholds(on_below, off_above)` | Persist the charge-protection ON/OFF percentages (defaults: 30/70). |
 | `move_head(yaw, pitch, speed?)` | Drive yaw + pitch servos |
 | `get_head_angles` | Read current yaw + pitch servo angles |
 | `get_touch_state` | Touch sensor state (press/release/stroke) |
@@ -201,6 +204,30 @@ instead of cascading errors.
 
 The mapping from these names to ESP32-side `self.*` MCP tools is in
 `stackchan_mcp/stdio_server.py`.
+
+### Charge protection
+
+`charge_protection` is opt-in (`false`) when it has never been saved and is
+stored in ESP32 NVS across restarts. With protection on, firmware uses
+NVS-backed thresholds (30%/70% by default): charging is enabled at or below
+the lower value, disabled at or above the upper value, and unchanged between
+them. With protection off, that
+policy no longer stops charging; the AXP2101 charger is enabled and its own
+full-charge termination remains in control. This is useful for topping up
+before leaving home.
+
+```text
+set_charge_protection({"enabled": false})
+get_charge_protection({})
+set_charge_thresholds({"on_below": 35, "off_above": 75})
+set_charge_protection({"enabled": true})
+```
+
+Changes take effect immediately without rebooting. Switching protection back
+on immediately re-evaluates the current battery level. The firmware keeps the
+public names; their physical NVS mapping is namespace `stackchan`, keys
+`chg_protect`, `chg_on_below`, and `chg_off_above`, because ESP-IDF NVS names
+allow at most 15 characters.
 
 ## Architecture
 
