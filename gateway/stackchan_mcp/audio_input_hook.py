@@ -16,11 +16,13 @@ payload to the hook.
 
 Configuration:
 
-- ``STACKCHAN_AUDIO_HOOK_URL`` — HTTP(S) URL of the receiver. The
-  device-driven capture path is silently disabled when unset.
+- ``STACKCHAN_AUDIO_HOOK_URL`` — HTTP(S) URL of the receiver, or the
+  special value ``local`` to transcribe and ``say`` in this process
+  (no extra HTTP server). The device-driven capture path is silently
+  disabled when unset.
 - ``STACKCHAN_AUDIO_HOOK_TOKEN`` — Bearer token; falls back to
   ``STACKCHAN_TOKEN`` so a single-token setup works without extra
-  configuration.
+  configuration. Ignored when the URL is ``local``.
 
 The capture path is opt-in by design: stackchan-mcp's primary listen
 model is MCP-client-driven (the ``listen()`` tool), and device-driven
@@ -39,12 +41,102 @@ keeps the dependency surface unchanged from the existing ``[stt]`` /
 from __future__ import annotations
 
 import logging
+import os
 import struct
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import aiohttp
 
+if TYPE_CHECKING:
+    from .gateway import Gateway
+
 logger = logging.getLogger(__name__)
+
+LOCAL_HOOK_URL = "local"
+
+
+def is_local_hook(url: str) -> bool:
+    """True when the hook should stay inside this gateway process."""
+    return (url or "").strip().lower() == LOCAL_HOOK_URL
+
+
+def local_reply_text(transcript: str) -> str:
+    text = (transcript or "").strip()
+    if not text:
+        return "I did not catch that."
+    return f"You said: {text}"
+
+
+async def handle_local_capture(
+    frames: Sequence[bytes],
+    *,
+    session_id: str = "",
+    gateway: Gateway | None = None,
+) -> bool:
+    """Transcribe a device-driven capture and speak the reply in-process.
+
+    Uses the same faster-whisper engine and ``say`` path as MCP
+    ``listen()`` / ``say()``, so a tap does not need a second process
+    or a second model download.
+    """
+    if not frames:
+        logger.debug(
+            "audio_input_hook: local skip, no frames (session=%s)", session_id
+        )
+        return False
+    if gateway is None:
+        logger.warning(
+            "audio_input_hook: local capture missing gateway session=%s",
+            session_id,
+        )
+        return False
+
+    from .stt import DEFAULT_ENGINE, get_registry
+    from .stt.audio_utils import decode_opus_frames
+    from .tts import synthesize_and_send
+
+    try:
+        pcm = decode_opus_frames(frames)
+    except Exception:
+        logger.exception(
+            "audio_input_hook: local opus decode failed session=%s", session_id
+        )
+        return False
+
+    engine = get_registry().get(DEFAULT_ENGINE)
+    if engine is None:
+        logger.warning(
+            "audio_input_hook: local capture needs the [stt-faster-whisper] "
+            "extra (session=%s)",
+            session_id,
+        )
+        return False
+
+    # Match listen() default when language is omitted: env then ja.
+    language = os.getenv("STACKCHAN_LISTEN_LANGUAGE", "").strip() or "ja"
+    try:
+        result = await engine.transcribe(pcm, language=language)
+    except Exception:
+        logger.exception(
+            "audio_input_hook: local transcribe failed session=%s", session_id
+        )
+        return False
+
+    transcript = (result.get("text") or "").strip()
+    spoken = local_reply_text(transcript)
+    logger.info(
+        "audio_input_hook: local transcript session=%s text=%r",
+        session_id,
+        transcript[:80],
+    )
+    try:
+        await synthesize_and_send({"text": spoken}, gateway=gateway)
+    except Exception:
+        logger.exception(
+            "audio_input_hook: local say failed session=%s", session_id
+        )
+        return False
+    return True
 
 
 # --- Device audio parameters -------------------------------------------------

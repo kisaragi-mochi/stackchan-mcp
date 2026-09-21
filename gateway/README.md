@@ -64,6 +64,12 @@ Edit `.env`:
   (something like `192.168.x.y` on a typical home network — run `ifconfig`
   or `ip addr` to find it). Required for `take_photo` when `VISION_URL` is not
   set.
+- `STACKCHAN_AUDIO_HOOK_URL`: when set to `local`, a screen-tap listen
+  is transcribed and spoken in this process. Any other value is an HTTP
+  URL that receives Ogg/Opus; see
+  [`examples/audio-hook-receiver/`](../examples/audio-hook-receiver/).
+  Language for the local path follows `STACKCHAN_LISTEN_LANGUAGE`
+  (default `ja`).
 
 ## Run
 

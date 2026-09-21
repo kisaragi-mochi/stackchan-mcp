@@ -46,15 +46,17 @@ Environment variables:
   VISION_URL               Full public capture URL (e.g. Tailscale Funnel).
   VISION_HOST              LAN IP of this machine, as seen from the ESP32.
   VISION_TOKEN             Optional separate token for VISION_URL uploads.
-  STACKCHAN_AUDIO_HOOK_URL Enables device-driven listen capture push.
-                           When set, Opus audio from a wake-word /
-                           button / LCD-touch initiated listen window
-                           is packed into Ogg/Opus and POSTed here.
-                           Leave unset to keep the gateway's behaviour
-                           unchanged from MCP-driven listen() only.
+  STACKCHAN_AUDIO_HOOK_URL Enables device-driven listen capture.
+                           Use "local" to transcribe and speak in this
+                           process. Any other value is an HTTP URL that
+                           receives Ogg/Opus on listen.stop. Leave
+                           unset to keep MCP-driven listen() only.
   STACKCHAN_AUDIO_HOOK_TOKEN
                            Bearer token for the audio hook endpoint;
                            falls back to STACKCHAN_TOKEN.
+  STACKCHAN_LISTEN_LANGUAGE
+                           Language for local audio-hook transcription
+                           (default ja).
   HOST                     Bind address for the ESP32 WebSocket server
                            (default 0.0.0.0).
   WS_PORT                  Port for the ESP32 WebSocket server

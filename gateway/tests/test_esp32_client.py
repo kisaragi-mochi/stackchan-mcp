@@ -1397,6 +1397,58 @@ async def test_device_driven_listen_pushes_to_hook(manager_with_hook):
 
 
 @pytest.mark.asyncio
+async def test_device_driven_listen_local_hook_stays_in_process(monkeypatch):
+    """STACKCHAN_AUDIO_HOOK_URL=local transcribes here, no HTTP POST."""
+    from stackchan_mcp.audio_stream import is_recording
+
+    local_calls: list[list[bytes]] = []
+    http_calls: list[object] = []
+
+    async def _fake_local(frames, *, session_id="", gateway=None):
+        local_calls.append(list(frames))
+        return True
+
+    async def _fake_push(*_args, **_kwargs):
+        http_calls.append(True)
+        return True
+
+    monkeypatch.setattr(
+        "stackchan_mcp.esp32_client.handle_local_capture", _fake_local
+    )
+    monkeypatch.setattr(
+        "stackchan_mcp.esp32_client.push_audio_capture", _fake_push
+    )
+
+    mgr = ESP32Manager()
+    await mgr.start("127.0.0.1", 0, audio_hook_url="local")
+    port = mgr._server.sockets[0].getsockname()[1]
+    try:
+        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+            await _complete_handshake(ws)
+            await ws.send(json.dumps({
+                "type": "listen",
+                "state": "start",
+                "mode": "manual",
+            }))
+            for _ in range(20):
+                await asyncio.sleep(0.05)
+                if is_recording():
+                    break
+            await ws.send(b"\x11\x22")
+            await asyncio.sleep(0.05)
+            await ws.send(json.dumps({"type": "listen", "state": "stop"}))
+            for _ in range(20):
+                await asyncio.sleep(0.05)
+                if local_calls:
+                    break
+    finally:
+        await mgr.stop()
+
+    assert local_calls == [[b"\x11\x22"]]
+    assert http_calls == []
+
+
+@pytest.mark.asyncio
 async def test_device_driven_listen_disabled_when_no_hook(manager):
     """Without STACKCHAN_AUDIO_HOOK_URL the gateway ignores inbound
     listen.start (no recording slot opens, no push fires)."""
