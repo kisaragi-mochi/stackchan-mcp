@@ -43,6 +43,9 @@ _PREFLIGHT_ENV_VARS = (
     "MCP_HTTP_HOST",
     "MCP_HTTP_PORT",
     "MCP_HTTP_ALLOWED_HOSTS",
+    "STACKCHAN_AVATAR_SET_PATH",
+    "STACKCHAN_AVATAR_SET_MODE",
+    "STACKCHAN_AVATAR_SET_TIMEOUT",
 )
 
 
@@ -565,6 +568,7 @@ def test_run_preflight_with_no_config_reports_defaults_and_exits_zero(
     assert "VISION_HOST         not set" in out
     assert "VISION_URL          not set" in out
     assert "VISION_TOKEN        not set" in out
+    assert "STACKCHAN_AVATAR_SET_PATH not set" in out
     assert "ws://0.0.0.0:8765" in out
     assert "http://0.0.0.0:8766" in out
     assert "http://127.0.0.1:8767/mcp" in out

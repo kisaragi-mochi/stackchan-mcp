@@ -32,6 +32,7 @@ stackchan-mcp/
 
 | Task | Where to look | Key commands |
 |---|---|---|
+| Factory kit → Cursor | `docs/first-run-from-factory.md` | Unbind, flash, phone Wi-Fi, `--no-mdns` gateway, MCP URL |
 | Install the gateway | `README.md` Quick Start | `pipx install stackchan-mcp` |
 | Build firmware | `firmware/AGENTS.md` | `docker run ... python ./scripts/release.py stackchan` |
 | Flash firmware | `firmware/AGENTS.md` | `esptool.py ... write_flash 0x20000 build/xiaozhi.bin` |

@@ -7,7 +7,7 @@ and as an MCP client that sends commands TO the ESP32.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 import json
 import logging
 import os
@@ -457,6 +457,9 @@ class ESP32Manager:
         self._lock = asyncio.Lock()
         self._notify_config = notify_config or load_notify_config()
         self._init_tasks: list[asyncio.Task] = []
+        self._on_device_ready: (
+            Callable[[ESP32Connection, str], Awaitable[None]] | None
+        ) = None
         self._vision_url: str = ""
         self._vision_token: str = ""
         # Per-device serialisation for TTS send sequences. Acquired by
@@ -522,6 +525,18 @@ class ESP32Manager:
     def set_notify_config(self, notify_config: NotifyConfig) -> None:
         """Replace the startup notification config used for future events."""
         self._notify_config = notify_config
+
+    def set_on_device_ready(
+        self,
+        callback: Callable[[ESP32Connection, str], Awaitable[None]] | None,
+    ) -> None:
+        """Run ``callback(connection, device_id)`` after a successful init.
+
+        Used by the gateway to reload a configured avatar set on every
+        (re)connect. The callback must fail open: exceptions are logged
+        and do not block the idle-avatar render or ``ESP32 ready``.
+        """
+        self._on_device_ready = callback
 
     @property
     def device_connected(self) -> bool:
@@ -770,11 +785,8 @@ class ESP32Manager:
                                 "session=%s frames=%d",
                                 session_id, len(frames),
                             )
-                            # Push asynchronously so the WebSocket read
-                            # loop is not blocked by the HTTP POST
-                            # round-trip. The task is fire-and-forget;
-                            # failures are logged inside
-                            # push_audio_capture and do not propagate.
+                            # Fire-and-forget so the WebSocket read
+                            # loop is not blocked by the HTTP POST.
                             asyncio.create_task(
                                 push_audio_capture(
                                     self._audio_hook_url,
@@ -864,6 +876,15 @@ class ESP32Manager:
             if not connection.tools_discovered:
                 logger.error("ESP32 tools discovery failed")
                 return
+            if self._on_device_ready is not None:
+                try:
+                    await self._on_device_ready(connection, device_id)
+                except Exception as exc:
+                    logger.warning(
+                        "on_device_ready failed: device=%s error=%s",
+                        device_id,
+                        exc,
+                    )
             await self._auto_render_idle_avatar(connection, device_id)
             logger.info(
                 "ESP32 ready: device=%s tools=%d",

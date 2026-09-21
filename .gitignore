@@ -19,6 +19,7 @@ CLAUDE.md
 captures/
 *.jpg
 !docs/**/*.jpg
+*.rgb565
 
 # IDE
 .vscode/

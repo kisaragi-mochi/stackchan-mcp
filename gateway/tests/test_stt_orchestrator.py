@@ -150,6 +150,21 @@ def _cleanup_recording_slot():
         stop_recording()
 
 
+def test_resolve_listen_language_defaults_to_ja(monkeypatch):
+    monkeypatch.delenv("STACKCHAN_LISTEN_LANGUAGE", raising=False)
+    assert orchestrator.resolve_listen_language({}) == "ja"
+
+
+def test_resolve_listen_language_uses_env_when_omitted(monkeypatch):
+    monkeypatch.setenv("STACKCHAN_LISTEN_LANGUAGE", "en")
+    assert orchestrator.resolve_listen_language({}) == "en"
+
+
+def test_resolve_listen_language_argument_wins(monkeypatch):
+    monkeypatch.setenv("STACKCHAN_LISTEN_LANGUAGE", "en")
+    assert orchestrator.resolve_listen_language({"language": "ja"}) == "ja"
+
+
 @pytest.mark.asyncio
 async def test_pipeline_drives_listen_state_and_returns_text(fake_decode, monkeypatch):
     """Happy path: start/stop notifications fire, frames decode, engine runs."""

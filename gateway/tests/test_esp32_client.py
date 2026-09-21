@@ -700,6 +700,72 @@ async def test_reconnect_auto_renders_idle_avatar_again():
 
 
 @pytest.mark.asyncio
+async def test_init_runs_on_device_ready_before_idle_avatar():
+    """Gateway autoload hook runs after tools/list and before idle render."""
+    order: list[str] = []
+    connection = _InitDeviceConnection()
+
+    async def on_ready(conn, device_id: str) -> None:
+        assert conn is connection
+        assert device_id == "device-test"
+        order.append("ready")
+
+    mgr = ESP32Manager()
+    mgr.set_on_device_ready(on_ready)
+    original = mgr._auto_render_idle_avatar
+
+    async def tracked_idle(conn, device_id: str) -> None:
+        order.append("idle")
+        await original(conn, device_id)
+
+    mgr._auto_render_idle_avatar = tracked_idle  # type: ignore[method-assign]
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert order == ["ready", "idle"]
+    assert connection.call_tool_calls == [
+        ("self.display.set_avatar", {"face": "idle"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_init_continues_when_on_device_ready_fails(caplog):
+    """A failing autoload hook must not block idle render or ESP32 ready."""
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    connection = _InitDeviceConnection()
+
+    async def boom(_conn, _device_id: str) -> None:
+        raise RuntimeError("avatar fetch failed")
+
+    mgr = ESP32Manager()
+    mgr.set_on_device_ready(boom)
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert connection.call_tool_calls == [
+        ("self.display.set_avatar", {"face": "idle"})
+    ]
+    assert "on_device_ready failed" in caplog.text
+    assert "ESP32 ready: device=device-test tools=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_init_skips_on_device_ready_when_tools_discovery_fails():
+    """The autoload hook only runs after a successful tools/list."""
+    called = False
+
+    async def on_ready(_conn, _device_id: str) -> None:
+        nonlocal called
+        called = True
+
+    mgr = ESP32Manager()
+    mgr.set_on_device_ready(on_ready)
+    connection = _InitDeviceConnection(discover_ok=False)
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert called is False
+    assert connection.call_tool_calls == []
+
+
+@pytest.mark.asyncio
 async def test_send_avatar_set_fetch_resolves_when_loaded_event_arrives():
     """avatar_set_loaded resolves the matching load_avatar_set waiter."""
     ws = _FakeWebSocket()

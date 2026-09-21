@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -56,6 +57,19 @@ logger = logging.getLogger(__name__)
 #: faster-whisper runs locally and matches the "works offline out of
 #: the box" stance (Issue #91).
 DEFAULT_ENGINE = "faster-whisper"
+
+#: Default ISO 639-1 language when ``listen()`` omits ``language``.
+#: Override with ``STACKCHAN_LISTEN_LANGUAGE`` (e.g. ``en``).
+LISTEN_LANGUAGE_ENV = "STACKCHAN_LISTEN_LANGUAGE"
+DEFAULT_LISTEN_LANGUAGE = "ja"
+
+
+def resolve_listen_language(arguments: dict[str, Any]) -> Any:
+    """Return the listen language: explicit argument, then env, then ``ja``."""
+    if "language" in arguments:
+        return arguments["language"]
+    env = os.getenv(LISTEN_LANGUAGE_ENV, "").strip()
+    return env or DEFAULT_LISTEN_LANGUAGE
 
 #: Minimum capture window. Below this Whisper has too little signal to
 #: produce anything useful, and the listen() round-trip starts to be
@@ -400,7 +414,7 @@ async def listen_and_transcribe(
         )
 
     duration_ms = int(duration_raw)
-    language = arguments.get("language", "ja")
+    language = resolve_listen_language(arguments)
     model = arguments.get("model")
 
     frame_count = 0

@@ -34,6 +34,9 @@ def _patch_gateway_network(monkeypatch: pytest.MonkeyPatch, gw: Gateway) -> list
             self._server = object()
             calls.append(("esp32_start", host, port, vision_url, vision_token))
 
+        def set_on_device_ready(self, callback) -> None:
+            self._on_device_ready = callback
+
         async def stop(self) -> None:
             self._server = None
             calls.append(("esp32_stop",))
@@ -408,3 +411,177 @@ async def test_gateway_mdns_stop_failure_does_not_mask_shutdown(
     assert gw._mdns_advertiser is None
     assert gw.esp32._server is None
     assert "mDNS advertisement shutdown failed" in caplog.text
+
+
+def test_resolve_configured_avatar_set_unset(monkeypatch):
+    from stackchan_mcp.gateway import resolve_configured_avatar_set
+
+    monkeypatch.delenv("STACKCHAN_AVATAR_SET_PATH", raising=False)
+    assert resolve_configured_avatar_set() is None
+
+
+def test_resolve_configured_avatar_set_infers_mode(monkeypatch, tmp_path):
+    from stackchan_mcp import gateway as gw_mod
+    from stackchan_mcp.gateway import (
+        _AVATAR_LAYERED_BYTES,
+        _AVATAR_MATRIX_BYTES,
+        resolve_configured_avatar_set,
+    )
+
+    monkeypatch.delenv("STACKCHAN_AVATAR_SET_MODE", raising=False)
+    monkeypatch.delenv("STACKCHAN_AVATAR_SET_TIMEOUT", raising=False)
+
+    matrix = tmp_path / "classic.rgb565"
+    matrix.write_text("")
+    layered = tmp_path / "layered.rgb565"
+    layered.write_text("")
+    sizes = {
+        str(matrix): _AVATAR_MATRIX_BYTES,
+        str(layered): _AVATAR_LAYERED_BYTES,
+    }
+    monkeypatch.setattr(gw_mod.os.path, "getsize", lambda path: sizes[path])
+
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_PATH", str(matrix))
+    assert resolve_configured_avatar_set() == {
+        "path": str(matrix),
+        "mode": "matrix",
+        "timeout": 180.0,
+    }
+
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_PATH", str(layered))
+    assert resolve_configured_avatar_set() == {
+        "path": str(layered),
+        "mode": "layered",
+        "timeout": 60.0,
+    }
+
+
+def test_resolve_configured_avatar_set_honours_overrides(monkeypatch, tmp_path):
+    from stackchan_mcp.gateway import resolve_configured_avatar_set
+
+    missing = tmp_path / "missing.rgb565"
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_PATH", f"~/{missing.name}")
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_MODE", "layered")
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_TIMEOUT", "90")
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    resolved = resolve_configured_avatar_set()
+    assert resolved == {
+        "path": str(tmp_path / missing.name),
+        "mode": "layered",
+        "timeout": 90.0,
+    }
+
+
+def test_resolve_configured_avatar_set_fails_closed_on_unknown_size(
+    monkeypatch, tmp_path, caplog
+):
+    from stackchan_mcp.gateway import resolve_configured_avatar_set
+
+    weird = tmp_path / "weird.rgb565"
+    weird.write_bytes(b"x" * 1234)
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_PATH", str(weird))
+    monkeypatch.delenv("STACKCHAN_AVATAR_SET_MODE", raising=False)
+    monkeypatch.delenv("STACKCHAN_AVATAR_SET_TIMEOUT", raising=False)
+
+    caplog.set_level("WARNING")
+    assert resolve_configured_avatar_set() is None
+    assert "neither layered" in caplog.text
+
+
+def test_resolve_configured_avatar_set_fails_closed_when_missing_without_mode(
+    monkeypatch, tmp_path, caplog
+):
+    from stackchan_mcp.gateway import resolve_configured_avatar_set
+
+    missing = tmp_path / "missing.rgb565"
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_PATH", str(missing))
+    monkeypatch.delenv("STACKCHAN_AVATAR_SET_MODE", raising=False)
+
+    caplog.set_level("WARNING")
+    assert resolve_configured_avatar_set() is None
+    assert "file is missing" in caplog.text
+
+
+class _BlinkEsp32:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.calls.append((name, arguments))
+        return {"ok": True}, None
+
+
+@pytest.mark.asyncio
+async def test_autoload_configured_avatar_set_skips_when_unset(monkeypatch):
+    from stackchan_mcp.gateway import Gateway
+
+    monkeypatch.delenv("STACKCHAN_AVATAR_SET_PATH", raising=False)
+    gw = Gateway()
+    gw.esp32 = _BlinkEsp32()  # type: ignore[assignment]
+    called = False
+
+    async def boom(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("load_avatar_set should not run")
+
+    gw.load_avatar_set = boom  # type: ignore[method-assign]
+    await gw._autoload_configured_avatar_set(None, "device-test")  # type: ignore[arg-type]
+    assert called is False
+    assert gw.esp32.calls == []
+
+
+@pytest.mark.asyncio
+async def test_autoload_configured_avatar_set_loads_and_logs_failure(
+    monkeypatch, tmp_path, caplog
+):
+    from stackchan_mcp.gateway import Gateway
+
+    archive = tmp_path / "classic.rgb565"
+    archive.write_bytes(b"x")
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_PATH", str(archive))
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_MODE", "matrix")
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_TIMEOUT", "120")
+
+    gw = Gateway()
+    gw.esp32 = _BlinkEsp32()  # type: ignore[assignment]
+    calls: list[tuple] = []
+
+    async def fake_load(path: str, mode: str, timeout: float = 60.0):
+        calls.append((path, mode, timeout))
+        return {"ok": False, "error": "device_timeout"}
+
+    gw.load_avatar_set = fake_load  # type: ignore[method-assign]
+    caplog.set_level("WARNING")
+    await gw._autoload_configured_avatar_set(None, "device-test")  # type: ignore[arg-type]
+
+    assert calls == [(str(archive), "matrix", 120.0)]
+    assert "auto-loading avatar set failed" in caplog.text
+    assert "device_timeout" in caplog.text
+    assert gw.esp32.calls == [("self.display.set_blink", {"enabled": True})]
+
+
+@pytest.mark.asyncio
+async def test_autoload_blink_failure_does_not_raise(monkeypatch, tmp_path, caplog):
+    from stackchan_mcp.gateway import Gateway
+
+    archive = tmp_path / "classic.rgb565"
+    archive.write_bytes(b"x")
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_PATH", str(archive))
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_MODE", "matrix")
+    gw = Gateway()
+
+    async def fake_load(*_args, **_kwargs):
+        return {"ok": True}
+
+    class BoomEsp32:
+        async def call_tool(self, _name: str, _arguments: dict):
+            raise RuntimeError("no device")
+
+    gw.load_avatar_set = fake_load  # type: ignore[method-assign]
+    gw.esp32 = BoomEsp32()  # type: ignore[assignment]
+    caplog.set_level("WARNING")
+    await gw._autoload_configured_avatar_set(None, "device-test")  # type: ignore[arg-type]
+    assert "auto-enabling blink failed" in caplog.text
+    assert "no device" in caplog.text

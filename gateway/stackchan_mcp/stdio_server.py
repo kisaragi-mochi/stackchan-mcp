@@ -2453,10 +2453,12 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         "language": {
                             "type": "string",
                             "description": (
-                                "ISO 639-1 language code (e.g. 'ja'). Pass "
-                                "an empty string or omit for autodetect."
+                                "ISO 639-1 language code (e.g. 'ja', 'en'). "
+                                "Omit this field to use STACKCHAN_LISTEN_LANGUAGE, "
+                                "or 'ja' when that env is unset. Do not rely on a "
+                                "schema default — many clients send defaults even "
+                                "when the caller did not choose a language."
                             ),
-                            "default": "ja",
                         },
                         "model": {
                             "type": "string",
