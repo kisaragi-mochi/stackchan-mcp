@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,7 +15,9 @@ logger = logging.getLogger(__name__)
 SERVICE_TYPE = "_stackchan-mcp._tcp.local."
 DEFAULT_INSTANCE = "stackchan-mcp"
 SERVICE_NAME = f"{DEFAULT_INSTANCE}.{SERVICE_TYPE}"
-FALLBACK_SERVICE_HOSTNAME = f"{DEFAULT_INSTANCE}.local."
+# Stable through address refreshes, distinct across processes and restarts so
+# stale/renamed instances cannot merge another gateway's A records.
+_GATEWAY_ID = uuid.uuid4().hex
 TXT_VERSION = "1"
 
 # Private (RFC1918) IPv4 ranges. Addresses inside these ranges are the most
@@ -102,14 +105,15 @@ def _lan_reachability_tier(address: str) -> int:
 
 def _select_advertised_addresses(
     candidates: list[tuple[str, int | None]],
+    *,
+    preferred_address: str | None = None,
 ) -> list[str]:
     """Filter, de-duplicate and order candidate addresses for advertisement.
 
-    Excludes only clearly-unusable addresses (loopback/multicast/unspecified via
-    :func:`_is_usable_ipv4`, plus network/broadcast addresses when a prefix is
-    known). All remaining addresses are kept and ordered by LAN-reachability
-    likelihood (RFC1918 private ranges first) using a stable sort, so addresses
-    a same-LAN device can reach are tried before overlay/global/edge-case ones.
+    When available, advertise only the default-route address: DNS A record
+    order is not guaranteed, so sorting cannot keep a bridge out of first place.
+    Otherwise retain the existing RFC1918-first fallback. Both paths exclude
+    loopback/multicast/unspecified and known network/broadcast addresses.
     """
     seen: set[str] = set()
     usable: list[str] = []
@@ -120,6 +124,8 @@ def _select_advertised_addresses(
             continue
         seen.add(address)
         usable.append(address)
+    if preferred_address in usable:
+        return [preferred_address]
     usable.sort(key=_lan_reachability_tier)
     return usable
 
@@ -132,14 +138,13 @@ def _is_wildcard_host(host: str) -> bool:
     return ip.is_unspecified
 
 
-def _build_service_hostname() -> str:
+def _build_service_hostname(gateway_id: str) -> str:
     """Return a service-specific mDNS hostname for the SRV record.
 
-    Uses a fixed name to avoid advertising A records that overlap with
-    the system's own Bonjour hostname registration, which can trigger
-    macOS to change the user's LocalHostName.
+    Keep each gateway's A records separate, including after instance renaming,
+    without overlapping the system's Bonjour LocalHostName.
     """
-    return FALLBACK_SERVICE_HOSTNAME
+    return f"{DEFAULT_INSTANCE}-{gateway_id}.local."
 
 
 def _iter_ifaddr_ipv4_addresses() -> list[tuple[str, int | None]]:
@@ -181,23 +186,27 @@ def _iter_socket_ipv4_addresses() -> list[tuple[str, int | None]]:
         for _family, _socktype, _proto, _canonname, sockaddr in infos:
             addresses.add(sockaddr[0])
 
-    # Add the primary outbound IPv4 as a best-effort fallback. UDP connect()
-    # selects a local address without sending packets.
+    return [(address, None) for address in sorted(addresses)]
+
+
+def _primary_ipv4_address() -> str | None:
+    """Find the default-route IPv4; UDP connect selects it without sending data."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.connect(("8.8.8.8", 80))
-        addresses.add(sock.getsockname()[0])
+        return sock.getsockname()[0]
     except OSError:
-        pass
+        return None
     finally:
         sock.close()
-
-    return [(address, None) for address in sorted(addresses)]
 
 
 def _enumerate_usable_ipv4_addresses() -> list[str]:
     ifaddr_entries = _iter_ifaddr_ipv4_addresses()
     socket_entries = _iter_socket_ipv4_addresses()
+    primary = _primary_ipv4_address()
+    if primary is not None:
+        socket_entries.append((primary, None))
 
     # The socket-based source carries no subnet prefix, so on its own it cannot
     # exclude network/broadcast addresses. When the same address also appears
@@ -218,7 +227,7 @@ def _enumerate_usable_ipv4_addresses() -> list[str]:
     ]
 
     return _select_advertised_addresses(
-        [*ifaddr_entries, *enriched_socket_entries]
+        [*ifaddr_entries, *enriched_socket_entries], preferred_address=primary
     )
 
 
@@ -243,8 +252,9 @@ def _resolve_addresses_for_host(host: str) -> list[str]:
     """Resolve advertised addresses for ``host`` using the same logic as
     :func:`build_advertisement`.
 
-    Wildcard hosts (``0.0.0.0`` / ``*`` / ``""``) enumerate every usable
-    non-loopback IPv4 address on the machine; concrete hosts only resolve
+    Wildcard hosts (``0.0.0.0`` / ``*`` / ``""``) prefer the default-route
+    IPv4 address, falling back to enumeration when no route is available.
+    Concrete hosts only resolve
     addresses for that specific host. The refresh loop calls this helper so
     its comparison set matches what a fresh ``build_advertisement(...)``
     would actually register — without this, a host started with a concrete
@@ -286,7 +296,7 @@ def build_advertisement(
     return MdnsAdvertisement(
         service_type=SERVICE_TYPE,
         service_name=SERVICE_NAME,
-        server=_build_service_hostname(),
+        server=_build_service_hostname(_GATEWAY_ID),
         port=port,
         path=normalized_path,
         properties={"path": normalized_path, "version": TXT_VERSION},
@@ -393,8 +403,9 @@ class MdnsAdvertiser:
                 advertisement.service_name,
             )
         logger.info(
-            "mDNS advertising %s on port %d with addresses %s reason=register",
+            "mDNS advertising %s server=%s on port %d with addresses %s reason=register",
             registered_name,
+            advertisement.server,
             advertisement.port,
             ", ".join(advertisement.parsed_addresses),
         )

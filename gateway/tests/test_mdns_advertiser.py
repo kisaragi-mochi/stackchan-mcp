@@ -10,6 +10,12 @@ from stackchan_mcp import mdns_advertiser as mdns
 from stackchan_mcp.mdns_advertiser import MdnsAdvertiser, build_advertisement
 
 
+@pytest.fixture(autouse=True)
+def no_host_default_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Address-selection tests must not depend on the runner's network.
+    monkeypatch.setattr(mdns, "_primary_ipv4_address", lambda: None)
+
+
 def test_service_type_and_txt_defaults() -> None:
     advertisement = build_advertisement(
         host="192.0.2.10",
@@ -26,7 +32,61 @@ def test_service_type_and_txt_defaults() -> None:
 
 
 def test_service_hostname_is_service_specific() -> None:
-    assert mdns._build_service_hostname() == "stackchan-mcp.local."
+    assert mdns._build_service_hostname("a" * 32) == f"stackchan-mcp-{'a' * 32}.local."
+    assert mdns._build_service_hostname("a" * 32) != mdns._build_service_hostname("b" * 32)
+
+
+def test_same_named_gateways_have_separate_srv_address_owners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mdns, "_GATEWAY_ID", "a" * 32)
+    first = build_advertisement(host="192.0.2.10", port=8765)
+    refreshed = build_advertisement(host="192.0.2.11", port=8765)
+    monkeypatch.setattr(mdns, "_GATEWAY_ID", "b" * 32)
+    second = build_advertisement(host="192.0.2.20", port=8765)
+    assert first is not None and refreshed is not None and second is not None
+    assert first.service_name == second.service_name
+    assert first.server == refreshed.server
+    assert first.server != second.server
+    # Even if DNS-SD renames the second instance, its SRV target owns only
+    # that gateway's A records; no shared owner can merge the two address sets.
+    records = {first.server: first.parsed_addresses, second.server: second.parsed_addresses}
+    assert records[first.server] == ["192.0.2.10"]
+    assert records[second.server] == ["192.0.2.20"]
+
+
+@pytest.mark.parametrize("lan", ["192.168.1.10", "10.0.0.10", "172.20.0.10"])
+def test_default_route_lan_excludes_rfc1918_bridges(lan: str) -> None:
+    candidates = [("172.17.0.1", 16), ("192.168.64.1", 24), (lan, 24)]
+    assert mdns._select_advertised_addresses(candidates, preferred_address=lan) == [lan]
+
+
+def test_unusable_default_route_retains_lan_fallback() -> None:
+    assert mdns._select_advertised_addresses(
+        [("192.168.1.0", 24), ("192.168.1.10", 24)],
+        preferred_address="192.168.1.0",
+    ) == ["192.168.1.10"]
+
+
+def test_wildcard_scopes_addresses_to_default_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mdns, "_iter_ifaddr_ipv4_addresses",
+        lambda: [("172.17.0.1", 16), ("192.168.1.10", 24)],
+    )
+    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [("172.17.0.1", None)])
+    monkeypatch.setattr(mdns, "_primary_ipv4_address", lambda: "192.168.1.10")
+    advertisement = build_advertisement(host="0.0.0.0", port=8765)
+    assert advertisement is not None
+    assert advertisement.parsed_addresses == ["192.168.1.10"]
+
+
+def test_concrete_host_overrides_default_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mdns, "_primary_ipv4_address", lambda: "192.168.1.10")
+    advertisement = build_advertisement(host="192.0.2.10", port=8765)
+    assert advertisement is not None
+    assert advertisement.parsed_addresses == ["192.0.2.10"]
 
 
 def test_wildcard_host_advertises_all_usable_non_loopback_ipv4(
