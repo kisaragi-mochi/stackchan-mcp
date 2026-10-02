@@ -108,6 +108,58 @@ async def test_get_head_angles_relays_to_esp32(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_tools_includes_screen_off_timeout_tools():
+    server = create_server()
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+    tools = {tool.name: tool for tool in result.root.tools}
+    schema = tools["set_off_timeout"].inputSchema
+    assert schema["required"] == ["seconds"]
+    assert schema["properties"]["seconds"] == {
+        "type": "integer", "minimum": 0, "maximum": 86400,
+    }
+    assert tools["get_off_timeout"].inputSchema == {
+        "type": "object", "properties": {},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("set_off_timeout", {"seconds": 0}),
+        ("set_off_timeout", {"seconds": 300}),
+        ("set_off_timeout", {"seconds": 86400}),
+        ("get_off_timeout", {}),
+    ],
+)
+async def test_screen_off_timeout_relays_to_esp32(monkeypatch, name, arguments):
+    calls = []
+    payload = {"seconds": arguments.get("seconds", 300), "persistent": True}
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, tool_name, tool_arguments):
+            calls.append((tool_name, tool_arguments))
+            return {"content": [{"type": "text", "text": json.dumps(payload)}]}, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call", params={"name": name, "arguments": arguments},
+        )
+    )
+    assert calls == [(f"self.screen.{name}", arguments)]
+    assert json.loads(result.root.content[0].text) == payload
+
+
+@pytest.mark.asyncio
 async def test_list_tools_includes_gateway_config_tools():
     """gateway_config_get/set are exposed with the expected schemas."""
     server = create_server()

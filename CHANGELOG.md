@@ -38,6 +38,11 @@ documented-only.
 
 ### Gateway
 
+- Expose `set_off_timeout(seconds: 0..86400)` and `get_off_timeout` in
+  `tools/list` so MCP clients can discover the existing screen-off controls.
+  The default is 300 seconds; `0` disables screen-off. Requires firmware
+  1.17.0 or later.
+
 - Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
   alongside Irodori: official REST API with `eleven_v3` as the default
   model, per-speaker voice ids via `STACKCHAN_ELEVEN_VOICE_<SPEAKER>`

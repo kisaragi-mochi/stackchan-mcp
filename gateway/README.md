@@ -175,6 +175,8 @@ Same shape, under `mcpServers`.
 | `take_photo(question?)` | Trigger camera capture; returns the saved JPEG path plus the image itself as an inline MCP image block |
 | `set_volume(volume)` | Speaker volume 0-100 |
 | `set_brightness(brightness)` | Screen brightness 0-100 |
+| `set_off_timeout(seconds)` | Set the idle screen-off timeout (integer 0..86400 seconds; default 300, 0 disables). Applied immediately and saved in NVS across reboots. Requires firmware 1.17.0+ |
+| `get_off_timeout` | Read the effective persistent timeout, whether it is enabled, and whether the screen is off. Requires firmware 1.17.0+ |
 | `move_head(yaw, pitch, speed?)` | Drive yaw + pitch servos |
 | `get_head_angles` | Read current yaw + pitch servo angles |
 | `get_touch_state` | Touch sensor state (press/release/stroke) |

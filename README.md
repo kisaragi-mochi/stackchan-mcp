@@ -51,6 +51,8 @@ This repository is a monorepo.
 | `take_photo(question?)` | Capture a frame, save as JPEG, return the path + inline image block | ✅ |
 | `set_volume(volume)` | Speaker volume (0-100) | ✅ |
 | `set_brightness(brightness)` | Screen brightness (0-100) | ✅ |
+| `set_off_timeout(seconds)` | Persistent idle screen-off timeout (0..86400 seconds; default 300, 0 disables). Requires firmware 1.17.0+ | ✅ |
+| `get_off_timeout` | Read the persistent screen-off timeout and current screen state. Requires firmware 1.17.0+ | ✅ |
 | `move_head(yaw, pitch, speed?)` | Move the neck (servos). `pitch` is constrained to `5..85` — the M5Stack-recommended operating range. For the wider firmware hard clamp (`0..88`), use the firmware-side `set_head_angles` device tool instead. | ✅ |
 | `get_touch_state` | Touch sensor state (press / release / stroke / etc.) | ✅ |
 | `get_touch_sensor_enabled` | Read whether head-touch detection is enabled. The NVS-backed setting persists across reboot. | ✅ |
