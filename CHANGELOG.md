@@ -30,19 +30,14 @@ documented-only.
 
 ## [Unreleased]
 
-### Docs
-
-- Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
-  frame-geometry consistency, full-frame exports from layered sources,
-  the avatar-set fetch window, and blink cadence tuning.
+## [0.18.0] - 2026-10-03
 
 ### Gateway
 
 - Expose `set_off_timeout(seconds: 0..86400)` and `get_off_timeout` in
   `tools/list` so MCP clients can discover the existing screen-off controls.
   The default is 300 seconds; `0` disables screen-off. Requires firmware
-  1.17.0 or later.
-
+  1.17.0 or later. (#378)
 - Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
   alongside Irodori: official REST API with `eleven_v3` as the default
   model, per-speaker voice ids via `STACKCHAN_ELEVEN_VOICE_<SPEAKER>`
@@ -57,11 +52,27 @@ documented-only.
 - `get_status` now reports the WebSocket `session_id` alongside the
   connection flags. The id changes on every (re)connection, so a polling
   host can detect a device reboot even when the reconnect lands between
-  polls and `connected` never reads false.
+  polls and `connected` never reads false. (#357)
 - Dispatch `set_off_timeout` / `get_off_timeout` MCP calls through to the
   device's `self.screen.set_off_timeout` / `self.screen.get_off_timeout`
   tools, so the new firmware screen-off timeout is reachable over the
-  gateway.
+  gateway. (#361)
+
+### Compatibility and known limitations
+
+- Recommended pairing: gateway **0.18.0** with firmware **1.17.0**.
+  Existing tools remain compatible with firmware 1.16.0; the photo image
+  block, ElevenLabs, and `session_id` do not require a firmware update.
+  Screen-off configuration through the gateway requires both new versions.
+- `take_photo` now returns an image block in addition to its text receipt;
+  custom clients that assume text-only results must handle MCP ImageContent.
+  The existing text-only fallback remains available when inlining fails.
+- If #375 is not merged: with multiple gateways or VM/Docker interfaces, use an explicit device-side gateway URL to bypass mDNS discovery.
+- HTTP TTS timeouts are not a deadline for the entire synthesis (#368);
+  relay-based recording can return empty audio (#350). These remain open
+  limitations, not fixes delivered by this release.
+
+## [firmware-v1.17.0] - 2026-10-03
 
 ### Firmware
 
@@ -70,13 +81,44 @@ documented-only.
   Ping (every 15 s) probes the connection; the Pong response refreshes
   a liveness timestamp via `WebSocket::OnPong` (esp-ml307 #49). If no
   frame arrives within 60 s, the connection is considered dead and a
-  graceful reconnect is forced without a device reboot. (#239)
+  graceful reconnect is forced without a device reboot. (#239, #240)
 - Added a persistent StackChan screen-off timeout (300 seconds by default,
   `0` to disable) with touch, voice-session (including gateway `say`), avatar,
   emotion, and MCP wake paths. Activity resets both screen-off and system
   power-save deadlines. Includes `self.screen.set_off_timeout` /
-  `self.screen.get_off_timeout` controls.
-- Added opt-in, compile-time configurable AXP2101 charge hysteresis for StackChan. The feature is disabled by default; when enabled, startup first allows charging, protection disables it at 70% or above, and charging resumes at 30% or below. An unreadable fuel gauge fails safe to charging enabled. `self.power.set_charge_enabled` and `self.power.get_charge_state` provide manual control and state inspection.
+  `self.screen.get_off_timeout` controls. (#361)
+- Added opt-in, compile-time configurable AXP2101 charge hysteresis for StackChan. The feature is disabled by default; when enabled, startup first allows charging, protection disables it at 70% or above, and charging resumes at 30% or below. An unreadable fuel gauge fails safe to charging enabled. `self.power.set_charge_enabled` and `self.power.get_charge_state` provide manual control and state inspection. (#360)
+
+### Compatibility and known limitations
+
+- Recommended pairing: firmware **1.17.0** with gateway **0.18.0**.
+  Keepalive and default screen-off also work with gateway 0.17.0;
+  discovering the timeout controls requires gateway 0.18.0.
+- The screen now sleeps and turns its backlight off after **300 seconds**
+  of inactivity by default. Touch, voice, avatar, and MCP activity wake it;
+  `set_off_timeout(seconds=0)` disables it. The timeout is saved in NVS
+  (`display.off_timeout`); older firmware ignores the new key. Screen-off
+  does not disconnect the gateway or put the whole device to sleep.
+- Automatic charge protection is **OFF by default**, enabled only with the
+  compile-time opt-in `STACKCHAN_CHARGE_AUTO=1`. Charging starts enabled;
+  opt-in protection stops it at >=70% and resumes it at <=30%. Manual
+  charge controls are device-side only, absent from the standard gateway's
+  tool list and relay map. The runtime protection toggle in #362 is not included.
+- Transient PMIC I2C errors can still trigger a reboot (#367). Existing
+  servo-hang (#100) and initial-connection (#104) reports are not resolved
+  by this release; verify affected paths on hardware before publishing.
+- Firmware release numbering is independent of the upstream
+  `PROJECT_VER=2.2.6`; the convenience archive remains `v2.2.6_stackchan.zip`.
+  Existing devices should use the app-only `xiaozhi.bin` update at `0x20000`
+  to preserve NVS/Wi-Fi configuration.
+
+### Docs
+
+- Added avatar authoring notes (`docs/avatar-authoring-notes.md`):
+  frame-geometry consistency, full-frame exports from layered sources,
+  the avatar-set fetch window, and blink cadence tuning. (#358)
+- Correct the CoreS3 hardware specification to 8 MB Quad PSRAM in
+  `firmware/AGENTS.md`; firmware configuration is unchanged.
 
 ## [0.17.0] - 2026-07-12
 
@@ -1875,7 +1917,9 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.17.0...v0.18.0
+[firmware-v1.17.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.16.0...firmware-v1.17.0
 [0.17.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.16.0...v0.17.0
 [firmware-v1.16.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.15.0...firmware-v1.16.0
 [0.16.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.15.0...v0.16.0
