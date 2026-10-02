@@ -50,36 +50,151 @@ def test_same_named_gateways_have_separate_srv_address_owners(
     assert first.server != second.server
     # Even if DNS-SD renames the second instance, its SRV target owns only
     # that gateway's A records; no shared owner can merge the two address sets.
-    records = {first.server: first.parsed_addresses, second.server: second.parsed_addresses}
+    records = {
+        first.server: first.parsed_addresses,
+        second.server: second.parsed_addresses,
+    }
     assert records[first.server] == ["192.0.2.10"]
     assert records[second.server] == ["192.0.2.20"]
 
 
 @pytest.mark.parametrize("lan", ["192.168.1.10", "10.0.0.10", "172.20.0.10"])
 def test_default_route_lan_excludes_rfc1918_bridges(lan: str) -> None:
-    candidates = [("172.17.0.1", 16), ("192.168.64.1", 24), (lan, 24)]
+    candidates = [
+        ("172.17.0.1", 16, "docker0"),
+        ("192.168.64.1", 24, "bridge100"),
+        (lan, 24, "en0"),
+    ]
     assert mdns._select_advertised_addresses(candidates, preferred_address=lan) == [lan]
+
+
+@pytest.mark.parametrize(
+    ("candidates", "preferred", "expected"),
+    [
+        (
+            [("172.17.0.1", 16, "docker0"), ("192.168.1.10", 24, "en0")],
+            "192.168.1.10",
+            ["192.168.1.10"],
+        ),
+        (
+            [("192.168.1.10", 24, "en0"), ("192.168.2.10", 24, "en1")],
+            "192.168.2.10",
+            ["192.168.2.10", "192.168.1.10"],
+        ),
+        (
+            [("10.8.0.2", 32, "utun3"), ("192.168.1.10", 24, "en0")],
+            "10.8.0.2",
+            ["192.168.1.10"],
+        ),
+        (
+            [("172.17.0.1", 16, "docker0"), ("10.8.0.2", 32, "utun3")],
+            "10.8.0.2",
+            ["10.8.0.2", "172.17.0.1"],
+        ),
+    ],
+    ids=[
+        "lan-and-docker",
+        "ethernet-and-wifi",
+        "vpn-default-with-lan",
+        "all-excluded-fallback",
+    ],
+)
+def test_interface_filter_preserves_home_lans(candidates, preferred, expected) -> None:
+    assert mdns._select_advertised_addresses(candidates, preferred_address=preferred) == expected
+
+
+@pytest.mark.parametrize(
+    "interface",
+    [
+        "docker0",
+        "br-ab123",
+        "bridge100",
+        "bridge199",
+        "vmnet8",
+        "vboxnet0",
+        "virbr0",
+        "vethabcd",
+        "utun3",
+        "tun0",
+        "wg0",
+        "tailscale0",
+    ],
+)
+def test_known_virtual_interface_is_excluded(interface: str) -> None:
+    assert mdns._select_advertised_addresses(
+        [
+            ("10.0.0.2", 24, interface),
+            ("192.168.1.10", 24, "en0"),
+        ]
+    ) == ["192.168.1.10"]
+
+
+@pytest.mark.parametrize("interface", [None, "en0", "eth0", "wlan0", "bridge0", "bridge200"])
+def test_unknown_or_lan_interface_is_retained(interface: str | None) -> None:
+    assert mdns._select_advertised_addresses(
+        [
+            ("10.0.0.2", 24, interface),
+            ("192.168.1.10", 24, "en0"),
+        ]
+    ) == ["10.0.0.2", "192.168.1.10"]
 
 
 def test_unusable_default_route_retains_lan_fallback() -> None:
     assert mdns._select_advertised_addresses(
-        [("192.168.1.0", 24), ("192.168.1.10", 24)],
+        [("192.168.1.0", 24, None), ("192.168.1.10", 24, None)],
         preferred_address="192.168.1.0",
     ) == ["192.168.1.10"]
 
 
-def test_wildcard_scopes_addresses_to_default_route(
+def test_wildcard_socket_duplicates_inherit_interface_filter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        mdns, "_iter_ifaddr_ipv4_addresses",
-        lambda: [("172.17.0.1", 16), ("192.168.1.10", 24)],
+        mdns,
+        "_iter_ifaddr_ipv4_addresses",
+        lambda: [
+            ("172.17.0.1", 16, "docker0"),
+            ("192.168.1.10", 24, "en0"),
+            ("192.168.2.10", 24, "en1"),
+            ("10.8.0.2", 32, "utun3"),
+        ],
     )
-    monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [("172.17.0.1", None)])
-    monkeypatch.setattr(mdns, "_primary_ipv4_address", lambda: "192.168.1.10")
+    monkeypatch.setattr(
+        mdns,
+        "_iter_socket_ipv4_addresses",
+        lambda: [
+            ("172.17.0.1", None, None),
+            ("10.8.0.2", None, None),
+        ],
+    )
+    monkeypatch.setattr(mdns, "_primary_ipv4_address", lambda: "10.8.0.2")
     advertisement = build_advertisement(host="0.0.0.0", port=8765)
     assert advertisement is not None
-    assert advertisement.parsed_addresses == ["192.168.1.10"]
+    assert advertisement.parsed_addresses == ["192.168.1.10", "192.168.2.10"]
+
+
+def test_ifaddr_preserves_interface_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    import ifaddr
+
+    monkeypatch.setattr(
+        ifaddr,
+        "get_adapters",
+        lambda: [
+            SimpleNamespace(
+                name="en0", ips=[SimpleNamespace(ip="192.168.1.10", network_prefix=24)]
+            ),
+            SimpleNamespace(
+                name="docker0",
+                ips=[SimpleNamespace(ip="172.17.0.1", network_prefix=16)],
+            ),
+        ],
+    )
+    assert mdns._iter_ifaddr_ipv4_addresses() == [
+        ("192.168.1.10", 24, "en0"),
+        ("172.17.0.1", 16, "docker0"),
+    ]
 
 
 def test_concrete_host_overrides_default_route(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,12 +210,16 @@ def test_wildcard_host_advertises_all_usable_non_loopback_ipv4(
     monkeypatch.setattr(
         mdns,
         "_iter_ifaddr_ipv4_addresses",
-        lambda: [("127.0.0.1", 8), ("192.0.2.10", 24), ("0.0.0.0", 24)],
+        lambda: [
+            ("127.0.0.1", 8, None),
+            ("192.0.2.10", 24, None),
+            ("0.0.0.0", 24, None),
+        ],
     )
     monkeypatch.setattr(
         mdns,
         "_iter_socket_ipv4_addresses",
-        lambda: [("192.0.2.10", None), ("10.0.0.5", None)],
+        lambda: [("192.0.2.10", None, None), ("10.0.0.5", None, None)],
     )
 
     advertisement = build_advertisement(host="0.0.0.0", port=8765)
@@ -117,10 +236,10 @@ def test_rfc1918_addresses_are_advertised_before_others(
         mdns,
         "_iter_ifaddr_ipv4_addresses",
         lambda: [
-            ("203.0.113.7", 24),  # public, tier 2
-            ("192.168.0.10", 24),  # RFC1918, tier 1
-            ("10.1.2.3", 8),  # RFC1918, tier 1
-            ("172.16.5.6", 12),  # RFC1918, tier 1
+            ("203.0.113.7", 24, None),  # public, tier 2
+            ("192.168.0.10", 24, None),  # RFC1918, tier 1
+            ("10.1.2.3", 8, None),  # RFC1918, tier 1
+            ("172.16.5.6", 12, None),  # RFC1918, tier 1
         ],
     )
     monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
@@ -148,8 +267,8 @@ def test_cgnat_address_is_kept_but_ordered_after_rfc1918(
         mdns,
         "_iter_ifaddr_ipv4_addresses",
         lambda: [
-            ("100.64.10.20", 32),  # CGNAT, tier 2 (must NOT be dropped)
-            ("192.168.0.10", 24),  # RFC1918 LAN, tier 1
+            ("100.64.10.20", 32, None),  # CGNAT, tier 2 (must NOT be dropped)
+            ("192.168.0.10", 24, None),  # RFC1918 LAN, tier 1
         ],
     )
     monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
@@ -167,9 +286,9 @@ def test_network_and_broadcast_addresses_are_excluded(
         mdns,
         "_iter_ifaddr_ipv4_addresses",
         lambda: [
-            ("192.168.0.0", 24),  # network address -> excluded
-            ("192.168.0.255", 24),  # broadcast address -> excluded
-            ("192.168.0.10", 24),  # host address -> kept
+            ("192.168.0.0", 24, None),  # network address -> excluded
+            ("192.168.0.255", 24, None),  # broadcast address -> excluded
+            ("192.168.0.10", 24, None),  # host address -> kept
         ],
     )
     monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
@@ -188,7 +307,7 @@ def test_host_prefixes_are_not_treated_as_network_or_broadcast(
     monkeypatch.setattr(
         mdns,
         "_iter_ifaddr_ipv4_addresses",
-        lambda: [("192.168.5.0", 32), ("10.0.0.0", 31)],
+        lambda: [("192.168.5.0", 32, None), ("10.0.0.0", 31, None)],
     )
     monkeypatch.setattr(mdns, "_iter_socket_ipv4_addresses", lambda: [])
 
@@ -207,7 +326,7 @@ def test_addresses_without_prefix_are_not_excluded(
     monkeypatch.setattr(
         mdns,
         "_iter_socket_ipv4_addresses",
-        lambda: [("192.168.0.0", None), ("192.168.0.10", None)],
+        lambda: [("192.168.0.0", None, None), ("192.168.0.10", None, None)],
     )
 
     advertisement = build_advertisement(host="0.0.0.0", port=8765)
@@ -232,12 +351,12 @@ def test_socket_source_inherits_ifaddr_prefix_for_network_address_filtering(
     monkeypatch.setattr(
         mdns,
         "_iter_ifaddr_ipv4_addresses",
-        lambda: [("192.168.1.42", 24), ("192.168.1.0", 24)],
+        lambda: [("192.168.1.42", 24, None), ("192.168.1.0", 24, None)],
     )
     monkeypatch.setattr(
         mdns,
         "_iter_socket_ipv4_addresses",
-        lambda: [("192.168.1.0", None), ("192.168.1.42", None)],
+        lambda: [("192.168.1.0", None, None), ("192.168.1.42", None, None)],
     )
 
     advertisement = build_advertisement(host="0.0.0.0", port=8765)
@@ -255,12 +374,12 @@ def test_mixed_tier_ordering_preserves_within_tier_order(
     monkeypatch.setattr(
         mdns,
         "_iter_ifaddr_ipv4_addresses",
-        lambda: [("198.51.100.4", 24), ("192.168.1.2", 24)],
+        lambda: [("198.51.100.4", 24, None), ("192.168.1.2", 24, None)],
     )
     monkeypatch.setattr(
         mdns,
         "_iter_socket_ipv4_addresses",
-        lambda: [("203.0.113.9", None), ("10.5.5.5", None)],
+        lambda: [("203.0.113.9", None, None), ("10.5.5.5", None, None)],
     )
 
     advertisement = build_advertisement(host="0.0.0.0", port=8765)
@@ -323,6 +442,7 @@ async def test_advertiser_registers_service(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert len(instances) == 1
     zeroconf = instances[0]
+    assert zeroconf.interfaces == ["192.0.2.10", "10.0.0.5"]
     assert len(zeroconf.registered) == 1
     info, allow_name_change = zeroconf.registered[0]
     assert allow_name_change is True
