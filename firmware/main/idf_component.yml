@@ -23,8 +23,8 @@ dependencies:
   78/esp-wifi-connect: ~3.1.3
   espressif/mdns:
     version: ^1.8.2
-    rules:
-    - if: "$CONFIG{STACKCHAN_MDNS_DISCOVERY} == True"
+    # release.py resolves dependencies before applying the board configuration.
+    # Keep discovery itself optional via CONFIG_STACKCHAN_MDNS_DISCOVERY.
   espressif/esp_audio_effects: ~1.2.1
   espressif/esp_audio_codec: ~2.4.1
   78/esp-ml307: ~3.6.5
