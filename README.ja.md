@@ -51,6 +51,8 @@
 | `take_photo(question?)` | カメラ撮影 → JPEG 保存 → パス + インライン画像ブロック返す | ✅ |
 | `set_volume(volume)` | スピーカー音量 (0-100) | ✅ |
 | `set_brightness(brightness)` | 画面明るさ (0-100) | ✅ |
+| `set_off_timeout(seconds)` | 画面消灯までの無操作時間を保存 (0..86400 秒、既定 300、0 で無効化)。firmware 1.17.0 以降が必要 | ✅ |
+| `get_off_timeout` | 保存された消灯時間と現在の画面状態を取得。firmware 1.17.0 以降が必要 | ✅ |
 | `move_head(yaw, pitch, speed?)` | 首を動かす (サーボ)。`pitch` は M5Stack 推奨運用レンジ `5..85` に制限される。ファームウェア側のハードクランプ (`0..88`) を使いたい場合は、firmware-side の `set_head_angles` デバイスツールを利用する | ✅ |
 | `get_touch_state` | タッチセンサ状態 (press/release/stroke 等) | ✅ |
 | `get_touch_sensor_enabled` | 頭部タッチ検出が有効かどうかを取得。NVS に保存され、再起動後も維持される | ✅ |
