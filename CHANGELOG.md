@@ -30,6 +30,13 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- Explicitly enable mDNS gateway discovery in StackChan distribution builds.
+  The initial generic-board configuration previously saved discovery as
+  disabled, so selecting StackChan afterward did not enable it. CI now checks
+  both the generated setting and discovery code in the app binary. (#382)
+
 ## [0.18.0] - 2026-10-03
 
 ### Gateway
