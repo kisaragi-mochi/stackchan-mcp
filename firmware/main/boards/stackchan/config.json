@@ -4,6 +4,7 @@
         {
             "name": "stackchan",
             "sdkconfig_append": [
+                "CONFIG_STACKCHAN_MDNS_DISCOVERY=y",
                 "CONFIG_SPIRAM_MODE_QUAD=y",
                 "CONFIG_CAMERA_GC0308=y",
                 "CONFIG_CAMERA_GC0308_AUTO_DETECT_DVP_INTERFACE_SENSOR=y",

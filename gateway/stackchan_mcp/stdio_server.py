@@ -1367,6 +1367,34 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 },
             ),
             Tool(
+                name="set_off_timeout",
+                description=(
+                    "Set the idle screen-off timeout in seconds (0-86400). "
+                    "Default: 300; 0 disables screen-off. Saved in NVS and "
+                    "preserved across reboots. Requires firmware 1.17.0 or later."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "seconds": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 86400,
+                        },
+                    },
+                    "required": ["seconds"],
+                },
+            ),
+            Tool(
+                name="get_off_timeout",
+                description=(
+                    "Get the persistent idle screen-off timeout in seconds. "
+                    "0 means disabled; default: 300. "
+                    "Requires firmware 1.17.0 or later."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
                 name="move_head",
                 description=(
                     "Move the robot's head to safe, recommended angles. "

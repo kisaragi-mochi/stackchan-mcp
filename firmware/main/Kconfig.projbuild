@@ -104,7 +104,7 @@ config STACKCHAN_MDNS_DISCOVERY
         while websocket.fallback_url and CONFIG_DEFAULT_WEBSOCKET_FALLBACK_URL
         remain later fallback candidates.
 
-        Disable this option to compile out the mDNS dependency and require
+        Disable this option to compile out mDNS discovery and require
         explicit NVS/Kconfig WebSocket URL configuration.
 
 choice
