@@ -38,6 +38,10 @@ jobs:
           set -euo pipefail
           test -f firmware/build/merged-binary.bin
           test -f firmware/releases/v2.2.6_stackchan.zip
+          # set-target initially selects a generic board, which saves mDNS=n.
+          # Ensure the StackChan variant overrides it and links discovery code.
+          grep -Fx 'CONFIG_STACKCHAN_MDNS_DISCOVERY=y' firmware/sdkconfig
+          grep -aFq 'No mDNS stackchan gateway services discovered' firmware/build/xiaozhi.bin
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
