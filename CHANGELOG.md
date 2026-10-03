@@ -30,20 +30,11 @@ documented-only.
 
 ## [Unreleased]
 
-### Gateway
-
-- Isolate mDNS gateway SRV targets and exclude known VM bridges/VPN tunnels while retaining all LAN IPv4 addresses for wildcard HOST (all-address fallback if none remain). (#375)
-
-### Firmware
-
-#### Fixed
-
-- Include mDNS gateway discovery in distributed StackChan firmware, which clean release builds previously compiled out.
-
 ## [0.18.0] - 2026-10-03
 
 ### Gateway
 
+- Isolate mDNS gateway SRV targets and exclude known VM bridges/VPN tunnels while retaining all LAN IPv4 addresses for wildcard HOST (all-address fallback if none remain). (#375)
 - Expose `set_off_timeout(seconds: 0..86400)` and `get_off_timeout` in
   `tools/list` so MCP clients can discover the existing screen-off controls.
   The default is 300 seconds; `0` disables screen-off. Requires firmware
@@ -85,6 +76,7 @@ documented-only.
 
 ### Firmware
 
+- Include mDNS gateway discovery in distributed StackChan firmware, which clean release builds previously compiled out. Distributed builds since firmware-v1.9.0 were affected. (#381)
 - Added an active firmware-side WebSocket keepalive that detects silent
   network breaks and triggers the existing reconnect path. A periodic
   Ping (every 15 s) probes the connection; the Pong response refreshes
