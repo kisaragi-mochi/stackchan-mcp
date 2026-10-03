@@ -30,6 +30,12 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+#### Fixed
+
+- Include mDNS gateway discovery in distributed StackChan firmware, which clean release builds previously compiled out.
+
 ## [0.18.0] - 2026-10-03
 
 ### Gateway

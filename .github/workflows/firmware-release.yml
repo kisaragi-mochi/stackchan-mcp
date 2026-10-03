@@ -132,6 +132,7 @@ jobs:
           test -f firmware/build/merged-binary.bin
           test -f firmware/build/xiaozhi.bin
           ls firmware/releases/v*_stackchan.zip
+          python3 firmware/scripts/check_mdns_artifacts.py
 
       - name: Upload firmware artifacts
         # Uploaded for both tag-push and workflow_dispatch so a manual
