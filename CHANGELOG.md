@@ -30,6 +30,10 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Isolate mDNS gateway SRV targets and exclude known VM bridges/VPN tunnels while retaining all LAN IPv4 addresses for wildcard HOST (all-address fallback if none remain). (#375)
+
 ### Firmware
 
 #### Fixed
@@ -44,7 +48,6 @@ documented-only.
   `tools/list` so MCP clients can discover the existing screen-off controls.
   The default is 300 seconds; `0` disables screen-off. Requires firmware
   1.17.0 or later. (#378)
-- Isolate mDNS gateway SRV targets and exclude known VM bridges/VPN tunnels while retaining all LAN IPv4 addresses for wildcard HOST (all-address fallback if none remain). (#375)
 - Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
   alongside Irodori: official REST API with `eleven_v3` as the default
   model, per-speaker voice ids via `STACKCHAN_ELEVEN_VOICE_<SPEAKER>`
