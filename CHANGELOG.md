@@ -30,6 +30,10 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Isolate mDNS gateway SRV targets and exclude known VM bridges/VPN tunnels while retaining all LAN IPv4 addresses for wildcard HOST (all-address fallback if none remain). (#375)
+
 ### Firmware
 
 #### Fixed
@@ -73,7 +77,6 @@ documented-only.
 - `take_photo` now returns an image block in addition to its text receipt;
   custom clients that assume text-only results must handle MCP ImageContent.
   The existing text-only fallback remains available when inlining fails.
-- If #375 is not merged: with multiple gateways or VM/Docker interfaces, use an explicit device-side gateway URL to bypass mDNS discovery.
 - HTTP TTS timeouts are not a deadline for the entire synthesis (#368);
   relay-based recording can return empty audio (#350). These remain open
   limitations, not fixes delivered by this release.

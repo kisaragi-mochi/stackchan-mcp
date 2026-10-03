@@ -6,7 +6,9 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import uuid
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -14,7 +16,9 @@ logger = logging.getLogger(__name__)
 SERVICE_TYPE = "_stackchan-mcp._tcp.local."
 DEFAULT_INSTANCE = "stackchan-mcp"
 SERVICE_NAME = f"{DEFAULT_INSTANCE}.{SERVICE_TYPE}"
-FALLBACK_SERVICE_HOSTNAME = f"{DEFAULT_INSTANCE}.local."
+# Stable through address refreshes, distinct across processes and restarts so
+# stale/renamed instances cannot merge another gateway's A records.
+_GATEWAY_ID = uuid.uuid4().hex
 TXT_VERSION = "1"
 
 # Private (RFC1918) IPv4 ranges. Addresses inside these ranges are the most
@@ -30,6 +34,22 @@ _PRIVATE_NETWORKS = (
 # A /31 (point-to-point) or /32 (host) address must never be treated as a
 # network or broadcast address, since that would drop a legitimate host IP.
 _MAX_NETWORK_BROADCAST_PREFIX = 30
+
+# Keep physical LANs (including bridge0); only known VM bridges and VPN tunnels
+# are excluded. Address ranges alone cannot distinguish these from home LANs.
+_NON_LAN_INTERFACE_PATTERNS = (
+    "docker*",
+    "br-*",
+    "bridge1[0-9][0-9]",
+    "vmnet*",
+    "vboxnet*",
+    "virbr*",
+    "veth*",
+    "utun*",
+    "tun*",
+    "wg*",
+    "tailscale*",
+)
 
 
 @dataclass(frozen=True)
@@ -101,27 +121,39 @@ def _lan_reachability_tier(address: str) -> int:
 
 
 def _select_advertised_addresses(
-    candidates: list[tuple[str, int | None]],
+    candidates: list[tuple[str, int | None, str | None]],
+    *,
+    preferred_address: str | None = None,
 ) -> list[str]:
     """Filter, de-duplicate and order candidate addresses for advertisement.
 
-    Excludes only clearly-unusable addresses (loopback/multicast/unspecified via
-    :func:`_is_usable_ipv4`, plus network/broadcast addresses when a prefix is
-    known). All remaining addresses are kept and ordered by LAN-reachability
-    likelihood (RFC1918 private ranges first) using a stable sort, so addresses
-    a same-LAN device can reach are tried before overlay/global/edge-case ones.
+    Retain every LAN and unknown interface, excluding known VM/VPN interfaces.
+    If filtering removes everything, fall back to all usable addresses. The
+    default route leads only if retained; DNS A record order is not guaranteed.
     """
     seen: set[str] = set()
     usable: list[str] = []
-    for address, prefix in candidates:
+    for address, prefix, _interface in candidates:
         if address in seen or not _is_usable_ipv4(address):
             continue
         if _is_network_or_broadcast_address(address, prefix):
             continue
         seen.add(address)
         usable.append(address)
-    usable.sort(key=_lan_reachability_tier)
-    return usable
+    excluded = {
+        address
+        for address, _prefix, interface in candidates
+        if interface
+        and any(fnmatchcase(interface.lower(), pattern) for pattern in _NON_LAN_INTERFACE_PATTERNS)
+    }
+    retained = [address for address in usable if address not in excluded] or usable
+    retained.sort(
+        key=lambda address: (
+            address != preferred_address,
+            _lan_reachability_tier(address),
+        )
+    )
+    return retained
 
 
 def _is_wildcard_host(host: str) -> bool:
@@ -132,18 +164,17 @@ def _is_wildcard_host(host: str) -> bool:
     return ip.is_unspecified
 
 
-def _build_service_hostname() -> str:
+def _build_service_hostname(gateway_id: str) -> str:
     """Return a service-specific mDNS hostname for the SRV record.
 
-    Uses a fixed name to avoid advertising A records that overlap with
-    the system's own Bonjour hostname registration, which can trigger
-    macOS to change the user's LocalHostName.
+    Keep each gateway's A records separate, including after instance renaming,
+    without overlapping the system's Bonjour LocalHostName.
     """
-    return FALLBACK_SERVICE_HOSTNAME
+    return f"{DEFAULT_INSTANCE}-{gateway_id}.local."
 
 
-def _iter_ifaddr_ipv4_addresses() -> list[tuple[str, int | None]]:
-    """Enumerate host IPv4 addresses with their subnet prefix length.
+def _iter_ifaddr_ipv4_addresses() -> list[tuple[str, int | None, str | None]]:
+    """Enumerate host IPv4 addresses with subnet prefix and interface name.
 
     The prefix (``ip.network_prefix``) lets the caller drop network/broadcast
     addresses; it is ``None`` only if ifaddr reports a non-integer prefix.
@@ -153,22 +184,21 @@ def _iter_ifaddr_ipv4_addresses() -> list[tuple[str, int | None]]:
     except ImportError:
         return []
 
-    addresses: list[tuple[str, int | None]] = []
+    addresses: list[tuple[str, int | None, str | None]] = []
     for adapter in ifaddr.get_adapters():
         for ip in adapter.ips:
             if not isinstance(ip.ip, str):
                 continue
             prefix = ip.network_prefix if isinstance(ip.network_prefix, int) else None
-            addresses.append((ip.ip, prefix))
+            addresses.append((ip.ip, prefix, adapter.name))
     return addresses
 
 
-def _iter_socket_ipv4_addresses() -> list[tuple[str, int | None]]:
+def _iter_socket_ipv4_addresses() -> list[tuple[str, int | None, str | None]]:
     """Enumerate host IPv4 addresses via socket resolution.
 
-    This source carries no subnet prefix, so each entry pairs the address with
-    ``None``; network/broadcast addresses therefore cannot be (and are not)
-    excluded from this source.
+    This source carries no subnet prefix or interface name. Unmatched entries
+    are retained for compatibility; matching ifaddr metadata is inherited.
     """
     addresses: set[str] = set()
     hostnames = {socket.gethostname(), socket.getfqdn()}
@@ -181,23 +211,27 @@ def _iter_socket_ipv4_addresses() -> list[tuple[str, int | None]]:
         for _family, _socktype, _proto, _canonname, sockaddr in infos:
             addresses.add(sockaddr[0])
 
-    # Add the primary outbound IPv4 as a best-effort fallback. UDP connect()
-    # selects a local address without sending packets.
+    return [(address, None, None) for address in sorted(addresses)]
+
+
+def _primary_ipv4_address() -> str | None:
+    """Find the default-route IPv4; UDP connect selects it without sending data."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.connect(("8.8.8.8", 80))
-        addresses.add(sock.getsockname()[0])
+        return sock.getsockname()[0]
     except OSError:
-        pass
+        return None
     finally:
         sock.close()
-
-    return [(address, None) for address in sorted(addresses)]
 
 
 def _enumerate_usable_ipv4_addresses() -> list[str]:
     ifaddr_entries = _iter_ifaddr_ipv4_addresses()
     socket_entries = _iter_socket_ipv4_addresses()
+    primary = _primary_ipv4_address()
+    if primary is not None:
+        socket_entries.append((primary, None, None))
 
     # The socket-based source carries no subnet prefix, so on its own it cannot
     # exclude network/broadcast addresses. When the same address also appears
@@ -208,17 +242,24 @@ def _enumerate_usable_ipv4_addresses() -> list[str]:
     # up with its own subnet's network address as its host IP) would be
     # advertised and then crash the zeroconf socket with ``EADDRNOTAVAIL``.
     prefix_by_address = {
-        address: prefix
-        for address, prefix in ifaddr_entries
-        if prefix is not None
+        address: prefix for address, prefix, _interface in ifaddr_entries if prefix is not None
+    }
+    interface_by_address = {
+        address: interface
+        for address, _prefix, interface in ifaddr_entries
+        if interface is not None
     }
     enriched_socket_entries = [
-        (address, prefix_by_address.get(address, prefix))
-        for address, prefix in socket_entries
+        (
+            address,
+            prefix_by_address.get(address, prefix),
+            interface_by_address.get(address, interface),
+        )
+        for address, prefix, interface in socket_entries
     ]
 
     return _select_advertised_addresses(
-        [*ifaddr_entries, *enriched_socket_entries]
+        [*ifaddr_entries, *enriched_socket_entries], preferred_address=primary
     )
 
 
@@ -236,15 +277,16 @@ def _resolve_concrete_host_ipv4_addresses(host: str) -> list[str]:
 
     # A concrete HOST carries no subnet prefix, so network/broadcast addresses
     # cannot be derived; pair each address with ``None`` to keep them.
-    return _select_advertised_addresses([(address, None) for address in addresses])
+    return _select_advertised_addresses([(address, None, None) for address in addresses])
 
 
 def _resolve_addresses_for_host(host: str) -> list[str]:
     """Resolve advertised addresses for ``host`` using the same logic as
     :func:`build_advertisement`.
 
-    Wildcard hosts (``0.0.0.0`` / ``*`` / ``""``) enumerate every usable
-    non-loopback IPv4 address on the machine; concrete hosts only resolve
+    Wildcard hosts (``0.0.0.0`` / ``*`` / ``""``) retain all LAN IPv4 addresses,
+    preferring the default route only among retained addresses.
+    Concrete hosts only resolve
     addresses for that specific host. The refresh loop calls this helper so
     its comparison set matches what a fresh ``build_advertisement(...)``
     would actually register — without this, a host started with a concrete
@@ -286,7 +328,7 @@ def build_advertisement(
     return MdnsAdvertisement(
         service_type=SERVICE_TYPE,
         service_name=SERVICE_NAME,
-        server=_build_service_hostname(),
+        server=_build_service_hostname(_GATEWAY_ID),
         port=port,
         path=normalized_path,
         properties={"path": normalized_path, "version": TXT_VERSION},
@@ -393,8 +435,9 @@ class MdnsAdvertiser:
                 advertisement.service_name,
             )
         logger.info(
-            "mDNS advertising %s on port %d with addresses %s reason=register",
+            "mDNS advertising %s server=%s on port %d with addresses %s reason=register",
             registered_name,
+            advertisement.server,
             advertisement.port,
             ", ".join(advertisement.parsed_addresses),
         )
