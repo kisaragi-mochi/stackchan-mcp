@@ -8,7 +8,7 @@ For board-specific behavior (SCS0009 servo, Si12T touch, WS lifecycle, license b
 
 | Component | Specification |
 |---|---|
-| MCU | M5Stack CoreS3 (ESP32-S3, 16 MB Flash, **8 MB Octal PSRAM**) |
+| MCU | M5Stack CoreS3 (ESP32-S3, 16 MB Flash, **8 MB Quad PSRAM**) |
 | Neck servos | SCS0009 x2 (TX=GPIO6, RX=GPIO7, yaw_id=1, pitch_id=2) — details in `boards/stackchan/AGENTS.md` |
 | Camera | GC0308 (DVP, 320x240) |
 | Touch | FT6336 (LCD screen) / Si12T (head top, I2C 0x68) — distinction matters, details in `boards/stackchan/AGENTS.md` |
