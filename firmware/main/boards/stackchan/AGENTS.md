@@ -34,12 +34,12 @@ During PMIC ON, holding the head at ~45° by hand while the boot-init climb comp
 | Constant | Value | Meaning |
 |---|---|---|
 | `TOUCH_POLL_MS` | 100 | Poll interval (10 Hz) |
-| Press confirm | 2 samples (200 ms) | Rising edge confirmation |
-| Release confirm | 4 samples (400 ms) | Falling edge confirmation (absorbs Si12T recalibration gaps) |
+| Press confirm | 1 sample (100 ms) | Rising edge confirmation |
+| Release confirm | 4 samples (400 ms) | Falling edge confirmation (absorbs Si12T recalibration gaps); a re-press after a >=2-sample gap splits a tap-shaped segment into its own TAP |
 | `TAP_MAX_MS` | 400 | Maximum hold for TAP |
 | `STROKE_MIN_MS` | **400** (was 600) | Minimum hold for STROKE |
-| `REACTION_HOLD_MS` | 3000 | Reaction face display duration |
-| `COOLDOWN_MS` | 800 | Post-reaction touch suppression |
+| `REACTION_HOLD_MS` | 1200 | Reaction face display duration |
+| `COOLDOWN_MS` | 250 | Post-reaction touch suppression |
 | `SERVO_WOBBLE_STEP_MS` | 350 (was 200) | Wobble step duration (extended for SCS0009 bus timing) |
 | `SERVO_WOBBLE_AMPLITUDE_DEG` | 20 | Wobble amplitude (yaw ±20°) |
 
@@ -47,16 +47,19 @@ During PMIC ON, holding the head at ~45° by hand while the boot-init climb comp
 
 | Hold duration | Event | Reaction |
 |---|---|---|
-| < 200 ms | (debounced) | Nothing |
-| 200 ≤ d < 400 ms | **TAP** | face=`surprised` only |
+| < 100 ms | (debounced) | Nothing |
+| 100 ≤ d < 400 ms | **TAP** | face=`surprised` only |
 | d ≥ 400 ms | **STROKE** | face=`embarrassed` + servo wobble |
+
+Duration is measured between the first samples of the press and release
+states (candidate timestamps), not the debounce-confirmed edges.
 
 ### Touch guidance for hardware testing
 
 - The touch sensor is the **Si12T on the head top** (not the LCD screen FT6336)
 - Capacitive — use finger pad, not fingernail
 - STROKE requires holding ≥ 0.4 seconds — a quick tap triggers TAP only
-- Cooldown is 800 ms — space consecutive tests at least 1 second apart
+- Cooldown is 250 ms — consecutive taps ~300 ms apart register individually
 - Describe as "hold/pet" rather than "tap" to avoid misclassification during testing
 
 ### Wobble behavior (post PR #176 fix)
