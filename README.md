@@ -55,6 +55,8 @@ This repository is a monorepo.
 | `get_off_timeout` | Read the persistent screen-off timeout and current screen state. Requires firmware 1.17.0+ | ✅ |
 | `move_head(yaw, pitch, speed?)` | Move the neck (servos). `pitch` is constrained to `5..85` — the M5Stack-recommended operating range. For the wider firmware hard clamp (`0..88`), use the firmware-side `set_head_angles` device tool instead. | ✅ |
 | `get_touch_state` | Touch sensor state (press / release / stroke / etc.) | ✅ |
+| `get_proximity_state` | Onboard LTR-553 proximity / ambient-light state: raw 11-bit `ps`, saturation flag, ALS channels, enter/exit thresholds, presence flag, reaction count, sample age. Range is a few centimetres — a hand in front of the face. | ✅ |
+| `set_proximity_config(enabled?, enter?, exit?)` | NVS-backed approach-reaction settings for the LTR-553. `enter`/`exit` are raw `ps` thresholds (0..2047, default 400/150); only the fields passed change. Reaction is a silent look-up + happy face (never speech). Live on the next 100 ms poll tick, persists across reboot. | ✅ |
 | `get_touch_sensor_enabled` | Read whether head-touch detection is enabled. The NVS-backed setting persists across reboot. | ✅ |
 | `set_touch_sensor_enabled(enabled)` | Enable or disable head-touch detection. Disabling stops both the firmware local motion response and MCP `stackchan/event` emission, and persists across reboot. | ✅ |
 | `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`), or `off` to hide the avatar and disable blink so the underlying WiFi config / OTA / settings screens are visible. Any other face brings the avatar back and restores blink. | ✅ |

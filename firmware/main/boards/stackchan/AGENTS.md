@@ -65,6 +65,42 @@ During PMIC ON, holding the head at ~45° by hand while the boot-init climb comp
 
 Wobble is **staged** in `StartServoWobble()` (sets flags under `motion_mutex_`) and **executed** in `ServoTaskMain` tick — this avoids races between the touch poll callback (`ESP_TIMER_TASK`) and the servo motion task.
 
+## 2.5. LTR-553 proximity sensing (onboard, I2C 0x23)
+
+`ProximityPollTick()` polls the onboard LTR-553ALS-WA at 10 Hz (`PROXIMITY_POLL_MS`) on the **internal** I2C bus — the same ribbon as the GC0308 camera — so it needs no Grove port and no external wiring. Driver: `Ltr553` class in `stackchan.cc`, written from the Lite-On datasheet (sections 9/11). M5Stack's CoreS3 factory demo does the same bring-up, but that code is not copied (MIT boundary).
+
+### Range expectation (read before designing a behavior)
+
+| Item | Value |
+|---|---|
+| Datasheet section 8 detection distance | **20 mm** typ, at 100 mA / 4 pulses / 18 % grey card |
+| This firmware's drive | 15 pulses (max) + 100 mA + 60 kHz + 100 % duty + PS gain X16 |
+| Measured baseline, empty room, 2026-10-12 | `ps` 38–45 of 2047 (sensor crosstalk), `als_ch0/ch1` 0 that capture (room light unverified) |
+
+This is a **"hand right in front of the face"** sensor, not room-level presence detection. Behaviors built on it must tolerate that — no automation should depend on detecting a person a metre away.
+
+### Constants
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `PROXIMITY_POLL_MS` | 100 | Poll interval (10 Hz) |
+| `PROXIMITY_CONFIRM_SAMPLES` | 2 | 200 ms above threshold before reacting |
+| `PROXIMITY_COOLDOWN_MS` | 5000 | Minimum gap between reactions |
+| `PROXIMITY_NOD_STEP_MS` / `PROXIMITY_NOD_LIFT_DEG` | 400 / 14 | Look-up nod: pitch +14°, then back to where it was |
+| `PROXIMITY_DEFAULT_ENTER` / `_EXIT` | 400 / 150 | Raw 11-bit `ps` thresholds (hysteresis pair) |
+| `PROXIMITY_SAMPLE_LOG_MS` | 5000 | Rate-limited `proximity sample:` log line for calibration |
+
+### Behavior rules
+
+- The reaction is **silent**: happy face + look-up nod + a `presence`/`approach` stackchan-event. It never calls TTS, audio or LEDs, so an approach can never make the robot start talking by itself.
+- The nod restores the pre-reaction pitch, clamped to `RECOMMENDED_PITCH_MAX`, so an approach never parks the head at a new angle or drives the pitch axis toward an end-stop (`#165` failure mode).
+- Settings live in NVS namespace `proximity` (`enabled`, `enter`, `exit`); over MCP they are `get_proximity_state` / `set_proximity_config` (gateway wrappers in `gateway/stackchan_mcp/stdio_server.py`).
+- A missing sensor or I2C failure is non-fatal: `ltr553_ok_=false`, one warning, every other feature keeps working.
+
+### Calibration
+
+Read the `proximity sample:` serial lines (or `get_proximity_state`) with a hand at the intended distance, then set `enter` comfortably above the empty-room baseline and below the hand reading, keeping `exit` < `enter` for the hysteresis gap.
+
 ## 3. WebSocket lifecycle pitfalls
 
 ### Listening-state touch triggers WS disconnect

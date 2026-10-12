@@ -180,6 +180,8 @@ Same shape, under `mcpServers`.
 | `move_head(yaw, pitch, speed?)` | Drive yaw + pitch servos |
 | `get_head_angles` | Read current yaw + pitch servo angles |
 | `get_touch_state` | Touch sensor state (press/release/stroke) |
+| `get_proximity_state` | Onboard LTR-553 proximity / ambient-light state (raw 11-bit `ps`, saturation flag, ALS channels, thresholds, presence flag, reaction count, sample age). Range is a few centimetres |
+| `set_proximity_config(enabled?, enter?, exit?)` | NVS-backed approach-reaction settings for the LTR-553 (`enter`/`exit` raw `ps` thresholds 0..2047, defaults 400/150; only passed fields change). The reaction is a silent look-up + happy face, never speech |
 | `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`), or `off` to hide the avatar and disable blink so the underlying xiaozhi-esp32 screens (WiFi config UI, OTA, settings) are visible. A subsequent `set_avatar(<other face>)` brings it back and restores blink. |
 | `set_blink(state)` | Blink animation on/off |
 | `set_mouth(state)` | Mouth shape (`closed` / `half` / `open` / `e` / `u`), one-shot, held until next call |

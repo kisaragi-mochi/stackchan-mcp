@@ -612,6 +612,168 @@ private:
     }
 };
 
+// ---- LTR-553ALS-WA proximity + ambient light (onboard on CoreS3) -----------
+// I2C 7-bit address 0x23 on the INTERNAL I2C bus (G11 SCL / G12 SDA); the
+// sensor shares one ribbon with the GC0308 camera (docs.m5stack.com CoreS3
+// pinmap). Register map taken from the Lite-On datasheet (LTR-553ALS-WA,
+// Rev 1.0, sections 9 / 11):
+//   0x80 ALS_CONTR      bit1 SW reset (starts the IC's start-up procedure),
+//                       bit0 ALS active, bits4:2 ALS gain (000 = X1)
+//   0x81 PS_CONTR       bits1:0 PS mode (11 = active), bits3:2 PS gain
+//                       (00 = X16), bit5 saturation indicator enable
+//   0x82 PS_LED         bits7:5 pulse freq (011 = 60 kHz), bits4:3 duty
+//                       (11 = 100 %), bits2:0 peak current (100 = 100 mA);
+//                       reset value 0x7F is already the most sensitive one
+//   0x83 PS_N_PULSES    bits3:0 pulse count (1111 = 15); reset value 0x01
+//   0x84 PS_MEAS_RATE   bits3:0 (0010 = 100 ms reset, 0000 = 50 ms)
+//   0x85 ALS_MEAS_RATE  bits5:3 integration time, bits2:0 repeat rate
+//   0x86 PART_ID (0x92), 0x87 MANUFAC_ID (0x05)
+//   0x88..0x8B          ALS: CH1 (0x88/0x89) then CH0 (0x8A/0x8B), low byte
+//                       first; the four registers latch together
+//   0x8D/0x8E           PS result, 11-bit; 0x8E bit7 = saturation flag
+// M5Stack's own CoreS3 factory demo (CoreS3-UserDemo AppCameraModel.cpp) does
+// the same bring-up; this class re-implements it from the datasheet rather
+// than copying that code.
+//
+// Range reality (datasheet section 8): proximity detection distance is 20 mm
+// typ at 100 mA / 4 pulses / 18 % grey card. We drive 15 pulses (max) at
+// 100 mA, so expect a few centimetres — this is a "hand right in front of the
+// face" sensor, not room-level presence detection.
+class Ltr553 : public I2cDevice {
+public:
+    static constexpr uint8_t ADDR = 0x23;      // datasheet section 9 slave address
+    static constexpr uint16_t kPsMax = 2047;   // 11-bit PS result
+
+    struct Sample {
+        uint16_t ps = 0;         // proximity result, bigger = closer
+        uint32_t als_ch0 = 0;    // visible + IR
+        uint32_t als_ch1 = 0;    // IR only
+        bool saturated = false;  // 0x8E bit7 (needs PS_CONTR bit5)
+        bool als_valid = true;   // 0x8C bit7 inverted
+        int  als_gain_code = 0;  // 0x8C bits6:4 as reported by the IC
+        bool ok = false;
+    };
+
+    explicit Ltr553(i2c_master_bus_handle_t i2c_bus) : I2cDevice(i2c_bus, ADDR) {}
+
+    // Id check, soft reset, LED/pulse/rate setup, then active modes last.
+    bool Begin() {
+        uint8_t part_id = 0, manuf_id = 0;
+        if (!SafeReadRegs(REG_PART_ID, &part_id, 1) ||
+            !SafeReadRegs(REG_MANUFAC_ID, &manuf_id, 1)) {
+            return false;
+        }
+        if (part_id != EXPECTED_PART_ID || manuf_id != EXPECTED_MANUFAC_ID) {
+            ESP_LOGW("LTR553", "unexpected IDs: PART_ID=0x%02X MANUFAC_ID=0x%02X",
+                     part_id, manuf_id);
+            return false;
+        }
+        // SW reset: asserts the initial start-up procedure, bit self-clears.
+        // The datasheet allows 60..1000 ms for that procedure, and the
+        // control-register setup must not start before it finishes — a fixed
+        // 5 ms wait here would race the IC on a slow unit.
+        if (!SafeWriteReg(REG_ALS_CONTR, 0x02)) {
+            return false;
+        }
+        for (int attempt = 0; attempt < 20; ++attempt) {   // <= 1000 ms
+            vTaskDelay(pdMS_TO_TICKS(50));
+            uint8_t contr = 0;
+            if (!SafeReadRegs(REG_ALS_CONTR, &contr, 1)) {
+                return false;
+            }
+            if ((contr & 0x02) == 0) {
+                break;
+            }
+        }
+        if (!SafeWriteReg(REG_PS_LED, 0x7F)) {       // 60 kHz / 100 % / 100 mA
+            return false;
+        }
+        if (!SafeWriteReg(REG_PS_N_PULSES, 0x0F)) {  // 15 pulses (reset: 1)
+            return false;
+        }
+        if (!SafeWriteReg(REG_PS_MEAS_RATE, 0x00)) {   // 50 ms repeat
+            return false;
+        }
+        if (!SafeWriteReg(REG_ALS_MEAS_RATE, 0x0B)) {  // 50 ms integration / 500 ms
+            return false;
+        }
+        // Active modes last — the IC starts measuring as soon as a mode bit is
+        // set, and the control registers must not be rewritten afterwards.
+        if (!SafeWriteReg(REG_PS_CONTR, 0x03)) {     // PS active, gain X16
+            return false;
+        }
+        // ALS gain X8 (0.125..8k lux): gain X1 resolves ~33 counts at 200 lux,
+        // which is useless indoors. M5Stack's own demo also runs X8.
+        if (!SafeWriteReg(REG_ALS_CONTR, 0x0D)) {    // ALS active, gain X8
+            return false;
+        }
+        ESP_LOGI("LTR553", "init OK: PART_ID=0x%02X MANUFAC_ID=0x%02X (15 pulses, 100 mA)",
+                 part_id, manuf_id);
+        return true;
+    }
+
+    Sample Read() {
+        Sample s;
+        uint8_t ps_lo = 0, ps_hi = 0, als[4] = {0, 0, 0, 0};
+        // PS low byte first, then high byte (datasheet section 11 pseudo code).
+        if (!SafeReadRegs(REG_PS_DATA_0, &ps_lo, 1) ||
+            !SafeReadRegs(REG_PS_DATA_1, &ps_hi, 1)) {
+            return s;
+        }
+        s.ps = (uint16_t)((((uint16_t)ps_hi & 0x07) << 8) | ps_lo);
+        s.saturated = (ps_hi & 0x80) != 0;
+        uint8_t status = 0;
+        if (SafeReadRegs(REG_ALS_PS_STATUS, &status, 1)) {
+            s.als_valid = (status & 0x80) == 0;      // bit7: 1 = ALS data invalid
+            s.als_gain_code = (status >> 4) & 0x07;  // bits6:4: gain actually in use
+        }
+        if (!SafeReadRegs(REG_ALS_CH1_0, &als[0], 4)) {
+            return s;
+        }
+        s.als_ch1 = (uint32_t)(((uint32_t)als[1] << 8) | als[0]);
+        s.als_ch0 = (uint32_t)(((uint32_t)als[3] << 8) | als[2]);
+        s.ok = true;
+        return s;
+    }
+
+private:
+    static constexpr uint8_t REG_ALS_CONTR    = 0x80;
+    static constexpr uint8_t REG_PS_CONTR     = 0x81;
+    static constexpr uint8_t REG_PS_LED       = 0x82;
+    static constexpr uint8_t REG_PS_N_PULSES  = 0x83;
+    static constexpr uint8_t REG_PS_MEAS_RATE = 0x84;
+    static constexpr uint8_t REG_ALS_MEAS_RATE = 0x85;
+    static constexpr uint8_t REG_PART_ID      = 0x86;
+    static constexpr uint8_t REG_MANUFAC_ID   = 0x87;
+    static constexpr uint8_t REG_ALS_CH1_0    = 0x88;
+    static constexpr uint8_t REG_ALS_CH0_0    = 0x8A;
+    static constexpr uint8_t REG_ALS_PS_STATUS = 0x8C;
+    static constexpr uint8_t REG_PS_DATA_0    = 0x8D;
+    static constexpr uint8_t REG_PS_DATA_1    = 0x8E;
+    static constexpr uint8_t EXPECTED_PART_ID    = 0x92;
+    static constexpr uint8_t EXPECTED_MANUFAC_ID = 0x05;
+
+    bool SafeReadRegs(uint8_t reg, uint8_t* out, size_t length) {
+        esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, out, length, 100);
+        if (err != ESP_OK) {
+            ESP_LOGW("LTR553", "I2C read reg 0x%02X (%u bytes) failed: 0x%X",
+                     reg, (unsigned)length, err);
+            return false;
+        }
+        return true;
+    }
+
+    bool SafeWriteReg(uint8_t reg, uint8_t value) {
+        uint8_t buffer[2] = {reg, value};
+        esp_err_t err = i2c_master_transmit(i2c_device_, buffer, 2, 100);
+        if (err != ESP_OK) {
+            ESP_LOGW("LTR553", "I2C write reg 0x%02X=0x%02X failed: 0x%X", reg, value, err);
+            return false;
+        }
+        return true;
+    }
+};
+
 class StackChanBoard : public WifiBoard {
 private:
     // Internal I2C bus (shared by AXP2101 / AW9523 / FT6336 / PY32 / Si12T /
@@ -864,6 +1026,53 @@ private:
     // not silently overwritten beyond the wobble window.
     std::atomic<int> servo_wobble_step_{0};       // 0..3 sequence index
     std::atomic<bool> servo_wobble_active_{false};
+
+    // ---- Phase 8: LTR-553 approach sensing (CoreS3 onboard sensor) --------
+    // Polls the onboard LTR-553 PS/ALS channels and reacts to a genuine
+    // approach with a SILENT "look up + face" (never speech). Thresholds and
+    // the enable flag live in NVS namespace "proximity" so they can be tuned
+    // over MCP (self.proximity.set_config) while standing in front of the bot.
+    static constexpr int PROXIMITY_POLL_MS         = 100;   // 10 Hz sampling
+    static constexpr int PROXIMITY_CONFIRM_SAMPLES = 2;     // 200 ms above enter
+    static constexpr int PROXIMITY_COOLDOWN_MS     = 5000;  // min reaction gap
+    static constexpr int PROXIMITY_NOD_STEP_MS     = 400;   // per servo step
+    static constexpr int PROXIMITY_NOD_LIFT_DEG    = 14;    // "look up" amount
+    static constexpr int PROXIMITY_SAMPLE_LOG_MS   = 5000;  // calibration log
+    static constexpr uint16_t PROXIMITY_DEFAULT_ENTER = 400;  // out of 2047
+    static constexpr uint16_t PROXIMITY_DEFAULT_EXIT  = 150;
+
+    std::unique_ptr<Ltr553> ltr553_;
+    bool ltr553_ok_ = false;
+    esp_timer_handle_t proximity_poll_timer_ = nullptr;
+    std::atomic<bool> proximity_enabled_{true};
+    std::atomic<uint16_t> proximity_enter_{PROXIMITY_DEFAULT_ENTER};
+    std::atomic<uint16_t> proximity_exit_{PROXIMITY_DEFAULT_EXIT};
+
+    // Detection state machine. Touched only from the proximity poll timer
+    // callback on ESP_TIMER_TASK (same single-thread contract as TouchPollTick).
+    bool proximity_pending_ = false;          // candidate awaiting confirmation
+    int  proximity_pending_count_ = 0;
+    bool proximity_present_ = false;          // debounced presence state
+    uint64_t proximity_cooldown_until_us_ = 0;
+
+    // Last sample snapshot, published for MCP self.proximity.get_state.
+    uint16_t last_ps_ = 0;
+    uint32_t last_als_ch0_ = 0;
+    uint32_t last_als_ch1_ = 0;
+    bool     last_als_valid_ = true;
+    int      last_als_gain_code_ = 0;
+    bool     last_ps_saturated_ = false;
+    uint64_t last_sample_us_ = 0;
+    uint32_t proximity_trigger_count_ = 0;
+    uint64_t last_proximity_trigger_us_ = 0;
+    uint64_t last_sample_log_us_ = 0;
+
+    // Staged "look up, then settle back" nod for an approach reaction. Same
+    // staging contract as the touch wobble: StartPresenceNod() only sets flags
+    // under motion_mutex_, PresenceNodStepAdvance() runs on the servo task.
+    std::atomic<int>  presence_nod_step_{0};
+    std::atomic<bool> presence_nod_active_{false};
+    int presence_nod_base_pitch_ = 45;        // BOOT_INIT_PITCH_DEG
 
     // Shared motion state. This stays on the board singleton because boot-init
     // ReadPos restore / re-sync phases seed the same state before and after the
@@ -4552,6 +4761,69 @@ private:
         xSemaphoreGive(motion_mutex_);
     }
 
+    // Stage a silent "look up, then settle back" nod for a proximity-triggered
+    // approach. The pitch is lifted by PROXIMITY_NOD_LIFT_DEG and then returned
+    // to exactly where it was, so an approach never leaves the head parked at a
+    // new angle and never fights an external set_head_angles target beyond the
+    // ~0.8 s reaction window. Staging mirrors StartServoWobble(): flags under
+    // motion_mutex_, sequence advancement on servo_motion (see ServoTaskMain),
+    // for the same single-advancer reason documented there.
+    void StartPresenceNod() {
+        if (!servo_ok_ || motion_driver_ == nullptr) {
+            return;
+        }
+        xSemaphoreTake(motion_mutex_, portMAX_DELAY);
+        presence_nod_base_pitch_ = pitch_motion_.current_deg;
+        presence_nod_step_.store(0);
+        presence_nod_active_.store(true);
+        xSemaphoreGive(motion_mutex_);
+    }
+
+    void PresenceNodStepAdvance() {
+        if (!servo_ok_ || motion_driver_ == nullptr) {
+            return;
+        }
+        if (!presence_nod_active_.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (!TakeMotionMutexAfterTorqueEngaged()) {
+            return;
+        }
+        if (!presence_nod_active_.load()) {
+            xSemaphoreGive(motion_mutex_);
+            return;
+        }
+        // Direct AxisMotion field access under motion_mutex_; calling
+        // motion_driver_->IsMoving() here would deadlock on the non-recursive
+        // semaphore (same contract as ServoWobbleStepAdvance).
+        if (yaw_motion_.moving || pitch_motion_.moving) {
+            xSemaphoreGive(motion_mutex_);
+            return;
+        }
+        const int base_pitch = presence_nod_base_pitch_;
+        // Clamp the lift inside the M5Stack-recommended pitch band: an approach
+        // reaction must never push the pitch axis toward an end-stop (the
+        // failure mode #165 documents for the wobble path).
+        int lift = PROXIMITY_NOD_LIFT_DEG;
+        if (base_pitch + lift > RECOMMENDED_PITCH_MAX) {
+            lift = RECOMMENDED_PITCH_MAX - base_pitch;
+        }
+        if (lift < 0) {
+            lift = 0;
+        }
+        const int step = presence_nod_step_.load();
+        const int target_pitch = (step == 0) ? base_pitch + lift : base_pitch;
+        // StartMove contract: caller holds motion_mutex_. Direct call (not via
+        // WriteHeadAngles) avoids the re-entrant mutex take.
+        motion_driver_->StartMove(yaw_motion_.current_deg, target_pitch,
+                                  PROXIMITY_NOD_STEP_MS);
+        presence_nod_step_.store(step + 1);
+        if (step >= 1) {
+            presence_nod_active_.store(false);
+        }
+        xSemaphoreGive(motion_mutex_);
+    }
+
     static void ServoTaskTrampoline(void* arg) {
         static_cast<StackChanBoard*>(arg)->ServoTaskMain();
     }
@@ -4565,6 +4837,7 @@ private:
             motion_driver_->Tick();
             MaybeAutoReleaseTorque();
             ServoWobbleStepAdvance();
+            PresenceNodStepAdvance();
             taskYIELD();
         }
     }
@@ -4769,6 +5042,128 @@ private:
         ESP_ERROR_CHECK(esp_timer_start_periodic(touch_poll_timer_,
                                                  (uint64_t)TOUCH_POLL_MS * 1000));
         ESP_LOGI(TAG, "Si12T touch poll started (%d ms interval)", TOUCH_POLL_MS);
+    }
+
+    // ------------- LTR-553 approach sensing (Phase 8) -------------
+
+    static void ProximityPollCb(void* arg) {
+        StackChanBoard* self = static_cast<StackChanBoard*>(arg);
+        self->ProximityPollTick();
+    }
+
+    // 10 Hz poll of the onboard LTR-553. Runs on ESP_TIMER_TASK (same contract
+    // as TouchPollTick): no blocking, no UART, reaction only staged for the
+    // servo task and the avatar task.
+    void ProximityPollTick() {
+        if (!ltr553_ok_ || ltr553_ == nullptr) {
+            return;
+        }
+        Ltr553::Sample sample = ltr553_->Read();
+        if (!sample.ok) {
+            return;
+        }
+        last_ps_ = sample.ps;
+        last_ps_saturated_ = sample.saturated;
+        last_als_ch0_ = sample.als_ch0;
+        last_als_ch1_ = sample.als_ch1;
+        last_als_valid_ = sample.als_valid;
+        last_als_gain_code_ = sample.als_gain_code;
+        last_sample_us_ = esp_timer_get_time();
+
+        // Rate-limited calibration line. This is the evidence a threshold
+        // tuning session reads over the serial console: ps = raw proximity
+        // (0..2047, bigger = closer), als_ch0/ch1 = ambient light.
+        if (last_sample_us_ - last_sample_log_us_ >=
+            (uint64_t)PROXIMITY_SAMPLE_LOG_MS * 1000ULL) {
+            last_sample_log_us_ = last_sample_us_;
+            ESP_LOGI(TAG, "proximity sample: ps=%u sat=%d als_ch0=%lu als_ch1=%lu "
+                          "als_valid=%d als_gain=%d present=%d",
+                     (unsigned)sample.ps, sample.saturated ? 1 : 0,
+                     (unsigned long)sample.als_ch0, (unsigned long)sample.als_ch1,
+                     sample.als_valid ? 1 : 0, sample.als_gain_code,
+                     proximity_present_ ? 1 : 0);
+        }
+
+        // Hysteresis + N-consecutive-sample confirmation: the LTR-553's PS
+        // result is noisy at the bottom of its range, and a single spike above
+        // the threshold must not be enough to move the head.
+        const uint16_t enter = proximity_enter_.load();
+        const uint16_t exit = proximity_exit_.load();
+        const bool candidate = proximity_present_ ? (sample.ps >= exit)
+                                                 : (sample.ps >= enter);
+        if (candidate == proximity_pending_) {
+            proximity_pending_count_++;
+        } else {
+            proximity_pending_ = candidate;
+            proximity_pending_count_ = 1;
+        }
+        if (proximity_pending_count_ < PROXIMITY_CONFIRM_SAMPLES ||
+            candidate == proximity_present_) {
+            return;
+        }
+        proximity_present_ = candidate;
+        if (!candidate) {
+            return;  // leaving the near zone: nothing to do
+        }
+        if (!proximity_enabled_.load(std::memory_order_acquire)) {
+            ESP_LOGI(TAG, "proximity: approach seen (ps=%u) but reaction disabled",
+                     (unsigned)sample.ps);
+            return;
+        }
+        if (last_sample_us_ < proximity_cooldown_until_us_) {
+            return;
+        }
+        proximity_cooldown_until_us_ =
+            last_sample_us_ + (uint64_t)PROXIMITY_COOLDOWN_MS * 1000ULL;
+        proximity_trigger_count_++;
+        last_proximity_trigger_us_ = last_sample_us_;
+        ESP_LOGI(TAG, "proximity: approach detected ps=%u (enter=%u exit=%u) -> look up + face, no speech",
+                 (unsigned)sample.ps, (unsigned)enter, (unsigned)exit);
+        // Silent reaction: face + head only. No TTS, no audio, no LEDs, so an
+        // approach can never make the robot start talking by itself.
+        SetAvatarExpressionIfActive("happy");
+        StartPresenceNod();
+        ScheduleIdleRevert();
+        Application::GetInstance().SendStackChanEvent("presence", "approach",
+                                                      (uint64_t)sample.ps);
+    }
+
+    void InitializeProximitySettings() {
+        Settings settings("proximity", false);
+        const bool enabled = settings.GetBool("enabled", true);
+        const int enter = settings.GetInt("enter", PROXIMITY_DEFAULT_ENTER);
+        const int exit = settings.GetInt("exit", PROXIMITY_DEFAULT_EXIT);
+        proximity_enabled_.store(enabled, std::memory_order_release);
+        proximity_enter_.store((uint16_t)enter);
+        proximity_exit_.store((uint16_t)exit);
+        ESP_LOGI(TAG, "Proximity settings loaded: enabled=%d enter=%d exit=%d",
+                 enabled ? 1 : 0, enter, exit);
+    }
+
+    void InitializeLtr553() {
+        InitializeProximitySettings();
+        ESP_LOGI(TAG, "Init LTR-553 proximity/ALS sensor (I2C addr 0x%02X)",
+                 Ltr553::ADDR);
+        ltr553_ = std::unique_ptr<Ltr553>(new Ltr553(i2c_bus_));
+        ltr553_ok_ = ltr553_->Begin();
+        if (!ltr553_ok_) {
+            ESP_LOGW(TAG, "LTR-553 not detected; approach sensing disabled "
+                          "(other features unaffected)");
+            ltr553_.reset();
+            return;
+        }
+        esp_timer_create_args_t poll_args = {
+            .callback = &StackChanBoard::ProximityPollCb,
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "proximity_poll",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&poll_args, &proximity_poll_timer_));
+        ESP_ERROR_CHECK(esp_timer_start_periodic(
+            proximity_poll_timer_, (uint64_t)PROXIMITY_POLL_MS * 1000));
+        ESP_LOGI(TAG, "LTR-553 poll started (%d ms interval, ps>=%u triggers)",
+                 PROXIMITY_POLL_MS, (unsigned)proximity_enter_.load());
     }
 
     // Map a face name to AvatarSet's 0-indexed slot, or -1 if unknown.
@@ -6716,6 +7111,94 @@ private:
                 return root;
             });
 
+        mcp_server.AddTool(
+            "self.proximity.get_state",
+            "Read the onboard LTR-553 (CoreS3) proximity / ambient-light sensor: "
+            "raw 11-bit ps value (bigger = object closer, range is a few "
+            "centimetres), saturation flag, ALS channels, the configured "
+            "enter/exit thresholds, the debounced presence flag, the trigger "
+            "count and the age of the last sample and last reaction.",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                (void)properties;
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "available", ltr553_ok_);
+                cJSON_AddNumberToObject(root, "ps", (double)last_ps_);
+                cJSON_AddBoolToObject(root, "ps_saturated", last_ps_saturated_);
+                cJSON_AddNumberToObject(root, "als_ch0", (double)last_als_ch0_);
+                cJSON_AddNumberToObject(root, "als_ch1", (double)last_als_ch1_);
+                cJSON_AddBoolToObject(root, "als_valid", last_als_valid_);
+                cJSON_AddNumberToObject(root, "als_gain_code", (double)last_als_gain_code_);
+                cJSON_AddBoolToObject(root, "enabled", proximity_enabled_.load());
+                cJSON_AddNumberToObject(root, "enter_threshold",
+                                        (double)proximity_enter_.load());
+                cJSON_AddNumberToObject(root, "exit_threshold",
+                                        (double)proximity_exit_.load());
+                cJSON_AddBoolToObject(root, "present", proximity_present_);
+                cJSON_AddNumberToObject(root, "trigger_count",
+                                        (double)proximity_trigger_count_);
+                int64_t sample_age_ms = -1;
+                if (last_sample_us_ != 0) {
+                    sample_age_ms = ((int64_t)esp_timer_get_time() -
+                                     (int64_t)last_sample_us_) / 1000;
+                    if (sample_age_ms < 0) sample_age_ms = 0;
+                }
+                cJSON_AddNumberToObject(root, "sample_age_ms", (double)sample_age_ms);
+                int64_t trigger_age_ms = -1;
+                if (last_proximity_trigger_us_ != 0) {
+                    trigger_age_ms = ((int64_t)esp_timer_get_time() -
+                                      (int64_t)last_proximity_trigger_us_) / 1000;
+                    if (trigger_age_ms < 0) trigger_age_ms = 0;
+                }
+                cJSON_AddNumberToObject(root, "last_trigger_age_ms",
+                                        (double)trigger_age_ms);
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.proximity.set_config",
+            "Update the NVS-backed LTR-553 approach-reaction settings: enabled "
+            "(bool), enter (int 0-2047, rising threshold) and exit (int 0-2047, "
+            "falling threshold). Only the fields passed are changed; the new "
+            "values take effect on the next poll tick (100 ms) and persist "
+            "across reboot.",
+            PropertyList({Property("enabled", kPropertyTypeBoolean, false),
+                          Property("enter", kPropertyTypeInteger, 0, 0, 2047),
+                          Property("exit", kPropertyTypeInteger, 0, 0, 2047)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                Settings settings("proximity", true);
+                cJSON* updated = cJSON_CreateArray();
+                if (properties["enabled"].was_provided()) {
+                    const bool enabled = properties["enabled"].value<bool>();
+                    settings.SetBool("enabled", enabled);
+                    proximity_enabled_.store(enabled, std::memory_order_release);
+                    cJSON_AddItemToArray(updated, cJSON_CreateString("enabled"));
+                }
+                if (properties["enter"].was_provided()) {
+                    const int enter = properties["enter"].value<int>();
+                    settings.SetInt("enter", enter);
+                    proximity_enter_.store((uint16_t)enter);
+                    cJSON_AddItemToArray(updated, cJSON_CreateString("enter"));
+                }
+                if (properties["exit"].was_provided()) {
+                    const int exit = properties["exit"].value<int>();
+                    settings.SetInt("exit", exit);
+                    proximity_exit_.store((uint16_t)exit);
+                    cJSON_AddItemToArray(updated, cJSON_CreateString("exit"));
+                }
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddItemToObject(root, "updated_keys", updated);
+                cJSON_AddBoolToObject(root, "enabled", proximity_enabled_.load());
+                cJSON_AddNumberToObject(root, "enter_threshold",
+                                        (double)proximity_enter_.load());
+                cJSON_AddNumberToObject(root, "exit_threshold",
+                                        (double)proximity_exit_.load());
+                cJSON_AddStringToObject(root, "takes_effect", "next_poll_tick");
+                cJSON_AddStringToObject(root, "persistence", "nvs");
+                return root;
+            });
+
         // ---- LED tools (12x WS2812C on the StackChan base) ----
         // The strip is driven by the PY32 IO expander on its pin 13, not by
         // an ESP32 GPIO. Updates are non-latching writes into the PY32 LED
@@ -7745,6 +8228,7 @@ public:
         InitializeServo();
         InitializeTouchSettings();
         InitializeSi12tTouch();
+        InitializeLtr553();
         I2cDetect();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
         // Avatar is shown on-demand via MCP set_avatar command.
