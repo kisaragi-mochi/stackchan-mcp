@@ -49,6 +49,10 @@ def test_default_no_env_no_file_returns_all_off(monkeypatch, tmp_path):
         action="head_stroke",
         template="head was stroked for {duration_ms}ms",
     )
+    assert config.messages[("presence", "approach")] == MessageTemplate(
+        action="look_up",
+        template="something came close to the face (ps={ps})",
+    )
 
 
 def test_yaml_legacy_event_only(monkeypatch, tmp_path):

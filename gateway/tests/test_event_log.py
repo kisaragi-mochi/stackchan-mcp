@@ -91,6 +91,41 @@ def test_log_event_accepts_action_and_explicit_path(tmp_path):
     }
 
 
+def test_log_event_value_field_renames_the_numeric_key(tmp_path):
+    """A presence event must not be persisted as a duration.
+
+    The firmware reuses the frame's ``duration_ms`` field to carry the raw
+    proximity reading, so a logger that always writes ``duration_ms`` would
+    record a 45 ms pause that never happened.
+    """
+    path = tmp_path / "presence-events.jsonl"
+
+    log_event(
+        event_type="presence",
+        subtype="approach",
+        duration_ms=45,
+        value_field="ps",
+        ts=123456,
+        session_id="session-1",
+        action="look_up",
+        path=path,
+        ts_unix=1717000000.5,
+    )
+
+    entry = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+    assert entry == {
+        "event_type": "presence",
+        "subtype": "approach",
+        "ps": 45,
+        "ts": 123456,
+        "ts_unix": 1717000000.5,
+        "session_id": "session-1",
+        "action": "look_up",
+    }
+    assert "duration_ms" not in entry
+    path.unlink(missing_ok=True)
+
+
 def test_log_event_appends_multiple_lines_in_order(monkeypatch, tmp_path):
     path = tmp_path / "events.jsonl"
     monkeypatch.setenv(PATH_ENV_VAR, str(path))

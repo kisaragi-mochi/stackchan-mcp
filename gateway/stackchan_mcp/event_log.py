@@ -61,6 +61,7 @@ def log_event(
     action: str | None = None,
     path: Path | None = None,
     ts_unix: float | None = None,
+    value_field: str = "duration_ms",
 ) -> None:
     """Append a single stackchan event to the JSONL log.
 
@@ -80,6 +81,12 @@ def log_event(
     ts_unix
         Optional override for the wall-clock timestamp. Defaults to
         ``time.time()`` at append time. Exposed for tests.
+    value_field
+        Key the numeric payload is written under. The firmware frame always
+        carries it as ``duration_ms``, but that is the wire key, not the
+        meaning: a ``presence/approach`` frame puts its raw proximity reading
+        there, so the gateway passes ``"ps"`` and the persisted line says
+        ``"ps": 45`` rather than recording a duration that never existed.
 
     Errors are logged at WARNING and swallowed; the MCP notification
     path continues regardless of disk outcome.
@@ -92,7 +99,7 @@ def log_event(
     line = {
         "event_type": event_type,
         "subtype": subtype,
-        "duration_ms": duration_ms,
+        value_field: duration_ms,
         "ts": ts,
         "ts_unix": ts_unix,
         "session_id": session_id,

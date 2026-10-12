@@ -47,6 +47,19 @@ ToolCallResult = tuple[Any, dict[str, Any] | None]
 
 _SET_AVATAR_TOOL = "self.display.set_avatar"
 
+# Firmware-emitted ``stackchan-event`` types the gateway accepts, mapped to
+# (allowed subtypes, name of the numeric payload in the forwarded event).
+#
+# The wire frame always carries that number in ``duration_ms`` — the firmware
+# reuses the field, so ``presence/approach`` reports its proximity reading
+# there. Dropping the field for an event type it was never a duration for, or
+# silently relabelling it as one, are both wrong: read the frame by its wire
+# key, then forward it under the name that matches what it actually is.
+_STACKCHAN_EVENT_SPECS: dict[str, tuple[frozenset[str], str]] = {
+    "touch": (frozenset({"tap", "stroke"}), "duration_ms"),
+    "presence": (frozenset({"approach"}), "ps"),
+}
+
 _TOOL_LANES = {
     "self.robot.": "servo",
     "self.wifi.": "wifi",
@@ -908,24 +921,28 @@ class ESP32Manager:
         """Forward a firmware-originated stackchan event to the MCP client."""
         event_type = payload.get("event_type")
         subtype = payload.get("subtype")
-        duration_ms = payload.get("duration_ms")
+        # Wire key is always ``duration_ms``; ``value_field`` below says what
+        # the number means for this event type (see _STACKCHAN_EVENT_SPECS).
+        value = payload.get("duration_ms")
         ts = payload.get("ts")
         session_id = payload.get("session_id")
 
-        if event_type != "touch":
+        if not isinstance(event_type, str) or event_type not in _STACKCHAN_EVENT_SPECS:
             logger.warning("Malformed stackchan-event frame: event_type=%r", event_type)
             return
-        if subtype not in {"tap", "stroke"}:
+        allowed_subtypes, value_field = _STACKCHAN_EVENT_SPECS[event_type]
+        if not isinstance(subtype, str) or subtype not in allowed_subtypes:
             logger.warning("Malformed stackchan-event frame: subtype=%r", subtype)
             return
         if (
-            isinstance(duration_ms, bool)
-            or not isinstance(duration_ms, int)
-            or duration_ms < 0
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
         ):
             logger.warning(
-                "Malformed stackchan-event frame: duration_ms=%r",
-                duration_ms,
+                "Malformed stackchan-event frame: %s=%r",
+                value_field,
+                value,
             )
             return
         if isinstance(ts, bool) or not isinstance(ts, int) or ts < 0:
@@ -944,7 +961,7 @@ class ESP32Manager:
         event_payload = {
             "event_type": event_type,
             "subtype": subtype,
-            "duration_ms": duration_ms,
+            value_field: value,
             "action": message.action,
             "ts": ts,
             "ts_unix": ts_unix,
@@ -953,17 +970,18 @@ class ESP32Manager:
         legacy_params = {
             "event_type": event_type,
             "subtype": subtype,
-            "duration_ms": duration_ms,
+            value_field: value,
             "action": message.action,
             "ts": ts,
             "session_id": session_id,
         }
         logger.info(
-            "stackchan-event: %s/%s action=%s duration=%sms ts=%s session=%s",
+            "stackchan-event: %s/%s action=%s %s=%s ts=%s session=%s",
             event_type,
             subtype,
             message.action,
-            duration_ms,
+            value_field,
+            value,
             ts,
             session_id,
         )
@@ -991,7 +1009,7 @@ class ESP32Manager:
             channel_meta = {
                 "event_type": event_type,
                 "subtype": subtype,
-                "duration_ms": str(duration_ms),
+                value_field: str(value),
                 "action": message.action,
                 "ts": str(ts),
                 "ts_unix": str(ts_unix),
@@ -1012,7 +1030,8 @@ class ESP32Manager:
                 log_event(
                     event_type=event_type,
                     subtype=subtype,
-                    duration_ms=duration_ms,
+                    duration_ms=value,
+                    value_field=value_field,
                     ts=ts,
                     session_id=session_id,
                     action=message.action,

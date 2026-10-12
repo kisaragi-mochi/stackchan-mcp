@@ -46,8 +46,11 @@ _WS2812_COLOR_ORDER_BY_PORT = {
 STACKCHAN_EVENT_INSTRUCTIONS = (
     "Stack-chan physical events arrive as server-initiated "
     "notifications with method='stackchan/event'. Params include "
-    "event_type ('touch'), subtype ('tap' or 'stroke'), "
-    "duration_ms, ts, session_id. When such a notification "
+    "event_type ('touch' or 'presence'), subtype ('tap'/'stroke' for "
+    "touch, 'approach' for presence), the numeric payload under its own "
+    "name (duration_ms for touch, ps — the raw proximity reading — for "
+    "presence), "
+    "ts, session_id. When such a notification "
     "arrives, react naturally using existing tools "
     "(set_avatar, say, set_mouth, set_leds, move_head). There is "
     "no dedicated reply tool — the existing tool palette is the "
@@ -56,7 +59,8 @@ STACKCHAN_EVENT_INSTRUCTIONS = (
 STACKCHAN_CHANNEL_INSTRUCTIONS = (
     'Stack-chan physical events arrive as Channels notifications under '
     '<channel source="plugin:stackchanmcp:stackchanmcp" action="..." '
-    'subtype="..." duration_ms="...">. React naturally using existing '
+    'subtype="..." duration_ms="..." ps="..."> (duration_ms for touch, '
+    'ps for presence). React naturally using existing '
     'tools (set_avatar, say, set_mouth, set_leds, move_head).'
 )
 STACKCHAN_JSONL_INSTRUCTIONS = (
