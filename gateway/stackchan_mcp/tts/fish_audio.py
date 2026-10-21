@@ -391,7 +391,13 @@ class FishAudioEngine(TTSEngine):
         both alarming and hard to trace back to a network problem.
         """
         kind = content_type.split(";", 1)[0].strip().lower()
-        if kind and not kind.startswith(_AUDIO_CONTENT_TYPES):
+        if not kind:
+            raise RuntimeError(
+                "Fish Audio returned HTTP 200 without a Content-Type, so the "
+                "body cannot be confirmed as audio. A proxy or captive portal "
+                "most likely answered instead of the API; the body was not played."
+            )
+        if not kind.startswith(_AUDIO_CONTENT_TYPES):
             raise RuntimeError(
                 f"Fish Audio returned HTTP 200 with Content-Type {kind!r}, "
                 "which is not audio. A proxy or captive portal most likely "

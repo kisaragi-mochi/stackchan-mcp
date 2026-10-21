@@ -676,7 +676,7 @@ needed.
 
 Carrying no decoder also means nothing downstream would notice a reply
 that is not audio, so the engine checks that itself: a `200` whose
-content type is not audio, or whose body is not the format that was
+content type is missing or not audio, or whose body is not the format that was
 requested, is rejected rather than played, and a response shorter than
 its own WAV header promises — or a `pcm` body that is not a whole number
 of samples — is reported as truncated instead of quietly returning a

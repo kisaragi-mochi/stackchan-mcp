@@ -71,7 +71,13 @@ def _build_engine(captured: list[dict], *, status: int = 200, body: bytes | None
         )
         if json_body is not None:
             return httpx.Response(status, json=json_body)
-        return httpx.Response(status, content=body, headers=headers)
+        response_headers = headers
+        if response_headers is None:
+            # A real successful response always declares its type; leaving
+            # it out is the malformed case that the engine must reject.
+            is_wav = body[:4] == b"RIFF"
+            response_headers = {"content-type": "audio/wav" if is_wav else "audio/pcm"}
+        return httpx.Response(status, content=body, headers=response_headers)
 
     kwargs.setdefault("api_key", _API_KEY)
     return FishAudioEngine(transport=httpx.MockTransport(handler), **kwargs)
@@ -154,7 +160,7 @@ async def test_api_key_read_from_env(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(dict(request.headers))
-        return httpx.Response(200, content=_pcm_16k())
+        return httpx.Response(200, content=_pcm_16k(), headers={"content-type": "audio/pcm"})
 
     engine = FishAudioEngine(transport=httpx.MockTransport(handler))
     await engine.synthesize("hello")
@@ -314,6 +320,41 @@ async def test_non_audio_200_is_rejected(content_type: str, body: bytes):
 
     with pytest.raises(RuntimeError, match="not audio"):
         await engine.synthesize("hello")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headers", [{}, {"content-type": ""}])
+async def test_missing_or_empty_content_type_is_rejected(headers: dict):
+    """A 200 with no Content-Type cannot be confirmed as audio.
+
+    An even-length HTML body would otherwise pass the later framing checks
+    and be played as PCM noise.
+    """
+    engine = _build_engine([], body=b"<html>portal</html>", headers=headers)
+
+    with pytest.raises(RuntimeError, match="without a Content-Type"):
+        await engine.synthesize("hello")
+
+
+@pytest.mark.parametrize("response_format", ["pcm", "wav"])
+def test_assert_audio_response_rejects_empty_kind(response_format: str):
+    with pytest.raises(RuntimeError, match="without a Content-Type"):
+        FishAudioEngine._assert_audio_response("", b"<html>", response_format)
+
+
+@pytest.mark.asyncio
+async def test_successful_responses_declare_audio_content_type():
+    """The default mock success responses carry an explicit audio type."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        resp = httpx.Response(200, content=_pcm_16k(), headers={"content-type": "audio/pcm"})
+        seen.append(resp.headers["content-type"])
+        return resp
+
+    engine = FishAudioEngine(api_key=_API_KEY, transport=httpx.MockTransport(handler))
+    assert await engine.synthesize("hello")
+    assert seen == ["audio/pcm"]
 
 
 @pytest.mark.asyncio
