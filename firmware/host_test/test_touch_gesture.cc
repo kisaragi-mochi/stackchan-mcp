@@ -615,4 +615,63 @@ TEST(TouchGestureMask, RecalibrationsAreCounted) {
     EXPECT_EQ(s.tracker.recalibrations(), 2u);
 }
 
+// ---- 6. wide, fast strokes from the 10/21 device logs --------------------
+
+// Each raw byte is held for one 50 ms tick, then the pad is released.
+void ReplayPress(Sim& s, const std::vector<uint8_t>& raws) {
+    s.PastGrace();
+    for (uint8_t r : raws) s.Raw(r, kTick);
+    s.Idle(1000);
+}
+
+TEST(TouchGestureWideStroke, StartChannelNeverLeavesStillStrokes) {
+    // 705.4 s: peak H, 650 ms, CH1 stays on until the release (was "ignored").
+    Sim s;
+    std::vector<uint8_t> raws = {0x03, 0x0F, 0x0F, 0x0F, 0x1F, 0x1F, 0x1F, 0x3D, 0x3E, 0x3E};
+    ReplayPress(s, raws);
+    EXPECT_EQ(s.strokes, 1);
+    EXPECT_EQ(s.taps, 0);
+}
+
+TEST(TouchGestureWideStroke, FastFrontToBackWithOneTickAtTheEndStrokes) {
+    // 686.1 s: 0x30 -> 0x3C -> 0x3D -> 0x07 (was a TAP).
+    Sim s;
+    ReplayPress(s, {0x30, 0x3C, 0x3D, 0x07});
+    EXPECT_EQ(s.strokes, 1);
+    EXPECT_EQ(s.taps, 0);
+}
+
+TEST(TouchGestureWideStroke, FastBackToFrontStrokes) {
+    // 697.0 s: 0x0F -> 0x0E -> 0x30.
+    Sim s;
+    ReplayPress(s, {0x0F, 0x0E, 0x30});
+    EXPECT_EQ(s.strokes, 1);
+    EXPECT_EQ(s.taps, 0);
+}
+
+TEST(TouchGestureWideStroke, FirstTwoMissedStrokesOfTheFirstRound) {
+    // c log 1572 s / 1575 s: 0x30 0x3C 0x2F 0x0F 0x03 0x01 and 0x30 0x3C 0x0F 0x03.
+    Sim s;
+    ReplayPress(s, {0x30, 0x3C, 0x2F, 0x0F, 0x03, 0x01});
+    ReplayPress(s, {0x30, 0x3C, 0x0F, 0x03});
+    EXPECT_EQ(s.strokes, 2);
+    EXPECT_EQ(s.taps, 0);
+}
+
+TEST(TouchGestureWideStroke, TapsFromTheDeviceLogStayTaps) {
+    Sim s;
+    ReplayPress(s, {0x38, 0x30});          // 665.6 s, back
+    ReplayPress(s, {0x20, 0x3C});          // 674.0 s, back with spill
+    ReplayPress(s, {0x0F, 0x0F, 0x0B});    // front
+    EXPECT_EQ(s.taps, 3);
+    EXPECT_EQ(s.strokes, 0);
+}
+
+TEST(TouchGestureWideStroke, LowLevelBlipsAcrossZonesAreNotAStroke) {
+    // All-L patterns (the 0x15 / 0x10 blips) never reach level M.
+    Sim s;
+    ReplayPress(s, {0x15, 0x15, 0x14, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10});
+    EXPECT_EQ(s.strokes, 0);
+}
+
 }  // namespace

@@ -14,6 +14,9 @@
 //   - classifies one press (OR of usable channels) as
 //       STROKE: the finger left a zone it started on AND reached a zone it did
 //               not start on (moved across zones),
+//               OR the level-weighted centre of the touched channels shifted by
+//               `centroid_move_ch` (a wide, fast finger never fully leaves its
+//               start zone, so the zone test alone misses it);
 //       TAP:    no movement, `tap_min_ms`..`tap_max_ms` hold, and either some
 //               channel reached level M (2) or more, or the press stayed on
 //               for `tap_low_min_ms` (a lone short level-L blip is dropped),
@@ -52,6 +55,8 @@ struct TouchGestureConfig {
     uint32_t settle_ms = 1000;              // tap-proof window after a power/backlight switch
     uint32_t settle_unmask_zero_ms = 300;   // zeros needed to unmask after that reset
     uint32_t cooldown_ms = 300;
+    float centroid_move_ch = 1.0f;          // level-weighted position shift that also counts as sliding
+    uint8_t centroid_min_level = 2;         // only ticks whose strongest channel is M or above
 };
 
 enum class TouchGestureEvent : uint8_t {
@@ -202,6 +207,8 @@ public:
             vacated_ = 0;
             moved_ = false;
             zero_ticks_ = 0;
+            cen_valid_ = false;
+            TrackCentroid(active, levels);
             for (int i = 0; i < kChannels; i++) {
                 new_ticks_[i] = 0;
                 off_ticks_[i] = 0;
@@ -236,7 +243,10 @@ public:
                 if (new_ticks_[i] >= cfg_.move_zone_confirm_ticks) seen_new_ |= bit;
             }
         }
-        if (!moved_ && !press_dirty_ && vacated_ != 0 && seen_new_ != 0) {
+        TrackCentroid(active, levels);
+        if (!moved_ && !press_dirty_ &&
+            ((vacated_ != 0 && seen_new_ != 0) ||
+             (cen_valid_ && cen_max_ - cen_min_ >= cfg_.centroid_move_ch))) {
             moved_ = true;
             out.moved_now = true;
         }
@@ -278,7 +288,30 @@ public:
     }
 
 private:
+    void TrackCentroid(uint8_t active, const uint8_t levels[kChannels]) {
+        uint32_t sum = 0, weighted = 0;
+        uint8_t top = 0;
+        for (int i = 0; i < kChannels; i++) {
+            if (!(active & (1u << i))) continue;
+            sum += levels[i];
+            weighted += static_cast<uint32_t>(i) * levels[i];
+            if (levels[i] > top) top = levels[i];
+        }
+        if (sum == 0 || top < cfg_.centroid_min_level) return;
+        const float c = static_cast<float>(weighted) / static_cast<float>(sum);
+        if (!cen_valid_) {
+            cen_min_ = cen_max_ = c;
+            cen_valid_ = true;
+        } else {
+            if (c < cen_min_) cen_min_ = c;
+            if (c > cen_max_) cen_max_ = c;
+        }
+    }
+
     TouchGestureConfig cfg_;
+    bool cen_valid_ = false;
+    float cen_min_ = 0.0f;
+    float cen_max_ = 0.0f;
     bool started_ = false;
     bool in_grace_ = true;
     uint32_t begin_ms_ = 0;
