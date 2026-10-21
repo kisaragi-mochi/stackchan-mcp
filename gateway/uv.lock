@@ -2103,6 +2103,10 @@ tts-elevenlabs = [
     { name = "miniaudio" },
     { name = "opuslib" },
 ]
+tts-fish-audio = [
+    { name = "httpx" },
+    { name = "opuslib" },
+]
 tts-irodori = [
     { name = "httpx" },
     { name = "miniaudio" },
@@ -2138,13 +2142,14 @@ requires-dist = [
     { name = "stackchan-mcp", extras = ["stt"], marker = "extra == 'stt-faster-whisper'" },
     { name = "stackchan-mcp", extras = ["stt"], marker = "extra == 'stt-openai'" },
     { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-elevenlabs'" },
+    { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-fish-audio'" },
     { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-irodori'" },
     { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-voicevox'" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0,<3.0" },
     { name = "websockets", specifier = ">=12" },
     { name = "zeroconf", specifier = ">=0.149" },
 ]
-provides-extras = ["tts", "tts-voicevox", "tts-irodori", "tts-elevenlabs", "stt", "stt-faster-whisper", "stt-openai"]
+provides-extras = ["tts", "tts-voicevox", "tts-irodori", "tts-elevenlabs", "tts-fish-audio", "stt", "stt-faster-whisper", "stt-openai"]
 
 [package.metadata.requires-dev]
 dev = [

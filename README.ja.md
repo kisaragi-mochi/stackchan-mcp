@@ -582,6 +582,61 @@ say(text="Hello!", voice="elevenlabs", speaker_name="rachel")
 export STACKCHAN_TTS_ENGINE=elevenlabs
 ```
 
+#### 別エンジン: Fish Audio
+
+[Fish Audio](https://fish.audio) はホスト型の TTS サービスで、英語の
+声が強く、自分で学習させたボイスモデルも使えます。VOICEVOX（既定では
+日本語のみ）の代わりに、英語で使いたい場合の選択肢になります。
+
+これは **サードパーティのクラウドサービス** です。`say` に渡した
+テキストはこのマシンの外に出て、Fish Audio のサーバーで合成されます。
+共有したくない内容を送る前に
+[Fish Audio の利用規約と料金](https://fish.audio) を確認し、機密性の
+高い発話には VOICEVOX などのローカルエンジンを使ってください。
+
+Irodori と違い、このエンジンは **音声デコーダーが不要** です。Fish Audio
+API は呼び出し側が指定したサンプルレートで 16-bit モノラルの PCM/WAV を
+返し、エンジンはデバイスの Opus デコーダーが期待する 16 kHz を指定
+します。そのため `miniaudio`（Irodori）も `ffmpeg`（Edge TTS）も
+不要で、extra は `[tts]` への便宜的なエイリアスです:
+
+```bash
+pip install 'stackchan-mcp[tts-fish-audio]'
+```
+
+`mp3` と `opus` の応答形式は意図的に非対応です（使うと、不要になった
+エンコードを元に戻すためだけにデコーダーが必要になります）。
+
+デコーダーが無いため、音声ではない応答があっても後段では気づけません。
+そこでエンジン自身が確認します。`200` でも Content-Type が無い・空・
+音声ではない場合や、本文が要求した形式でない場合は再生せずに拒否します。
+WAV ヘッダーが宣言するより短い応答や、サンプル数が整数にならない `pcm`
+本文も、短く切れた発話を成功扱いにせず「途中で切れた」と報告します。
+
+環境変数で設定（API キーは環境変数からのみ読み取り — コミット厳禁）:
+
+| 環境変数 | デフォルト | 備考 |
+|---|---|---|
+| `STACKCHAN_FISH_AUDIO_KEY` | _(必須)_ | API キー。`Authorization: Bearer <key>` で送信。未設定でもエンジンは一覧に出ますが、`say(voice="fish-audio")` は分かりやすいエラーを返します |
+| `STACKCHAN_FISH_AUDIO_MODEL` | _(なし)_ | 既定のボイスモデル ID（API の `reference_id`）。未設定ならリクエストに含めず、Fish Audio 側の既定の声になります |
+| `STACKCHAN_FISH_AUDIO_BACKEND` | `s2.1-pro` | 合成バックエンド（`model` ヘッダーで送信）。`s1`・`s2-pro`・`s2.1-pro`・`s2.1-pro-free` のいずれか |
+| `STACKCHAN_FISH_AUDIO_URL` | `https://api.fish.audio/v1/tts` | エンドポイントの上書き（プロキシや互換のセルフホスト用） |
+
+呼び出しごとに Fish Audio を選択:
+
+```
+say(text="Nice to meet you!", voice="fish-audio")
+```
+
+`voice` を省略した `say` 全部の既定エンジンにする場合:
+
+```bash
+export STACKCHAN_TTS_ENGINE=fish-audio
+```
+
+呼び出しごとの `speaker_name` は `STACKCHAN_FISH_AUDIO_MODEL` を上書き
+するので、gateway を再起動せずに学習済みボイスを切り替えられます。
+
 ### 5. オプション: STT セットアップ (faster-whisper)
 
 デバイスに聞いてもらうには、`[stt-*]` extras のどれかをインストール

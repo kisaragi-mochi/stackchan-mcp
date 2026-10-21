@@ -66,10 +66,17 @@ def _register_elevenlabs() -> None:
     get_registry().register(ElevenLabsEngine())
 
 
+def _register_fish_audio() -> None:
+    from .fish_audio import FishAudioEngine
+
+    get_registry().register(FishAudioEngine())
+
+
 _try_register(_register_voicevox, "voicevox")
 _try_register(_register_irodori, "irodori")
 _try_register(_register_edge_tts, "edge-tts")
 _try_register(_register_elevenlabs, "elevenlabs")
+_try_register(_register_fish_audio, "fish-audio")
 
 
 __all__ = [
