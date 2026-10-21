@@ -278,13 +278,118 @@ TEST(TouchGestureSettle, TouchWorksAgainAfterTheWindowAndMaskClears) {
     EXPECT_EQ(s.taps, 1);
 }
 
-TEST(TouchGestureSettle, PressInProgressWhenSwitchHappensIsDropped) {
+TEST(TouchGestureSettle, PressAlreadyOnWhenSwitchHappensKeepsBeingTracked) {
     Sim s;
     s.PastGrace();
     s.Zones(0, 3, 0, 100);
     s.tracker.NotifySettle(s.now);
     s.Zones(0, 3, 0, 100);
     s.Idle(3000);
+    EXPECT_EQ(s.taps, 1);
+}
+
+TEST(TouchGestureSettle, StrokeStartingInsideTheWindowIsStillReported) {
+    // Device log 1573.8 s: CH3 -> CH2 -> CH1 sweep 0.4 s after a charging flip.
+    Sim s;
+    s.PastGrace();
+    s.tracker.NotifySettle(s.now);
+    s.Idle(200);
+    s.Zones(0, 0, 3, 150);
+    s.Zones(0, 3, 3, 100);
+    s.Zones(0, 3, 0, 100);
+    s.Zones(3, 3, 0, 100);
+    s.Zones(3, 0, 0, 150);
+    s.Idle(1500);
+    EXPECT_EQ(s.strokes, 1);
+    EXPECT_EQ(s.taps, 0);
+}
+
+TEST(TouchGestureSettle, StrokesAreReportedWhileChargingFlapsEveryTwoSeconds) {
+    // Device log 1517..1574 s: charging flipped every 1..3 s while the user
+    // was stroking. Every stroke must come through whatever its phase.
+    for (uint32_t phase = 0; phase < 1400; phase += 100) {
+        Sim s;
+        s.PastGrace();
+        uint32_t next_flip = s.now;
+        int expected = 0;
+        for (int n = 0; n < 6; n++) {
+            s.Idle(phase + 100 * n);
+            while (s.now >= next_flip) {
+                s.tracker.NotifySettle(next_flip);
+                next_flip += 1200;
+            }
+            s.Zones(0, 0, 3, 100);
+            s.Zones(0, 3, 3, 100);
+            s.Zones(3, 3, 0, 100);
+            s.Zones(3, 0, 0, 100);
+            expected++;
+            s.Idle(1500);
+            while (s.now >= next_flip) {
+                s.tracker.NotifySettle(next_flip);
+                next_flip += 1200;
+            }
+        }
+        EXPECT_EQ(s.strokes, expected) << "phase=" << phase;
+    }
+}
+
+TEST(TouchGestureSettle, IdleBlipsFromTheDeviceLogAfterChargingFlipsGiveNothing) {
+    // 285.6 s: CH3 H for 450 ms right after a flip, then M->L for 300 ms.
+    // 465.9 s: CH2 L lingering 1 s. 898.9 s: CH3 L 150 ms.
+    struct Blip { uint8_t first, second; uint32_t first_ms, second_ms, after_flip_ms; };
+    const Blip blips[] = {
+        {0x30, 0x00, 450, 0, 100}, {0x20, 0x10, 150, 150, 50}, {0x04, 0x04, 500, 500, 0},
+        {0x10, 0x10, 100, 50, 150},
+    };
+    for (const Blip& b : blips) {
+        Sim s;
+        s.PastGrace();
+        s.tracker.NotifySettle(s.now);
+        s.Idle(b.after_flip_ms);
+        s.Raw(b.first, b.first_ms);
+        if (b.second_ms) s.Raw(b.second, b.second_ms);
+        s.Idle(3000);
+        EXPECT_EQ(s.taps, 0) << int(b.first);
+        EXPECT_EQ(s.strokes, 0) << int(b.first);
+    }
+}
+
+TEST(TouchGestureSettle, ResetWaitsForAStrokeThatOutlastsTheWindow) {
+    Sim s;
+    s.PastGrace();
+    s.Zones(3, 0, 0, 200);
+    s.tracker.NotifySettle(s.now);
+    s.Zones(0, 3, 0, 1500);
+    EXPECT_EQ(s.recal_requests, 0);
+    s.Idle(500);
+    EXPECT_EQ(s.recal_requests, 1);
+    EXPECT_EQ(s.strokes, 1);
+}
+
+TEST(TouchGestureSettle, TouchRightAfterTheResetIsNotMasked) {
+    Sim s;
+    s.PastGrace();
+    s.tracker.NotifySettle(s.now);
+    s.Idle(1100);
+    EXPECT_EQ(s.recal_requests, 1);
+    EXPECT_EQ(s.tracker.masked_channels(), 0);
+    s.Zones(0, 3, 0, 200);
+    s.Idle(1000);
+    EXPECT_EQ(s.taps, 1);
+}
+
+TEST(TouchGestureSettle, BlipThatLingersUntilTheResetIsDroppedAndUnmaskedQuickly) {
+    // Device log 313 s / 465 s: a single L that stays until the baseline reset.
+    Sim s;
+    s.PastGrace();
+    s.tracker.NotifySettle(s.now);
+    s.Raw(0x10, 1400);
+    EXPECT_EQ(s.recal_requests, 1);
+    EXPECT_EQ(s.tracker.masked_channels(), 0x04);
+    s.Idle(200);
+    EXPECT_EQ(s.tracker.masked_channels(), 0x04);
+    s.Idle(200);
+    EXPECT_EQ(s.tracker.masked_channels(), 0);
     EXPECT_EQ(s.taps, 0);
     EXPECT_EQ(s.strokes, 0);
 }

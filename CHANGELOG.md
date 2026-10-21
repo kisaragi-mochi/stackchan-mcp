@@ -83,9 +83,13 @@ documented-only.
     channel stuck "pressed", no longer produces events. A channel that stays
     non-zero for 15 s has its baseline reset on the chip and is ignored until
     it reads 0 again. The first 10 s after boot (the chip's fast-calibration
-    window) never produce events. When charging or the backlight switches,
-    touch is ignored for 1 s and the chip baseline is reset afterwards
-    (power-rail changes made single channels flicker at level L).
+    window) never produce events. A level-L blip shorter than 300 ms is not a
+    TAP. When charging or the backlight switches, power-rail changes make a
+    single channel flicker for up to ~1 s, so for 1 s a press that starts
+    inside the window can only end as a STROKE (a finger sliding across
+    zones; a stationary press is dropped), a press already on is tracked as
+    usual, and the chip baseline is reset once the window is over (after a
+    finger that is really on the pad lets go).
   - Polling is now every 50 ms (was 100 ms) and the screen-off timer is only
     woken by a confirmed TAP/STROKE, so a stuck channel can no longer keep the
     display on. Face reactions are shorter (TAP 1.2 s, STROKE 1.5 s).

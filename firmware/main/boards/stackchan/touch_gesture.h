@@ -19,10 +19,18 @@
 //               for `tap_low_min_ms` (a lone short level-L blip is dropped),
 //       none:   stationary hold longer than `tap_max_ms` (e.g. a stuck
 //               channel or a resting hand), or a short L-only blip.
-//   - NotifySettle() is called when charging or the backlight switches: the
-//     tracker drops any press, ignores input for `settle_ms`, then asks the
-//     caller to reset the chip reference of all channels (`recal_mask`) and
-//     keeps them masked until they read 0 for `unmask_zero_ms`.
+//   - NotifySettle() is called when charging or the backlight switches. The
+//     capacitive readings wobble for up to ~1 s afterwards, but only as a
+//     stationary blip on a single channel; a finger sliding across zones is
+//     never mistaken for one. So for `settle_ms`:
+//       * a press that is already on keeps being tracked as usual;
+//       * a press that starts inside the window may only end as a STROKE (it
+//         moved across zones); a stationary one is dropped, never a TAP;
+//     and when the window ends the caller is asked to reset the chip reference
+//     of all channels (`recal_mask`). That reset waits until a finger that is
+//     really on the pad (started before the switch, or already sliding) lets
+//     go; channels that read non-zero at the reset stay masked until they read
+//     0 for `settle_unmask_zero_ms`.
 
 #include <cstdint>
 
@@ -41,7 +49,8 @@ struct TouchGestureConfig {
     uint32_t tap_max_ms = 500;
     uint32_t tap_low_min_ms = 300;          // L-only (peak level 1) needs this long
     uint8_t tap_strong_level = 2;           // a peak at this level or above counts at once
-    uint32_t settle_ms = 1000;              // ignore input after a power/backlight switch
+    uint32_t settle_ms = 1000;              // tap-proof window after a power/backlight switch
+    uint32_t settle_unmask_zero_ms = 300;   // zeros needed to unmask after that reset
     uint32_t cooldown_ms = 300;
 };
 
@@ -84,16 +93,11 @@ public:
     bool in_settle() const { return settle_active_; }
 
     // Charging / backlight just changed: power rails move and the capacitive
-    // readings wobble, so drop any press and ignore input for settle_ms.
+    // readings wobble (see the header comment for what is and is not accepted).
     void NotifySettle(uint32_t now_ms) {
         if (!started_ || in_grace_) return;
         settle_active_ = true;
         settle_until_ms_ = now_ms + cfg_.settle_ms;
-        pressed_ = false;
-        press_dirty_ = false;
-        moved_ = false;
-        zero_ticks_ = 0;
-        cooldown_valid_ = false;
     }
     bool in_boot_grace() const { return in_grace_; }
     bool pressed() const { return pressed_; }
@@ -120,6 +124,7 @@ public:
             for (int i = 0; i < kChannels; i++) {
                 nonzero_ms_[i] = 0;
                 zero_ms_[i] = 0;
+                unmask_need_ms_[i] = cfg_.unmask_zero_ms;
             }
             last_tick_ms_ = now_ms;
         }
@@ -127,16 +132,27 @@ public:
         const uint32_t dt = last_tick_ms_ == 0 ? cfg_.tick_ms : (now_ms - last_tick_ms_);
         last_tick_ms_ = now_ms;
 
-        if (settle_active_) {
-            if (now_ms < settle_until_ms_) {
-                return out;
-            }
+        const bool in_window = settle_active_ && now_ms < settle_until_ms_;
+        if (settle_active_ && !in_window &&
+            (!pressed_ || (press_in_settle_ && !moved_ &&
+                           now_ms - press_start_ms_ >= cfg_.tap_max_ms))) {
+            // Window over. A press that began inside it and has sat still for
+            // longer than any tap is a lingering blip; a real finger (began
+            // earlier, already sliding, or still young) is left alone and the
+            // reset happens once it lets go.
             settle_active_ = false;
             settle_resets_++;
-            masked_ = 0x07;
+            pressed_ = false;
+            press_dirty_ = false;
+            moved_ = false;
+            zero_ticks_ = 0;
+            cooldown_valid_ = false;
+            const uint8_t fresh = static_cast<uint8_t>(raw & 0x07 & ~masked_);
+            masked_ |= fresh;
             for (int i = 0; i < kChannels; i++) {
                 nonzero_ms_[i] = 0;
                 zero_ms_[i] = 0;
+                if (fresh & (1u << i)) unmask_need_ms_[i] = cfg_.settle_unmask_zero_ms;
             }
             out.recal_mask = 0x07;
             out.settle_reset = true;
@@ -152,6 +168,7 @@ public:
                 if (nonzero_ms_[i] >= cfg_.stuck_ms) {
                     nonzero_ms_[i] = 0;
                     masked_ |= bit;
+                    unmask_need_ms_[i] = cfg_.unmask_zero_ms;
                     out.recal_mask |= bit;
                     recalibrations_++;
                     if (pressed_) press_dirty_ = true;
@@ -159,7 +176,7 @@ public:
             } else {
                 nonzero_ms_[i] = 0;
                 zero_ms_[i] += dt;
-                if ((masked_ & bit) && zero_ms_[i] >= cfg_.unmask_zero_ms) {
+                if ((masked_ & bit) && zero_ms_[i] >= unmask_need_ms_[i]) {
                     masked_ &= static_cast<uint8_t>(~bit);
                 }
             }
@@ -176,6 +193,7 @@ public:
             press_start_ms_ = now_ms;
             last_active_ms_ = now_ms;
             start_zones_ = active;
+            press_in_settle_ = in_window;
             peak_level_ = 0;
             for (int i = 0; i < kChannels; i++) {
                 if ((active & (1u << i)) && levels[i] > peak_level_) peak_level_ = levels[i];
@@ -237,7 +255,8 @@ public:
                 out.event = TouchGestureEvent::STROKE;
                 out.duration_ms = duration;
                 out.start_zones = start_zones_;
-            } else if (duration >= cfg_.tap_min_ms && duration <= cfg_.tap_max_ms) {
+            } else if (!press_in_settle_ && duration >= cfg_.tap_min_ms &&
+                       duration <= cfg_.tap_max_ms) {
                 if (peak_level_ >= cfg_.tap_strong_level || duration >= cfg_.tap_low_min_ms) {
                     out.event = TouchGestureEvent::TAP;
                     out.duration_ms = duration;
@@ -273,6 +292,8 @@ private:
     uint8_t peak_level_ = 0;
     uint32_t nonzero_ms_[kChannels] = {0, 0, 0};
     uint32_t zero_ms_[kChannels] = {0, 0, 0};
+    uint32_t unmask_need_ms_[kChannels] = {1000, 1000, 1000};
+    bool press_in_settle_ = false;
 
     bool pressed_ = false;
     bool press_dirty_ = false;
