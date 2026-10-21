@@ -27,37 +27,38 @@ During PMIC ON, holding the head at ~45° by hand while the boot-init climb comp
 
 ## 2. Si12T touch event classification
 
-`TouchPollTick()` polls the Si12T (12-channel capacitive touch IC, I2C 0x68) at 10 Hz, classifying events by duration:
+`TouchPollTick()` polls the Si12T (12-channel capacitive touch IC, I2C 0x68) every 50 ms and feeds `TouchGestureTracker` (`touch_gesture.h`, ESP-IDF-free, unit-tested in `firmware/host_test/test_touch_gesture.cc`). TAP / STROKE are decided from **finger movement across the three head zones**, not from how long the pad was held.
 
-### Thresholds
+### Chip initialisation (`Si12T::Begin()`, every boot)
 
-| Constant | Value | Meaning |
-|---|---|---|
-| `TOUCH_POLL_MS` | 100 | Poll interval (10 Hz) |
-| Press confirm | 2 samples (200 ms) | Rising edge confirmation |
-| Release confirm | 4 samples (400 ms) | Falling edge confirmation (absorbs Si12T recalibration gaps) |
-| `TAP_MAX_MS` | 400 | Maximum hold for TAP |
-| `STROKE_MIN_MS` | **400** (was 600) | Minimum hold for STROKE |
-| `REACTION_HOLD_MS` | 3000 | Reaction face display duration |
-| `COOLDOWN_MS` | 800 | Post-reaction touch suppression |
-| `SERVO_WOBBLE_STEP_MS` | 350 (was 200) | Wobble step duration (extended for SCS0009 bus timing) |
-| `SERVO_WOBBLE_AMPLITUDE_DEG` | 20 | Wobble amplitude (yaw ±20°) |
+The Si12T keeps its registers across an ESP32 reset, so a stuck baseline or the previous firmware's settings survive. `Begin()` therefore follows the datasheet start-up order every time: CTRL=0x0F (soft reset) → 0x07 → SEN1/SEN2=0x33 (M=1.20 %) → CFIG=0x22 → Ch_on1=0xF8 / Ch_on2=0x3F (CH1-3 enabled, others stopped; bit 4/5 of 0x0D stay 1) → Ref_rst1/2=0x00, Cal_on1/2=0x00 → CTRL=0x03. Registers are logged before and after (`Si12T: before:` / `after:`) and read back; a mismatch fails the init (touch stays off, other features unaffected).
 
-### Event classification (determined at falling edge)
+### Gesture rules
 
-| Hold duration | Event | Reaction |
-|---|---|---|
-| < 200 ms | (debounced) | Nothing |
-| 200 ≤ d < 400 ms | **TAP** | face=`surprised` only |
-| d ≥ 400 ms | **STROKE** | face=`embarrassed` + servo wobble |
+| Rule | Value |
+|---|---|
+| `TOUCH_POLL_MS` | 50 |
+| Boot grace | first 10 s after init (the chip's fast-calibration window): nothing is reported; a channel still non-zero when the window ends stays unusable until it reads 0 for 1 s |
+| Press / release confirm | press = 1 sample, release = 3 samples (150 ms) |
+| **STROKE** | during one press the finger left a zone it started on **and** reached a zone it did not start on (each held ≥ 100 ms). Reported on release; the face changes the moment the movement is seen |
+| **TAP** | no movement, held 40..500 ms |
+| Stationary hold > 500 ms | no event (logged as `touch press ignored`). A resting hand or a stuck channel therefore never fires |
+| Stuck channel | a channel non-zero for 15 s gets `Si12T::ResetReference()` (Ref_rst bit), is dropped from the decision, and is used again after 1 s of zeros. The press in progress is not reported. Count in `get_touch_state.recalibrations` |
+| Cooldown | 300 ms after the physical release |
+| Reaction | TAP: `surprised`, idle after 1.2 s. STROKE: `embarrassed` + servo wobble, idle 1.5 s after the last movement |
+
+The screen is woken (`HandleScreenActivity`) only by a confirmed TAP/STROKE while touch is enabled, so a stuck channel no longer keeps the display on. With touch disabled (`touch/enabled` = false, the default) the poll and the stuck-channel recovery still run — `get_touch_state` stays useful for diagnostics — but nothing is reported, no reaction is shown and the screen-off timer is untouched.
+
+`STROKE` `duration_ms` is the length of the press in which the finger moved (it used to be the hold time).
 
 ### Touch guidance for hardware testing
 
 - The touch sensor is the **Si12T on the head top** (not the LCD screen FT6336)
 - Capacitive — use finger pad, not fingernail
-- STROKE requires holding ≥ 0.4 seconds — a quick tap triggers TAP only
-- Cooldown is 800 ms — space consecutive tests at least 1 second apart
-- Describe as "hold/pet" rather than "tap" to avoid misclassification during testing
+- STROKE needs the finger to slide from one zone to another (front ↔ back, or one zone over). Resting a hand on the head does nothing by design
+- Space consecutive tests at least 1 second apart
+- Always include an untouched soak (10 min on USB, 10 min on battery only): TAP/STROKE must stay at 0
+- `get_touch_state` also returns `masked` (bit mask of channels dropped as stuck), `recalibrations`, `enabled` and `boot_grace`
 
 ### Wobble behavior (post PR #176 fix)
 
@@ -93,7 +94,7 @@ The stackchan board (`class StackChanBoard : public WifiBoard`, `stackchan.cc:49
 | **Avatar (custom)** | N/A | `avatar_img_` LVGL image, foreground, 320x240 | Covers all standard UI when active |
 | **LED** | `GetLed()` → `NoLed` | No override → NoLed passthrough | **LED does not reflect state** |
 | **Mouth animation (custom)** | N/A | `OnTtsStart/Stop` → lip-sync | Active during speaking only |
-| **Touch reactive face (custom)** | N/A | `TouchPollTick` → surprised/embarrassed | 3-second face change on touch |
+| **Touch reactive face (custom)** | N/A | `TouchPollTick` → surprised/embarrassed | 1.2-1.5 second face change on TAP / STROKE |
 | Backlight | `GetBacklight()` → `nullptr` | Override → `CustomBacklight(pmic_)` | Auto-dim via PowerSaveLevel |
 | Camera | `GetCamera()` → `nullptr` | Override → `camera_` | MCP `take_photo` |
 | Audio codec | `GetAudioCodec()` → `nullptr` | Override → AW88298 + ES7210 | TTS + mic |

@@ -56,7 +56,7 @@
 | `move_head(yaw, pitch, speed?)` | 首を動かす (サーボ)。`pitch` は M5Stack 推奨運用レンジ `5..85` に制限される。ファームウェア側のハードクランプ (`0..88`) を使いたい場合は、firmware-side の `set_head_angles` デバイスツールを利用する | ✅ |
 | `get_touch_state` | タッチセンサ状態 (press/release/stroke 等) | ✅ |
 | `get_touch_sensor_enabled` | 頭部タッチ検出が有効かどうかを取得。NVS に保存され、再起動後も維持される | ✅ |
-| `set_touch_sensor_enabled(enabled)` | 頭部タッチ検出を有効/無効化。無効時は firmware 側のローカル動作反応と MCP `stackchan/event` 送信の両方を止め、設定は再起動後も維持される | ✅ |
+| `set_touch_sensor_enabled(enabled)` | 頭部タッチ検出を有効/無効化。無効時は firmware 側のローカル動作反応と MCP `stackchan/event` 送信の両方を止め、設定は再起動後も維持される。**未設定のときは無効**（有効にするまで反応しない） | ✅ |
 | `set_avatar(face)` | アバター表情切替 (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`)、または `off` でアバターを隠し blink も停止して下層の WiFi 設定 / OTA / 設定画面を露出。他 face を指定するとアバター + blink が復帰 | ✅ |
 | `set_blink(state)` | 瞬き ON/OFF | ✅ |
 | `set_mouth(state)` | 口開閉（one-shot、次の呼び出しまで保持） | ✅ |
@@ -983,7 +983,7 @@ python scripts/avatar_convert/convert_avatars.py
 ## 既知の課題
 
 - 大角度急逆転 (±60° → -60° 等) でサーボハングする場合あり (Motion::update_task の補間移植で改善予定)
-- タッチセンサ (Si12T) のぽん判定取りこぼし (感度レジスタ調整余地)
+- 頭タッチ (Si12T) は既定で無効。タップ＝短く触れる、なで＝指が頭の 3 つのゾーンをまたいで動く。手を置いたままでは反応しない。おかしいときは `get_touch_state` の `recalibrations` / `masked` を見る
 
 ## ハードウェア安全上の注意
 

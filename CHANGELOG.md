@@ -70,6 +70,30 @@ documented-only.
   on re-evaluates the current battery level at once. New device tools
   `self.power.set_charge_protection`, `self.power.get_charge_protection`,
   `self.power.set_charge_thresholds`.
+- Reworked head-touch (Si12T) detection to stop phantom STROKE events on an
+  untouched head (#103) and to catch short taps (#2):
+  - The chip is now soft-reset and configured per the datasheet on every
+    boot (SRST, CH1-3 enabled, baseline reset released, registers read back
+    and logged). Previously the ESP32 reset left whatever baseline the chip
+    already held, and CH2/CH3 were often "pressed" from power-up.
+  - TAP / STROKE are decided by finger movement, not hold time. STROKE means
+    the finger slid from the zone it started on to another zone; TAP is a
+    40..500 ms press with no movement. A hand resting on the head, or a
+    channel stuck "pressed", no longer produces events. A channel that stays
+    non-zero for 15 s has its baseline reset on the chip and is ignored until
+    it reads 0 again. The first 10 s after boot (the chip's fast-calibration
+    window) never produce events.
+  - Polling is now every 50 ms (was 100 ms) and the screen-off timer is only
+    woken by a confirmed TAP/STROKE, so a stuck channel can no longer keep the
+    display on. Face reactions are shorter (TAP 1.2 s, STROKE 1.5 s).
+  - `get_touch_state` also reports `enabled`, `masked`, `recalibrations`, and
+    `boot_grace`. The event sent to the gateway keeps its shape
+    (`touch` / `tap|stroke` / `duration_ms`); a STROKE `duration_ms` is now
+    the length of the press in which the finger moved.
+  - **Behavior change:** head-touch is now **off when `touch/enabled` was never
+    saved** (it used to be on). Existing devices that never changed the setting
+    stop reacting after the update; call `set_touch_sensor_enabled(true)` to
+    turn it back on. A saved value is kept as is.
 
 ## [0.18.0] - 2026-10-03
 

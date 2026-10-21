@@ -8,6 +8,7 @@
 #include "axp2101.h"
 #include "mcp_server.h"
 #include "settings.h"
+#include "touch_gesture.h"
 #include "led_strip.h"
 // Issue #79: servo driver is selectable at build time via Kconfig.
 //   - CONFIG_STACKCHAN_SERVO_SCSCL  (default): GPL-3.0 SCServo_lib
@@ -532,27 +533,37 @@ private:
 };
 
 // Minimal Si12T driver (12-channel capacitive touch sensor, TSM12-compatible).
-// Used for the StackChan head-stroke / head-tap detection. Only the read path
-// (Output1 register, channels 1-4) is needed for Phase 7. We expose just the
-// first three channels through ReadTouchState() because the StackChan head
-// has 3 conductive zones wired to TS1..TS3.
+// Used for the StackChan head-stroke / head-tap detection. The head has 3
+// conductive zones wired to TS1..TS3 (front / middle / back); ReadTouchState()
+// exposes CH1..CH3 from Output1.
 //
-// Datasheet excerpt:
+// Datasheet notes (Si12T datasheet Rev 0.1 sec.12, TSM12 datasheet sec.8-9):
 //   - I2C 7-bit address: 0xD0 >> 1 == 0x68 when ID_SEL pin is tied to GND.
-//     This matches the address probed at boot ("0x68").
-//   - Reset value of CTRL (0x09) is 0b00000111 (SLEEP=1). We must clear SLEEP
-//     to enter normal sensing mode: CTRL = 0b00000011.
-//   - Output1 (0x10) packs four channels into one byte (2 bits per channel):
-//       bit[1:0] = OUT1, bit[3:2] = OUT2, bit[5:4] = OUT3, bit[7:6] = OUT4
+//   - CTRL (0x09): bit3 = SRST (soft reset), bit2 = SLEEP, bit1:0 must be 11.
+//     Power-on value 0x07 (asleep). 0x0F resets the digital part, 0x03 runs.
+//   - SEN1..SEN6 (0x02..0x07): two channels per byte, low nibble = lower
+//     channel. M[2:0] = detection threshold (011 = 1.20 %).
+//   - Ref_rst1/2 (0x0A/0x0B): while a bit is 1 the channel baseline is
+//     re-captured. Power-on 0xFE / 0x0F (channels 2.. held in reset).
+//   - Ch_on1/2 (0x0C/0x0D): a bit set to 1 STOPS that channel. Power-on
+//     0xFE / 0x3F. Bit 4 and 5 of 0x0D must stay 1.
+//   - Cal_on1/2 (0x0E/0x0F): a bit set to 1 freezes baseline tracking.
+//   - Output1 (0x10) packs four channels, 2 bits each:
+//       bit[1:0] = CH1, bit[3:2] = CH2, bit[5:4] = CH3, bit[7:6] = CH4
 //       00 = no output, 01 = low, 10 = medium, 11 = high.
-//   - There is no dedicated chip-id register, so Begin() validates the device
-//     via successful I2C ACK on the CTRL read + non-0xFF Output1 read.
+//   - FTC (CFIG 0x08 = 0x22): after power-up / reset the chip calibrates fast
+//     for 10 s, so Output1 is not trustworthy during that window.
+// Begin() follows the datasheet start-up order (soft reset -> sensitivity ->
+// channel enable -> release baseline reset -> run) every boot, because the chip
+// keeps whatever the previous firmware (or a stuck baseline) left behind
+// across an ESP32 reset.
 class Si12T : public I2cDevice {
 public:
     static constexpr uint8_t DEFAULT_ADDR = 0x68;  // ID_SEL = GND
 
     struct TouchState {
         bool zone[3];          // CH1, CH2, CH3 — true if any output level set
+        uint8_t level[3];      // CH1..CH3 output level 0..3
         uint8_t output1_raw;   // raw Output1 register byte (0x10)
         bool ok;               // false if the I2C read failed
     };
@@ -560,50 +571,132 @@ public:
     Si12T(i2c_master_bus_handle_t i2c_bus, uint8_t addr = DEFAULT_ADDR)
         : I2cDevice(i2c_bus, addr) {}
 
-    // Probe the chip and bring it out of sleep. Returns true on success.
+    // Soft-reset and configure the chip. Returns false if any write fails or
+    // a register does not read back as written.
     bool Begin() {
-        uint8_t ctrl = 0;
-        if (!SafeReadReg(REG_CTRL, &ctrl)) {
+        uint8_t before[REG_COUNT] = {};
+        uint8_t ctrl_before = 0;
+        if (!SafeReadReg(REG_CTRL, &ctrl_before)) {
             return false;
         }
-        // CTRL bit1 = SLEEP. Clear it; bit1:0 must hold 1 per datasheet
-        // ("CTRL Bit1, Bit0 = 1 1" reset value), so write 0b00000011.
-        if (!SafeWriteReg(REG_CTRL, 0x03)) {
-            return false;
+        for (uint8_t i = 0; i < REG_COUNT; i++) {
+            SafeReadReg(static_cast<uint8_t>(REG_SEN1 + i), &before[i]);
         }
-        // Verify the device actually responds on the output register.
-        // 0xFF would indicate an open bus / no device.
+
+        // 1. Soft reset, then back to the (asleep) power-on mode.
+        if (!SafeWriteReg(REG_CTRL, 0x0F)) return false;
+        vTaskDelay(pdMS_TO_TICKS(10));
+        if (!SafeWriteReg(REG_CTRL, 0x07)) return false;
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // 2. Sensitivity (CH1..CH4: M=011 / 1.20 %, HL=0 — same as the
+        //    reference M5 firmware), fast-calibration config, and enable the
+        //    three head channels only (CH4..CH12 stay stopped).
+        const struct { uint8_t reg; uint8_t val; } cfg[] = {
+            {REG_SEN1,    0x33},
+            {REG_SEN2,    0x33},
+            {REG_CFIG,    0x22},
+            {REG_CH_ON1,  0xF8},
+            {REG_CH_ON2,  0x3F},
+            {REG_REF_RST1, 0x00},
+            {REG_REF_RST2, 0x00},
+            {REG_CAL_ON1, 0x00},
+            {REG_CAL_ON2, 0x00},
+        };
+        for (const auto& c : cfg) {
+            if (!SafeWriteReg(c.reg, c.val)) return false;
+        }
+
+        // 3. Leave sleep.
+        if (!SafeWriteReg(REG_CTRL, 0x03)) return false;
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // 4. Read everything back; refuse to run on a chip that did not take
+        //    the configuration.
+        uint8_t after[REG_COUNT] = {};
+        uint8_t ctrl_after = 0;
+        if (!SafeReadReg(REG_CTRL, &ctrl_after)) return false;
+        for (uint8_t i = 0; i < REG_COUNT; i++) {
+            if (!SafeReadReg(static_cast<uint8_t>(REG_SEN1 + i), &after[i])) return false;
+        }
+        bool verified = (ctrl_after & 0x0C) == 0;  // SRST and SLEEP cleared
+        for (const auto& c : cfg) {
+            if (after[c.reg - REG_SEN1] != c.val) verified = false;
+        }
         uint8_t out1 = 0;
-        if (!SafeReadReg(REG_OUTPUT1, &out1)) {
-            return false;
-        }
+        if (!SafeReadReg(REG_OUTPUT1, &out1)) return false;
+
+        ESP_LOGI("Si12T",
+                 "before: ctrl=0x%02X sen=%02X%02X cfig=%02X ref=%02X%02X on=%02X%02X cal=%02X%02X",
+                 ctrl_before, before[0], before[1], before[REG_CFIG - REG_SEN1],
+                 before[REG_REF_RST1 - REG_SEN1], before[REG_REF_RST2 - REG_SEN1],
+                 before[REG_CH_ON1 - REG_SEN1], before[REG_CH_ON2 - REG_SEN1],
+                 before[REG_CAL_ON1 - REG_SEN1], before[REG_CAL_ON2 - REG_SEN1]);
+        ESP_LOGI("Si12T",
+                 "after:  ctrl=0x%02X sen=%02X%02X cfig=%02X ref=%02X%02X on=%02X%02X cal=%02X%02X out1=0x%02X",
+                 ctrl_after, after[0], after[1], after[REG_CFIG - REG_SEN1],
+                 after[REG_REF_RST1 - REG_SEN1], after[REG_REF_RST2 - REG_SEN1],
+                 after[REG_CH_ON1 - REG_SEN1], after[REG_CH_ON2 - REG_SEN1],
+                 after[REG_CAL_ON1 - REG_SEN1], after[REG_CAL_ON2 - REG_SEN1], out1);
         if (out1 == 0xFF) {
             ESP_LOGW("Si12T", "Output1 read 0xFF (likely no device)");
             return false;
         }
-        ESP_LOGI("Si12T", "init OK: ctrl=0x%02X out1=0x%02X (sleep cleared)", ctrl, out1);
+        if (!verified) {
+            ESP_LOGW("Si12T", "register read-back mismatch after init");
+            return false;
+        }
+        ESP_LOGI("Si12T", "init OK (soft reset, CH1-3 enabled, baseline reset released)");
+        return true;
+    }
+
+    // Re-capture the baseline of the channels in `mask` (bit0 = CH1). The
+    // reset bits are released on the next ReadTouchState().
+    bool ResetReference(uint8_t mask) {
+        mask &= 0x07;
+        if (mask == 0) return true;
+        if (!SafeWriteReg(REG_REF_RST1, mask)) return false;
+        ref_reset_pending_ = true;
         return true;
     }
 
     // Sample channels CH1..CH3 from Output1 (0x10). Single-shot read; the
-    // caller is expected to debounce / interpret duration externally.
+    // caller interprets the gesture.
     TouchState ReadTouchState() {
         TouchState s = {};
         s.ok = false;
+        if (ref_reset_pending_) {
+            if (!SafeWriteReg(REG_REF_RST1, 0x00)) {
+                return s;
+            }
+            ref_reset_pending_ = false;
+        }
         if (!SafeReadReg(REG_OUTPUT1, &s.output1_raw)) {
             return s;
         }
         s.ok = true;
-        // Each channel uses 2 bits; nonzero = touched at some level.
-        s.zone[0] = ((s.output1_raw >> 0) & 0x3) != 0;  // CH1
-        s.zone[1] = ((s.output1_raw >> 2) & 0x3) != 0;  // CH2
-        s.zone[2] = ((s.output1_raw >> 4) & 0x3) != 0;  // CH3
+        for (int i = 0; i < 3; i++) {
+            s.level[i] = (s.output1_raw >> (i * 2)) & 0x3;
+            s.zone[i] = s.level[i] != 0;
+        }
         return s;
     }
 
 private:
-    static constexpr uint8_t REG_CTRL    = 0x09;  // CTRL, SLEEP bit etc.
-    static constexpr uint8_t REG_OUTPUT1 = 0x10;  // CH1..CH4 packed (2bpp)
+    static constexpr uint8_t REG_SEN1     = 0x02;
+    static constexpr uint8_t REG_SEN2     = 0x03;
+    static constexpr uint8_t REG_CFIG     = 0x08;
+    static constexpr uint8_t REG_CTRL     = 0x09;
+    static constexpr uint8_t REG_REF_RST1 = 0x0A;
+    static constexpr uint8_t REG_REF_RST2 = 0x0B;
+    static constexpr uint8_t REG_CH_ON1   = 0x0C;
+    static constexpr uint8_t REG_CH_ON2   = 0x0D;
+    static constexpr uint8_t REG_CAL_ON1  = 0x0E;
+    static constexpr uint8_t REG_CAL_ON2  = 0x0F;
+    static constexpr uint8_t REG_OUTPUT1  = 0x10;  // CH1..CH4 packed (2bpp)
+    static constexpr uint8_t REG_COUNT    = 14;    // 0x02..0x0F
+
+    bool ref_reset_pending_ = false;
 
     bool SafeReadReg(uint8_t reg, uint8_t* out) {
         esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, out, 1, 100);
@@ -811,34 +904,23 @@ private:
     TtsLipSyncShape tts_lipsync_shape_ = TtsLipSyncShape::CLOSED;
 
     // Phase 7: Si12T head-touch sensing.
-    // Polling every TOUCH_POLL_MS samples Output1 (CH1..CH3 -> 3 head zones).
-    // Edge detection on the OR of the three zones produces TAP / STROKE
-    // gestures based on hold duration:
-    //   duration <  TAP_MAX_MS (400 ms)  -> TAP    -> face=surprised
-    //   duration >= STROKE_MIN_MS (600 ms) -> STROKE -> face=embarrassed + servo wobble
-    //   400 <= duration < 600 ms         -> treated as TAP (greyzone)
-    // Reactions auto-revert to "idle" after REACTION_HOLD_MS (3 s). A
-    // post-reaction COOLDOWN_MS lock-out prevents one head-pat from firing
-    // a chain of events.
+    // TouchPollTick() samples CH1..CH3 every TOUCH_POLL_MS and feeds
+    // stackchan::touch::TouchGestureTracker (touch_gesture.h), which decides:
+    //   TAP    : short press (40..500 ms) with no finger movement
+    //   STROKE : the finger moved from the zone it started on to another zone
+    // A press that does not move and lasts longer than 500 ms (a resting hand,
+    // or a channel whose baseline is stuck) produces no event. Channels that
+    // stay non-zero for 15 s get their baseline reset on the chip.
+    // Reactions revert to the "idle" face after TAP_REACTION_HOLD_MS /
+    // STROKE_REACTION_HOLD_MS.
     enum class TouchEvent : uint8_t {
         IDLE = 0,
         TAP,
         STROKE,
     };
-    static constexpr int TOUCH_POLL_MS    = 100;  // 100 Hz polling
-    static constexpr int TAP_MAX_MS       = 400;
-    static constexpr int STROKE_MIN_MS    = 400;  // was 600; lowered because
-                                                  // finger-glide between zones
-                                                  // and Si12T auto-recalibration
-                                                  // inject brief "all-false"
-                                                  // gaps that cut a real stroke
-                                                  // short of 600 ms.
-    static constexpr int REACTION_HOLD_MS = 3000;
-    static constexpr int COOLDOWN_MS      = 800;  // post-reaction noise gate
-    // With 2-sample debounce this gives ~200 ms confirm latency, fast enough
-    // to catch a quick "pon" (~200 ms press) while still rejecting single-
-    // sample jitter. Was 200 ms polling -> 400 ms confirm, which silently
-    // dropped most short taps.
+    static constexpr int TOUCH_POLL_MS    = 50;
+    static constexpr int TAP_REACTION_HOLD_MS    = 1200;
+    static constexpr int STROKE_REACTION_HOLD_MS = 1500;
     static constexpr int SERVO_WOBBLE_STEP_MS = 350;  // was 200; SCS0009 needs
                                                        // ~125 ms to physically
                                                        // travel ±20°, plus the
@@ -846,35 +928,28 @@ private:
                                                        // Tighter steps caused
                                                        // bus hangs.
     static constexpr int SERVO_WOBBLE_AMPLITUDE_DEG = 20;
+    // Value used when NVS touch/enabled has never been written.
+    static constexpr bool TOUCH_ENABLED_DEFAULT = false;
 
-    std::atomic<bool> touch_sensor_enabled_{true};
+    std::atomic<bool> touch_sensor_enabled_{TOUCH_ENABLED_DEFAULT};
     std::unique_ptr<Si12T> si12t_;
     bool si12t_ok_ = false;
     esp_timer_handle_t touch_poll_timer_ = nullptr;
     esp_timer_handle_t touch_revert_timer_ = nullptr;
 
-    // Touch detection state (single-thread access from the touch_poll_timer_
-    // callback, which runs on the ESP_TIMER_TASK).
-    bool touch_pressed_prev_ = false;          // last sample (debounced)
-    bool touch_pressed_pending_ = false;       // candidate awaiting confirm
-    int  touch_pending_count_ = 0;             // consecutive samples matching
-    uint64_t touch_press_start_us_ = 0;        // when pressed_prev_ went true
-    uint64_t cooldown_until_us_ = 0;           // ignore press until this ts
+    // Access is from the touch_poll_timer_ callback (ESP_TIMER_TASK) only,
+    // except for the diagnostic snapshots read by MCP get_touch_state.
+    stackchan::touch::TouchGestureTracker touch_tracker_;
+    uint8_t touch_press_start_raw_ = 0;
 
     // Last reported event for MCP get_touch_state.
     TouchEvent last_event_ = TouchEvent::IDLE;
     uint64_t   last_event_us_ = 0;
     bool       last_zone_snapshot_[3] = {false, false, false};
     uint8_t    last_output1_raw_ = 0;
-    // Press-start snapshot. last_* fields above are overwritten every poll
-    // tick, so by the time HandleTap / HandleStroke fires on the falling edge
-    // they reflect the release state (zones=000 raw=0x00). press_start_*
-    // captures the rising-edge state so the log can show what the sensor
-    // actually saw when the touch began. Useful for distinguishing genuine
-    // touches (CH1〜CH3 set) from false positives (e.g. CH4 noise, raw=0x00
-    // with press judged via debounce, etc.).
-    bool       press_start_zones_[3] = {false, false, false};
-    uint8_t    press_start_output1_raw_ = 0;
+    std::atomic<uint8_t>  touch_masked_snapshot_{0};
+    std::atomic<uint32_t> touch_recal_snapshot_{0};
+    std::atomic<bool>     touch_in_grace_snapshot_{true};
 
     // Servo wobble sub-state. Keeps the previously-set angles untouched
     // before/after the wobble so that an external set_head_angles call is
@@ -4748,7 +4823,7 @@ private:
         }
     }
 
-    // Schedule a single-shot revert to "idle" face REACTION_HOLD_MS later.
+    // Schedule a single-shot revert to "idle" face `hold_ms` later.
     // Re-arming overwrites any pending revert. Skipped while the avatar
     // has been hidden via set_avatar("off"), so a stale revert timer
     // does not re-cover the LCD after the user explicitly hid it.
@@ -4757,7 +4832,7 @@ private:
         self->SetAvatarExpressionIfActive("idle");
     }
 
-    void ScheduleIdleRevert() {
+    void ScheduleIdleRevert(int hold_ms) {
         if (touch_revert_timer_ == nullptr) {
             esp_timer_create_args_t args = {
                 .callback = &StackChanBoard::TouchRevertCb,
@@ -4769,8 +4844,7 @@ private:
             ESP_ERROR_CHECK(esp_timer_create(&args, &touch_revert_timer_));
         }
         esp_timer_stop(touch_revert_timer_);  // ok if not running
-        esp_timer_start_once(touch_revert_timer_,
-                             (uint64_t)REACTION_HOLD_MS * 1000);
+        esp_timer_start_once(touch_revert_timer_, (uint64_t)hold_ms * 1000);
     }
 
     // Decode a 2-bit channel level from the Si12T Output1 byte.
@@ -4780,57 +4854,59 @@ private:
         return "0LMH"[v];
     }
 
-    // Emit the touch event log line. press_zones/press_raw are the
-    // rising-edge snapshot (= the touch the user actually made);
-    // release_raw is whatever the sensor reports at the falling edge
-    // (normally 0x00 — anything else hints at debounce / hysteresis quirks).
-    // ch=%c%c%c%c spells CH1〜CH4 levels using 0/L/M/H. CH4 is unused on
-    // stack-chan (the head has 3 zones), so anything non-0 on CH4 is a
-    // wiring noise / EMI signature worth investigating.
-    void LogTouchEvent(const char* event_name, uint64_t duration_ms) {
+    // Emit the touch event log line. press_start_raw is the Output1 byte seen
+    // when the press began; ch=%c%c%c%c spells its CH1..CH4 levels using
+    // 0/L/M/H. CH4 is unused on stack-chan (the head has 3 zones), so anything
+    // non-0 on CH4 is a wiring noise / EMI signature worth investigating.
+    void LogTouchEvent(const char* event_name, uint8_t start_zones, uint32_t duration_ms) {
         ESP_LOGI(TAG,
                  "touch event: %s start_zones=%d%d%d start_raw=0x%02X ch=%c%c%c%c "
                  "release_raw=0x%02X duration=%u ms",
                  event_name,
-                 press_start_zones_[0], press_start_zones_[1], press_start_zones_[2],
-                 press_start_output1_raw_,
-                 Si12tChLevelChar(press_start_output1_raw_, 0),
-                 Si12tChLevelChar(press_start_output1_raw_, 1),
-                 Si12tChLevelChar(press_start_output1_raw_, 2),
-                 Si12tChLevelChar(press_start_output1_raw_, 3),
+                 start_zones & 1, (start_zones >> 1) & 1, (start_zones >> 2) & 1,
+                 touch_press_start_raw_,
+                 Si12tChLevelChar(touch_press_start_raw_, 0),
+                 Si12tChLevelChar(touch_press_start_raw_, 1),
+                 Si12tChLevelChar(touch_press_start_raw_, 2),
+                 Si12tChLevelChar(touch_press_start_raw_, 3),
                  last_output1_raw_,
                  (unsigned)duration_ms);
     }
 
-    void HandleTap(uint64_t duration_ms) {
-        if (!touch_sensor_enabled_.load(std::memory_order_acquire)) {
-            return;
-        }
-        LogTouchEvent("TAP", duration_ms);
+    void HandleTap(uint8_t start_zones, uint32_t duration_ms) {
+        LogTouchEvent("TAP", start_zones, duration_ms);
         last_event_ = TouchEvent::TAP;
         last_event_us_ = esp_timer_get_time();
+        HandleScreenActivity();
         // Use the IfActive variant so a tap during set_avatar("off") does
         // not pop the avatar back over the WiFi config / settings screens.
         SetAvatarExpressionIfActive("surprised");
-        ScheduleIdleRevert();
+        ScheduleIdleRevert(TAP_REACTION_HOLD_MS);
         Application::GetInstance().SendStackChanEvent("touch", "tap", duration_ms);
     }
 
-    void HandleStroke(uint64_t duration_ms) {
-        if (!touch_sensor_enabled_.load(std::memory_order_acquire)) {
-            return;
-        }
-        LogTouchEvent("STROKE", duration_ms);
+    // Fired the moment the finger is seen moving across zones, so the face
+    // reacts while the stroke is still going on.
+    void HandleStrokeMoving() {
+        SetAvatarExpressionIfActive("embarrassed");
+        ScheduleIdleRevert(STROKE_REACTION_HOLD_MS);
+    }
+
+    void HandleStroke(uint8_t start_zones, uint32_t duration_ms) {
+        LogTouchEvent("STROKE", start_zones, duration_ms);
         last_event_ = TouchEvent::STROKE;
         last_event_us_ = esp_timer_get_time();
+        HandleScreenActivity();
         SetAvatarExpressionIfActive("embarrassed");
         StartServoWobble();
-        ScheduleIdleRevert();
+        ScheduleIdleRevert(STROKE_REACTION_HOLD_MS);
         Application::GetInstance().SendStackChanEvent("touch", "stroke", duration_ms);
     }
 
-    // 200 ms periodic poll. Reads the sensor, applies a 2-sample debounce on
-    // the OR of the three head zones, and emits TAP/STROKE on falling edges.
+    // 50 ms periodic poll. Reads the sensor and runs the gesture tracker. The
+    // tracker keeps running while the touch feature is disabled (so the stuck-
+    // channel recovery and get_touch_state diagnostics stay live), but nothing
+    // is reported, no reaction is shown and the screen-off timer is untouched.
     static void TouchPollCb(void* arg) {
         StackChanBoard* self = static_cast<StackChanBoard*>(arg);
         self->TouchPollTick();
@@ -4850,79 +4926,41 @@ private:
         last_zone_snapshot_[1] = s.zone[1];
         last_zone_snapshot_[2] = s.zone[2];
 
-        bool any_pressed = s.zone[0] || s.zone[1] || s.zone[2];
-        if (any_pressed) {
-            HandleScreenActivity();
+        const bool was_pressed = touch_tracker_.pressed();
+        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+        stackchan::touch::TouchGestureOutput o = touch_tracker_.Update(now_ms, s.level);
+        if (!was_pressed && touch_tracker_.pressed()) {
+            touch_press_start_raw_ = s.output1_raw;
         }
+        touch_masked_snapshot_.store(touch_tracker_.masked_channels(), std::memory_order_relaxed);
+        touch_recal_snapshot_.store(touch_tracker_.recalibrations(), std::memory_order_relaxed);
+        touch_in_grace_snapshot_.store(touch_tracker_.in_boot_grace(), std::memory_order_relaxed);
 
-        // Asymmetric debounce:
-        //   press   confirm = 2 samples ( 200 ms) — fast tap detection
-        //   release confirm = 4 samples ( 400 ms) — bridges Si12T recalibration
-        //                                            and finger-glide gaps that
-        //                                            otherwise cut a stroke
-        //                                            short and mis-classify it
-        //                                            as a tap.
-        // Keeping a press "sticky" through brief no-press blips is essential
-        // for the stroke gesture to reach STROKE_MIN_MS.
-        if (any_pressed == touch_pressed_pending_) {
-            touch_pending_count_++;
-        } else {
-            touch_pending_count_ = 1;
-            touch_pressed_pending_ = any_pressed;
+        if (o.recal_mask != 0) {
+            si12t_->ResetReference(o.recal_mask);
+            ESP_LOGW(TAG, "touch: channel stuck >= 15 s, reset Si12T baseline mask=0x%02X raw=0x%02X (total %u)",
+                     o.recal_mask, s.output1_raw, (unsigned)touch_tracker_.recalibrations());
         }
-        const int needed = touch_pressed_pending_ ? 2 : 4;
-        if (touch_pending_count_ < needed) {
-            return;  // not yet debounced
+        if (o.ended_without_event) {
+            ESP_LOGI(TAG, "touch press ignored: start_raw=0x%02X release_raw=0x%02X duration=%u ms",
+                     touch_press_start_raw_, s.output1_raw, (unsigned)o.duration_ms);
         }
-
-        bool now = touch_pressed_pending_;
-        if (now == touch_pressed_prev_) {
-            return;  // no edge
+        if (!touch_sensor_enabled_.load(std::memory_order_acquire)) {
+            return;
         }
-
-        uint64_t now_us = esp_timer_get_time();
-
-        if (now) {
-            // Rising edge. Capture the sensor state for the falling-edge
-            // log either way — without this, a press that begins during
-            // the post-reaction cooldown and is held until the cooldown
-            // expires would log the previous touch's start_zones /
-            // start_raw on its falling edge, exactly the
-            // repeated-touch / noise-overlap scenario this logging is
-            // meant to clarify.
-            press_start_zones_[0] = s.zone[0];
-            press_start_zones_[1] = s.zone[1];
-            press_start_zones_[2] = s.zone[2];
-            press_start_output1_raw_ = s.output1_raw;
-            if (now_us < cooldown_until_us_) {
-                // Suppress press event while in post-reaction cooldown.
-                touch_pressed_prev_ = now;
-                touch_press_start_us_ = now_us;
-                return;
-            }
-            touch_pressed_prev_ = true;
-            touch_press_start_us_ = now_us;
-        } else {
-            // Falling edge: classify by hold duration.
-            touch_pressed_prev_ = false;
-            uint64_t duration_ms = (now_us - touch_press_start_us_) / 1000ULL;
-            if (now_us < cooldown_until_us_) {
-                // We were in cooldown when pressed — drop the release event too.
-                return;
-            }
-            if (duration_ms >= STROKE_MIN_MS) {
-                HandleStroke(duration_ms);
-            } else {
-                // Treat the 400-600 ms grey zone as TAP.
-                HandleTap(duration_ms);
-            }
-            cooldown_until_us_ = now_us + (uint64_t)COOLDOWN_MS * 1000ULL;
+        if (o.moved_now) {
+            HandleStrokeMoving();
+        }
+        if (o.event == stackchan::touch::TouchGestureEvent::TAP) {
+            HandleTap(o.start_zones, o.duration_ms);
+        } else if (o.event == stackchan::touch::TouchGestureEvent::STROKE) {
+            HandleStroke(o.start_zones, o.duration_ms);
         }
     }
 
     void InitializeTouchSettings() {
         Settings settings("touch", false);
-        bool enabled = settings.GetBool("enabled", true);
+        bool enabled = settings.GetBool("enabled", TOUCH_ENABLED_DEFAULT);
         touch_sensor_enabled_.store(enabled, std::memory_order_release);
         ESP_LOGI(TAG, "Touch sensor setting loaded: enabled=%d", enabled ? 1 : 0);
     }
@@ -4932,10 +4970,11 @@ private:
         si12t_ = std::unique_ptr<Si12T>(new Si12T(i2c_bus_));
         si12t_ok_ = si12t_->Begin();
         if (!si12t_ok_) {
-            ESP_LOGW(TAG, "Si12T not detected; head-touch disabled (other features unaffected)");
+            ESP_LOGW(TAG, "Si12T init failed or not detected; head-touch disabled (other features unaffected)");
             si12t_.reset();
             return;
         }
+        touch_tracker_.Begin(static_cast<uint32_t>(esp_timer_get_time() / 1000ULL));
 
         esp_timer_create_args_t poll_args = {
             .callback = &StackChanBoard::TouchPollCb,
@@ -4947,7 +4986,7 @@ private:
         ESP_ERROR_CHECK(esp_timer_create(&poll_args, &touch_poll_timer_));
         ESP_ERROR_CHECK(esp_timer_start_periodic(touch_poll_timer_,
                                                  (uint64_t)TOUCH_POLL_MS * 1000));
-        ESP_LOGI(TAG, "Si12T touch poll started (%d ms interval)", TOUCH_POLL_MS);
+        ESP_LOGI(TAG, "Si12T touch poll started (%d ms interval, first 10 s ignored)", TOUCH_POLL_MS);
     }
 
     // Map a face name to AvatarSet's 0-indexed slot, or -1 if unknown.
@@ -6877,6 +6916,14 @@ private:
                 cJSON_AddBoolToObject(root, "zone1", last_zone_snapshot_[1]);
                 cJSON_AddBoolToObject(root, "zone2", last_zone_snapshot_[2]);
                 cJSON_AddNumberToObject(root, "raw", last_output1_raw_);
+                cJSON_AddBoolToObject(root, "enabled",
+                                      touch_sensor_enabled_.load(std::memory_order_acquire));
+                cJSON_AddNumberToObject(root, "masked",
+                                        touch_masked_snapshot_.load(std::memory_order_relaxed));
+                cJSON_AddNumberToObject(root, "recalibrations",
+                                        touch_recal_snapshot_.load(std::memory_order_relaxed));
+                cJSON_AddBoolToObject(root, "boot_grace",
+                                      touch_in_grace_snapshot_.load(std::memory_order_relaxed));
                 const char* ev = "idle";
                 switch (last_event_) {
                     case TouchEvent::TAP:    ev = "tap";    break;
