@@ -30,6 +30,10 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- Update the image converter to Pillow 13 to address image-decoder security advisories.
+
 ## [0.19.0] - 2026-10-22
 
 ### Gateway
