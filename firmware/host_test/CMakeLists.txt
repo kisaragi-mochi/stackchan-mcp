@@ -50,6 +50,20 @@ target_link_libraries(listening_profile_test
     PRIVATE GTest::gtest_main
 )
 
+add_executable(touch_gesture_test
+    test_touch_gesture.cc
+)
+
+target_include_directories(touch_gesture_test
+    PRIVATE
+        ../main
+)
+
+target_link_libraries(touch_gesture_test
+    PRIVATE GTest::gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(mdns_candidate_extract_test)
 gtest_discover_tests(listening_profile_test)
+gtest_discover_tests(touch_gesture_test)

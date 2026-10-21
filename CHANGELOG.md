@@ -30,6 +30,21 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- Head touch now responds to quick, repeated taps. The Si12T sensitivity
+  registers are configured explicitly (CH1 0.90 %, others 0.50 %) and the
+  channel-enable / reference / calibration registers 0x0A..0x0F are written
+  at boot so CH2/CH3 are sensing after a fresh power-on; the boot log prints
+  them before and after the write. Press confirms on the first touched
+  sample, a re-press after a short gap is recognized as a separate tap,
+  gesture duration is measured from the first sample of each state instead
+  of the debounced edge, and the 250 ms cooldown is counted from the
+  physical release so tap counts do not depend on the sampling phase. The
+  reaction face now lasts 1.2 s instead of 3 s. A failed sensitivity or
+  enable-register readback now disables head touch instead of logging
+  `init OK`. Thanks to @tsuru0805. (#374)
+
 ## [0.18.0] - 2026-10-03
 
 ### Gateway

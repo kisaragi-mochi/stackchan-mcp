@@ -36,12 +36,13 @@ During PMIC ON, holding the head at ~45° by hand while the boot-init climb comp
 | `TOUCH_POLL_MS` | 100 | Poll interval (10 Hz) |
 | Press confirm | 1 sample (100 ms) | Rising edge confirmation |
 | Release confirm | 4 samples (400 ms) | Falling edge confirmation (absorbs Si12T recalibration gaps); a re-press after a >=2-sample gap splits a tap-shaped segment into its own TAP |
-| `TAP_MAX_MS` | 400 | Maximum hold for TAP |
 | `STROKE_MIN_MS` | **400** (was 600) | Minimum hold for STROKE |
 | `REACTION_HOLD_MS` | 1200 | Reaction face display duration |
-| `COOLDOWN_MS` | 250 | Post-reaction touch suppression |
+| `COOLDOWN_MS` | 250 | Post-reaction touch suppression, counted from the physical release (first untouched sample) in every path |
 | `SERVO_WOBBLE_STEP_MS` | 350 (was 200) | Wobble step duration (extended for SCS0009 bus timing) |
 | `SERVO_WOBBLE_AMPLITUDE_DEG` | 20 | Wobble amplitude (yaw ±20°) |
+
+The debounce, TAP/STROKE classification and cooldown live in `touch_gesture.h` (`TouchGestureTracker`), covered by `firmware/host_test/test_touch_gesture.cc` (gaps of 300/400/500/600 ms between taps at several sampling phases).
 
 ### Event classification (determined at falling edge)
 
@@ -58,8 +59,9 @@ states (candidate timestamps), not the debounce-confirmed edges.
 
 - The touch sensor is the **Si12T on the head top** (not the LCD screen FT6336)
 - Capacitive — use finger pad, not fingernail
+- `Si12T::Begin()` writes registers 0x0A..0x0F (channel enable / reference reset / calibration hold) to 0x00 and logs them before and after the write (`en[0A..0F]` in the `init OK` line). Check the three zones separately in the `touch event:` raw log (`start_zones`, `ch=`) when verifying hardware.
 - STROKE requires holding ≥ 0.4 seconds — a quick tap triggers TAP only
-- Cooldown is 250 ms — consecutive taps ~300 ms apart register individually
+- Cooldown is 250 ms from the physical release — consecutive taps with gaps of 300-600 ms (and slower) all register individually
 - Describe as "hold/pet" rather than "tap" to avoid misclassification during testing
 
 ### Wobble behavior (post PR #176 fix)
@@ -96,7 +98,7 @@ The stackchan board (`class StackChanBoard : public WifiBoard`, `stackchan.cc:49
 | **Avatar (custom)** | N/A | `avatar_img_` LVGL image, foreground, 320x240 | Covers all standard UI when active |
 | **LED** | `GetLed()` → `NoLed` | No override → NoLed passthrough | **LED does not reflect state** |
 | **Mouth animation (custom)** | N/A | `OnTtsStart/Stop` → lip-sync | Active during speaking only |
-| **Touch reactive face (custom)** | N/A | `TouchPollTick` → surprised/embarrassed | 3-second face change on touch |
+| **Touch reactive face (custom)** | N/A | `TouchPollTick` → surprised/embarrassed | 1.2-second (`REACTION_HOLD_MS` = 1200 ms) face change on touch |
 | Backlight | `GetBacklight()` → `nullptr` | Override → `CustomBacklight(pmic_)` | Auto-dim via PowerSaveLevel |
 | Camera | `GetCamera()` → `nullptr` | Override → `camera_` | MCP `take_photo` |
 | Audio codec | `GetAudioCodec()` → `nullptr` | Override → AW88298 + ES7210 | TTS + mic |
