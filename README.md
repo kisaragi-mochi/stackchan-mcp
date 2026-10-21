@@ -744,6 +744,7 @@ prerequisite as the `[tts]` extra).
 
 | Environment variable | Default | Notes |
 |---|---|---|
+| `STACKCHAN_LISTEN_LANGUAGE` | `ja` | Default `listen()` language when the tool call omits `language`. |
 | `STACKCHAN_FASTER_WHISPER_MODEL` | `base` | Model identifier — `tiny` / `base` / `small` / `medium` / `large-v3`. Larger models are more accurate but slower and use more memory. |
 | `STACKCHAN_FASTER_WHISPER_DEVICE` | `cpu` | `cpu` / `cuda` / `auto`. |
 | `STACKCHAN_FASTER_WHISPER_COMPUTE_TYPE` | `int8` | `int8` / `float16` / `float32`. |

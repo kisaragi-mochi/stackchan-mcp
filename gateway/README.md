@@ -64,6 +64,10 @@ Edit `.env`:
   (something like `192.168.x.y` on a typical home network — run `ifconfig`
   or `ip addr` to find it). Required for `take_photo` when `VISION_URL` is not
   set.
+- `STACKCHAN_LISTEN_LANGUAGE`: default `listen()` language when the tool
+  call omits `language` (falls back to `ja`). The MCP schema does not
+  advertise a language default. `STACKCHAN_FASTER_WHISPER_*` select the
+  local model; install the `[stt-faster-whisper]` extra.
 
 ## Run
 

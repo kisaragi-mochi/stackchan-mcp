@@ -55,6 +55,9 @@ Environment variables:
   STACKCHAN_AUDIO_HOOK_TOKEN
                            Bearer token for the audio hook endpoint;
                            falls back to STACKCHAN_TOKEN.
+  STACKCHAN_LISTEN_LANGUAGE
+                           Default listen() language when the call
+                           omits language (default ja).
   HOST                     Bind address for the ESP32 WebSocket server
                            (default 0.0.0.0).
   WS_PORT                  Port for the ESP32 WebSocket server

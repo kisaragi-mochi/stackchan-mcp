@@ -32,6 +32,10 @@ documented-only.
 
 ### Gateway
 
+- `listen()` honours `STACKCHAN_LISTEN_LANGUAGE` when the tool call
+  omits `language` (still `ja` when unset). The MCP `listen` schema no
+  longer advertises a `language` default, so clients that materialize
+  schema defaults do not override the env.
 - New `fish-audio` TTS engine backed by the hosted
   [Fish Audio](https://fish.audio) API, selectable per call with
   `say(voice="fish-audio")` or globally via

@@ -673,6 +673,7 @@ export OPENAI_API_KEY=sk-...
 
 | 環境変数 | デフォルト | 補足 |
 |---|---|---|
+| `STACKCHAN_LISTEN_LANGUAGE` | `ja` | `listen()` が `language` を省略したときのデフォルト言語 |
 | `STACKCHAN_FASTER_WHISPER_MODEL` | `base` | モデル識別子 — `tiny` / `base` / `small` / `medium` / `large-v3`。大きいモデルほど精度は上がるが、メモリ消費と推論時間も増える |
 | `STACKCHAN_FASTER_WHISPER_DEVICE` | `cpu` | `cpu` / `cuda` / `auto` |
 | `STACKCHAN_FASTER_WHISPER_COMPUTE_TYPE` | `int8` | `int8` / `float16` / `float32` |

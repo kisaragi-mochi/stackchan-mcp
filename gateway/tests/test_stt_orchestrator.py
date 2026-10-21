@@ -1185,3 +1185,18 @@ async def test_pipeline_serialises_concurrent_listen_calls(fake_decode, monkeypa
         < stop_indices[1]
     )
     assert not is_recording()
+
+
+def test_resolve_listen_language_defaults_to_ja(monkeypatch):
+    monkeypatch.delenv("STACKCHAN_LISTEN_LANGUAGE", raising=False)
+    assert orchestrator.resolve_listen_language({}) == "ja"
+
+
+def test_resolve_listen_language_uses_env_when_omitted(monkeypatch):
+    monkeypatch.setenv("STACKCHAN_LISTEN_LANGUAGE", "en")
+    assert orchestrator.resolve_listen_language({}) == "en"
+
+
+def test_resolve_listen_language_argument_wins(monkeypatch):
+    monkeypatch.setenv("STACKCHAN_LISTEN_LANGUAGE", "en")
+    assert orchestrator.resolve_listen_language({"language": "ja"}) == "ja"
