@@ -32,6 +32,9 @@ documented-only.
 
 ### Gateway
 
+- Bump the locked `certifi` to 2026.10.19, which drops the
+  `emSign ECC Root CA - G3` root after the eMudhra intermediate CA key
+  compromise (October 2026).
 - `listen()` honours `STACKCHAN_LISTEN_LANGUAGE` when the tool call
   omits `language` (still `ja` when unset). The MCP `listen` schema no
   longer advertises a `language` default, so clients that materialize
