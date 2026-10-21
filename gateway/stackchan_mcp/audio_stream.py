@@ -13,16 +13,18 @@ recording slot when one is active. The
 and closes it via :func:`stop_recording` after the capture window;
 outside an active recording, inbound frames are still discarded.
 
-The recording slot is intentionally a module-level singleton: the
-device's :class:`stackchan_mcp.esp32_client.ESP32Manager` only manages
-one connection, and the STT orchestrator serialises ``listen()`` calls
-through :attr:`ESP32Manager.listen_lock`, so concurrent captures
-cannot race the buffer. If multi-device support lands later, this
-should move onto the connection object.
+The recording slot is intentionally a module-level singleton shared by
+every connected device. MCP ``listen()`` calls on different devices are
+serialised through :func:`capture_lock` (a gateway-wide lock, in addition
+to each device's own listen lock): a second device's ``listen()`` waits
+for the first capture to finish instead of running in parallel or
+failing. Device-driven captures do not queue; they are declined while the
+slot is held.
 """
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
@@ -44,6 +46,20 @@ _recording_owner: str | None = None
 _recording_frames: list[bytes] = []
 _recording_frame_hook: Callable[[bytes], Awaitable[None] | None] | None = None
 _recording_buffer_frames = True
+
+
+_capture_lock: asyncio.Lock | None = None
+_capture_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def capture_lock() -> asyncio.Lock:
+    """Return the gateway-wide lock that serialises MCP listen captures."""
+    global _capture_lock, _capture_lock_loop
+    loop = asyncio.get_running_loop()
+    if _capture_lock is None or _capture_lock_loop is not loop:
+        _capture_lock = asyncio.Lock()
+        _capture_lock_loop = loop
+    return _capture_lock
 
 
 def start_recording(

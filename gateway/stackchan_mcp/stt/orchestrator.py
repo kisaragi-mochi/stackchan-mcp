@@ -38,6 +38,7 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..audio_stream import (
+    capture_lock,
     is_recording,
     recording_owner,
     start_recording,
@@ -449,8 +450,9 @@ async def listen_and_transcribe(
             "STT path."
         )
 
-    # Acquire the device's listen lock so two concurrent listen() calls
-    # cannot interleave their capture windows. Same getattr fallback
+    # Acquire the device's listen lock (then the gateway-wide capture lock,
+    # since the recording slot is shared by all devices) so two concurrent
+    # listen() calls cannot interleave their capture windows. Same getattr fallback
     # pattern as the TTS orchestrator's ``tts_lock`` so test fakes that
     # don't expose the attribute keep working.
     listen_lock = _listen_lock_for_device(gateway.esp32, device_id)
@@ -472,7 +474,7 @@ async def listen_and_transcribe(
     motion_saved_angles: tuple[float, float] | None = None
     succeeded = False
 
-    async with lock_ctx:
+    async with lock_ctx, capture_lock():
         connection_for = getattr(gateway.esp32, "connection_for", None)
         connection = (
             connection_for(device_id)

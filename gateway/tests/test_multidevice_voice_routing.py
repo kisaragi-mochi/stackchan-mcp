@@ -660,5 +660,47 @@ class TestStdioDispatchSourceWiring(unittest.TestCase):
         self.assertIn("device_id=device_id", load_avatar_block)
 
 
+class TestGatewayWideCaptureLock(unittest.TestCase):
+    def test_listen_on_second_device_waits_for_the_first_capture(self) -> None:
+        async def scenario() -> None:
+            mgr, a, b = _two_device_manager()
+            gateway = _FakeGateway(mgr)
+            registry = STTRegistry()
+            registry.register(_FakeSTTEngine())
+            events: list[tuple[str, str]] = []
+
+            for conn in (a, b):
+                async def send(state, mode="manual", profile="voice", _c=conn):
+                    events.append((_c.device_id, state))
+
+                conn.send_listen_state = send  # type: ignore[method-assign]
+
+            original_decode = stt_orchestrator.decode_opus_frames
+            stt_orchestrator.decode_opus_frames = lambda frames: b""
+            try:
+                await asyncio.gather(
+                    *(
+                        stt_orchestrator.listen_and_transcribe(
+                            {"duration_ms": 100, "engine": "fakestt", "motion": "none"},
+                            gateway=gateway,
+                            registry=registry,
+                            device_id=dev,
+                        )
+                        for dev in ("dev-a", "dev-b")
+                    )
+                )
+            finally:
+                stt_orchestrator.decode_opus_frames = original_decode
+
+            self.assertEqual(len(events), 4)
+            first = events[0][0]
+            self.assertEqual(events[1], (first, "stop"))
+            second = events[2][0]
+            self.assertNotEqual(first, second)
+            self.assertEqual(events[2:], [(second, "start"), (second, "stop")])
+
+        _run(scenario())
+
+
 if __name__ == "__main__":
     unittest.main()

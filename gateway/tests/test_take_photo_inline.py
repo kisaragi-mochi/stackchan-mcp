@@ -141,7 +141,7 @@ class _FakeEsp32:
         self._receipt = receipt
         self.calls: list[tuple[str, dict]] = []
 
-    async def call_tool(self, name, arguments):
+    async def call_tool(self, name, arguments, *, device_id=None):
         self.calls.append((name, arguments))
         return {"content": [{"type": "text", "text": self._receipt}]}, None
 

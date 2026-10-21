@@ -843,8 +843,8 @@ async def _dispatch_mcp_tool(
     gateway: Any,
 ) -> list[TextContent | ImageContent]:
     """Run one StackChan MCP tool against the provided gateway instance."""
-    # Optional multi-device routing key. Not declared on individual Tool
-    # inputSchemas (untyped optional); strip so it never reaches ESP32.
+    # Optional multi-device routing key (declared by _with_device_id_schema);
+    # strip so it never reaches ESP32.
     device_id = arguments.pop("device_id", None)
     if device_id is not None and not isinstance(device_id, str):
         return [
@@ -1349,6 +1349,45 @@ def _photo_contents(result_text: str) -> list[TextContent | ImageContent]:
     return out
 
 
+# Tools that never take a per-call device_id: gateway-local status/registry
+# tools and the streaming/beat helpers, which always act on the default device.
+DEVICE_ID_EXEMPT_TOOLS = frozenset(
+    {
+        "get_status",
+        "list_devices",
+        "set_default_device",
+        "stackchan_follow_pose_stream",
+        "stackchan_follow_led_stream",
+        "beat_mode_start",
+        "beat_mode_stop",
+        "beat_mode_update",
+        "beat_meta_snapshot",
+        "beat_clip_save",
+    }
+)
+
+_DEVICE_ID_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "Optional Device-Id of the connected ESP32 to target (see "
+        "list_devices). Omit to use the default device."
+    ),
+}
+
+
+def _with_device_id_schema(tools: list[Tool]) -> list[Tool]:
+    """Declare the optional ``device_id`` routing argument on routed tools."""
+    for tool in tools:
+        if tool.name in DEVICE_ID_EXEMPT_TOOLS:
+            continue
+        schema = dict(tool.inputSchema)
+        properties = dict(schema.get("properties") or {})
+        properties.setdefault("device_id", dict(_DEVICE_ID_SCHEMA))
+        schema["properties"] = properties
+        tool.inputSchema = schema
+    return tools
+
+
 def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
     """Create and configure the MCP server with tool handlers."""
     _verify_mcp_sdk_compatibility()
@@ -1363,7 +1402,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
         Tools prefixed with ESP32 names (self.*) are relayed to the device.
         get_status is handled locally by the gateway.
         """
-        return [
+        tools = [
             Tool(
                 name="get_status",
                 description=(
@@ -3073,6 +3112,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 },
             ),
         ]
+        return _with_device_id_schema(tools)
 
     @server.call_tool()
     async def call_tool(

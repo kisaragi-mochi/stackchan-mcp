@@ -49,6 +49,13 @@ def _isolate_user_defaults_config(monkeypatch, tmp_path):
     stdio_server._reset_ws2812_color_orders_for_tests()
 
 
+def _schema_without_device_id(tool):
+    schema = dict(tool.inputSchema)
+    props = {k: v for k, v in schema.get("properties", {}).items() if k != "device_id"}
+    schema["properties"] = props
+    return schema
+
+
 def test_create_server():
     """Server creation succeeds with correct name."""
     server = create_server()
@@ -119,7 +126,7 @@ async def test_list_tools_includes_screen_off_timeout_tools():
     assert schema["properties"]["seconds"] == {
         "type": "integer", "minimum": 0, "maximum": 86400,
     }
-    assert tools["get_off_timeout"].inputSchema == {
+    assert _schema_without_device_id(tools["get_off_timeout"]) == {
         "type": "object", "properties": {},
     }
 
@@ -141,7 +148,7 @@ async def test_screen_off_timeout_relays_to_esp32(monkeypatch, name, arguments):
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, tool_name, tool_arguments):
+        async def call_tool(self, tool_name, tool_arguments, *, device_id=None):
             calls.append((tool_name, tool_arguments))
             return {"content": [{"type": "text", "text": json.dumps(payload)}]}, None
 
@@ -174,7 +181,7 @@ async def test_list_tools_includes_charge_protection_tools():
     assert "set_charge_thresholds" in tools
 
     set_tool = tools["set_charge_protection"]
-    assert set_tool.inputSchema == {
+    assert _schema_without_device_id(set_tool) == {
         "type": "object",
         "properties": {
             "enabled": {
@@ -191,11 +198,11 @@ async def test_list_tools_includes_charge_protection_tools():
     assert "going out" in set_tool.description
 
     get_tool = tools["get_charge_protection"]
-    assert get_tool.inputSchema == {"type": "object", "properties": {}}
+    assert _schema_without_device_id(get_tool) == {"type": "object", "properties": {}}
     assert "persistent and effective" in get_tool.description
 
     thresholds_tool = tools["set_charge_thresholds"]
-    assert thresholds_tool.inputSchema == {
+    assert _schema_without_device_id(thresholds_tool) == {
         "type": "object",
         "properties": {
             "on_below": {
@@ -252,7 +259,7 @@ async def test_charge_protection_tools_relay_and_preserve_response(
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, name, arguments):
+        async def call_tool(self, name, arguments, *, device_id=None):
             calls.append((name, arguments))
             return {
                 "content": [
@@ -303,7 +310,7 @@ async def test_charge_protection_tools_propagate_device_error(
     class FakeESP32:
         device_connected = True
 
-        async def call_tool(self, name, arguments):
+        async def call_tool(self, name, arguments, *, device_id=None):
             return None, {"message": "charge protection unavailable"}
 
     class FakeGateway:
@@ -346,14 +353,19 @@ async def test_list_tools_includes_gateway_config_tools():
     assert "gateway_config_get" in tools
     assert "gateway_config_set" in tools
 
-    get_schema = tools["gateway_config_get"].inputSchema
+    get_schema = _schema_without_device_id(tools["gateway_config_get"])
     assert get_schema == {"type": "object", "properties": {}}
     assert "mDNS" in tools["gateway_config_get"].description
     assert "force_mode" in tools["gateway_config_get"].description
 
     set_tool = tools["gateway_config_set"]
     set_schema = set_tool.inputSchema
-    assert set(set_schema["properties"]) == {"url", "fallback_url", "token"}
+    assert set(set_schema["properties"]) == {
+        "url",
+        "fallback_url",
+        "token",
+        "device_id",
+    }
     assert "required" not in set_schema
     assert set_schema["properties"]["url"]["type"] == "string"
     assert set_schema["properties"]["fallback_url"]["type"] == "string"
@@ -468,13 +480,13 @@ async def test_list_tools_includes_touch_sensor_tools():
     assert "set_touch_sensor_enabled" in tools
 
     get_tool = tools["get_touch_sensor_enabled"]
-    assert get_tool.inputSchema == {"type": "object", "properties": {}}
+    assert _schema_without_device_id(get_tool) == {"type": "object", "properties": {}}
     assert "NVS" in get_tool.description
     assert "local motion response" in get_tool.description
     assert "stackchan/event" in get_tool.description
 
     set_tool = tools["set_touch_sensor_enabled"]
-    assert set_tool.inputSchema == {
+    assert _schema_without_device_id(set_tool) == {
         "type": "object",
         "properties": {
             "enabled": {
@@ -970,7 +982,7 @@ async def test_list_tools_includes_ws2812_tools_with_schemas(
     assert strip_schema["required"] == ["colors"]
 
     for tool_name in (f"{port}_ws2812_refresh", f"{port}_ws2812_clear"):
-        assert tools_by_name[tool_name].inputSchema == {
+        assert _schema_without_device_id(tools_by_name[tool_name]) == {
             "type": "object",
             "properties": {},
         }
@@ -2214,3 +2226,38 @@ async def test_follow_led_rejects_bad_color_order(monkeypatch):
     assert captured == []
     assert "Input validation error" in result.root.content[0].text
     assert "'bgr' is not one of ['grb', 'rgb']" in result.root.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_routed_tools_publish_optional_device_id_schema():
+    """Every per-call routed tool declares an optional string device_id."""
+    from stackchan_mcp.stdio_server import DEVICE_ID_EXEMPT_TOOLS
+
+    server = create_server()
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+    tools = {tool.name: tool for tool in result.root.tools}
+
+    for name in ("say", "listen", "load_avatar_set", "move_head", "set_volume"):
+        assert name in tools
+    for name, tool in tools.items():
+        props = tool.inputSchema.get("properties", {})
+        if name in DEVICE_ID_EXEMPT_TOOLS:
+            if name != "set_default_device":
+                assert "device_id" not in props, name
+            continue
+        assert props.get("device_id", {}).get("type") == "string", name
+        assert "device_id" not in tool.inputSchema.get("required", []), name
+
+
+@pytest.mark.asyncio
+async def test_exempt_tools_are_real_tool_names():
+    from stackchan_mcp.stdio_server import DEVICE_ID_EXEMPT_TOOLS
+
+    server = create_server()
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+    names = {tool.name for tool in result.root.tools}
+    assert DEVICE_ID_EXEMPT_TOOLS <= names

@@ -44,7 +44,8 @@ documented-only.
   the `Device-Id` header instead of a single connection slot. An optional
   `device_id` argument on `say`, `listen`, `load_avatar_set`, and every
   hardware-relay tool selects which unit a call targets, and is declared in
-  each of those tools' published schemas. Two new tools, `list_devices` and
+  each of those tools' published schemas (the follow/beat streaming helpers
+  and `get_status` always act on the default device). Two new tools, `list_devices` and
   `set_default_device`, list the connected units and change the default
   target. Callers that omit `device_id` are unaffected: the default target
   is the first device that connects, as before. Audio recording (`listen`
