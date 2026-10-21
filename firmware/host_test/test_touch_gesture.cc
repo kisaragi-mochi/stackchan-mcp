@@ -31,10 +31,12 @@ struct Sim {
     int recal_requests = 0;
     uint8_t recal_union = 0;
     uint32_t last_stroke_ms = 0;
+    bool asleep = false;
 
     Sim() { tracker.Begin(0); }
 
     void Feed(const uint8_t levels[3]) {
+        tracker.SetAsleep(asleep);
         TouchGestureOutput o = tracker.Update(now, levels);
         if (o.event == TouchGestureEvent::TAP) taps++;
         if (o.event == TouchGestureEvent::STROKE) {
@@ -672,6 +674,49 @@ TEST(TouchGestureWideStroke, LowLevelBlipsAcrossZonesAreNotAStroke) {
     Sim s;
     ReplayPress(s, {0x15, 0x15, 0x14, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10});
     EXPECT_EQ(s.strokes, 0);
+}
+
+// ---- 7. bursts on an untouched head (10/21 22:4x-23:0x, nobody near) -----
+
+TEST(TouchGestureNoiseBurst, OneTickMhhSpikeIsNotATap) {
+    // 1631.6 s, screen on: 0x3E for a single 50 ms tick.
+    Sim s;
+    ReplayPress(s, {0x3E});
+    EXPECT_EQ(s.taps, 0);
+}
+
+TEST(TouchGestureNoiseBurst, MediumBurstsWhileTheScreenIsOffAreNotTaps) {
+    Sim s;
+    s.asleep = true;
+    ReplayPress(s, {0x29, 0x29});                                  // 967.1 s
+    ReplayPress(s, {0x26, 0x26, 0x26, 0x26, 0x26, 0x2A, 0x2A, 0x0A});  // 1355.6 s
+    ReplayPress(s, {0x29, 0x29, 0x29, 0x29});                      // 1943.4 s
+    ReplayPress(s, {0x05, 0x15, 0x10});                            // weak L, 1942.7 s
+    EXPECT_EQ(s.taps, 0);
+    EXPECT_EQ(s.strokes, 0);
+}
+
+TEST(TouchGestureNoiseBurst, FirmTouchWakesAScreenThatIsOff) {
+    // c log 1479.7 s and h log 665.6 s: the real wake-up taps reached H.
+    Sim s;
+    s.asleep = true;
+    ReplayPress(s, {0x30, 0x30, 0x30});
+    ReplayPress(s, {0x38, 0x30, 0x30});
+    EXPECT_EQ(s.taps, 2);
+}
+
+TEST(TouchGestureNoiseBurst, SameMediumTouchStillTapsWhileTheScreenIsOn) {
+    Sim s;
+    ReplayPress(s, {0x29, 0x29});
+    ReplayPress(s, {0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20});
+    EXPECT_EQ(s.taps, 2);
+}
+
+TEST(TouchGestureNoiseBurst, StrokeStillWorksWhileTheScreenIsOff) {
+    Sim s;
+    s.asleep = true;
+    ReplayPress(s, {0x30, 0x3C, 0x0F, 0x03});
+    EXPECT_EQ(s.strokes, 1);
 }
 
 }  // namespace
