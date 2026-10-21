@@ -204,12 +204,101 @@ TEST(TouchGestureTap, EachZoneAndDurationGivesOneTap) {
     }
 }
 
-TEST(TouchGestureTap, LowLevelTapCounts) {
+TEST(TouchGestureTap, LowLevelTapNeedsThreeHundredMilliseconds) {
     Sim s;
     s.PastGrace();
-    s.Raw(0x10, 100);  // CH3 = L
+    s.Raw(0x10, 300);  // CH3 = L for 300 ms
     s.Idle(1000);
     EXPECT_EQ(s.taps, 1);
+}
+
+TEST(TouchGestureTap, ShortLowLevelBlipsAreDropped) {
+    // The idle false positives seen on the device: one channel at L (level 1)
+    // for 100..150 ms (CH1=0x01, CH2=0x04, CH3=0x10).
+    const uint8_t raws[] = {0x01, 0x04, 0x10};
+    for (uint8_t raw : raws) {
+        for (uint32_t ms : {50u, 100u, 150u, 250u}) {
+            Sim s;
+            s.PastGrace();
+            s.Raw(raw, ms);
+            s.Idle(1000);
+            EXPECT_EQ(s.taps, 0) << "raw=" << int(raw) << " ms=" << ms;
+            EXPECT_EQ(s.strokes, 0) << "raw=" << int(raw) << " ms=" << ms;
+        }
+    }
+}
+
+TEST(TouchGestureTap, ShortPressReachingMediumLevelIsATap) {
+    Sim s;
+    s.PastGrace();
+    s.Raw(0x01, 50);  // L, then M within the press
+    s.Raw(0x02, 50);
+    s.Idle(1000);
+    EXPECT_EQ(s.taps, 1);
+    Sim t;
+    t.PastGrace();
+    t.Raw(0x20, 100);  // CH3 = M (level 2) straight away
+    t.Idle(1000);
+    EXPECT_EQ(t.taps, 1);
+}
+
+TEST(TouchGestureTap, LowLevelPressOver500msIsStillNotATap) {
+    Sim s;
+    s.PastGrace();
+    s.Raw(0x10, 700);
+    s.Idle(1000);
+    EXPECT_EQ(s.taps, 0);
+}
+
+// ---- settle window (charging / backlight switch) ---------------------------
+
+TEST(TouchGestureSettle, PressesInsideTheWindowAreIgnoredAndReferenceIsResetAfterwards) {
+    Sim s;
+    s.PastGrace();
+    s.tracker.NotifySettle(s.now);
+    s.Zones(0, 3, 0, 300);  // would be a TAP
+    s.Idle(600);            // still inside 1 s
+    EXPECT_EQ(s.taps, 0);
+    EXPECT_EQ(s.recal_requests, 0);
+    s.Idle(300);
+    EXPECT_EQ(s.recal_requests, 1);
+    EXPECT_EQ(s.recal_union, 0x07);
+    EXPECT_EQ(s.tracker.settle_resets(), 1u);
+    s.Idle(1500);
+    EXPECT_EQ(s.taps, 0);
+}
+
+TEST(TouchGestureSettle, TouchWorksAgainAfterTheWindowAndMaskClears) {
+    Sim s;
+    s.PastGrace();
+    s.tracker.NotifySettle(s.now);
+    s.Idle(3000);
+    s.Zones(0, 3, 0, 200);
+    s.Idle(1000);
+    EXPECT_EQ(s.taps, 1);
+}
+
+TEST(TouchGestureSettle, PressInProgressWhenSwitchHappensIsDropped) {
+    Sim s;
+    s.PastGrace();
+    s.Zones(0, 3, 0, 100);
+    s.tracker.NotifySettle(s.now);
+    s.Zones(0, 3, 0, 100);
+    s.Idle(3000);
+    EXPECT_EQ(s.taps, 0);
+    EXPECT_EQ(s.strokes, 0);
+}
+
+TEST(TouchGestureSettle, BlipAtChargingFlipFromTheDeviceLogGivesNothing) {
+    // 1027.9 s: CH3 M for 100 ms, then L for 1 s while charging flipped 0->1.
+    Sim s;
+    s.PastGrace();
+    s.Raw(0x20, 100);
+    s.tracker.NotifySettle(s.now);  // flip noticed one tick late
+    s.Raw(0x10, 1000);
+    s.Idle(3000);
+    EXPECT_EQ(s.taps, 0);
+    EXPECT_EQ(s.strokes, 0);
 }
 
 TEST(TouchGestureTap, TapSpanningTwoZonesDoesNotMove) {

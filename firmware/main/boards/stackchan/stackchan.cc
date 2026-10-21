@@ -940,6 +940,9 @@ private:
     // Access is from the touch_poll_timer_ callback (ESP_TIMER_TASK) only,
     // except for the diagnostic snapshots read by MCP get_touch_state.
     stackchan::touch::TouchGestureTracker touch_tracker_;
+    int touch_last_charging_ = 0;
+    int touch_last_screen_off_ = 0;
+    bool touch_power_state_valid_ = false;
     uint8_t touch_press_start_raw_ = 0;
 
     // Last reported event for MCP get_touch_state.
@@ -4920,6 +4923,22 @@ private:
         if (!s.ok) {
             return;
         }
+        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+        const int charging = (pmic_ != nullptr && pmic_->IsCharging()) ? 1 : 0;
+        const int screen_off = screen_is_off_.load(std::memory_order_relaxed) ? 1 : 0;
+        if (touch_power_state_valid_ &&
+            (charging != touch_last_charging_ || screen_off != touch_last_screen_off_)) {
+            touch_tracker_.NotifySettle(now_ms);
+            ESP_LOGI(TAG, "touch: charging=%d->%d screen_off=%d->%d, ignoring touch for 1 s then resetting baseline",
+                     touch_last_charging_, charging, touch_last_screen_off_, screen_off);
+        }
+        touch_last_charging_ = charging;
+        touch_last_screen_off_ = screen_off;
+        touch_power_state_valid_ = true;
+        if (s.output1_raw != last_output1_raw_) {
+            ESP_LOGI(TAG, "touch raw: 0x%02X -> 0x%02X charging=%d screen_off=%d",
+                     last_output1_raw_, s.output1_raw, charging, screen_off);
+        }
         // Snapshot for MCP visibility.
         last_output1_raw_ = s.output1_raw;
         last_zone_snapshot_[0] = s.zone[0];
@@ -4927,7 +4946,6 @@ private:
         last_zone_snapshot_[2] = s.zone[2];
 
         const bool was_pressed = touch_tracker_.pressed();
-        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
         stackchan::touch::TouchGestureOutput o = touch_tracker_.Update(now_ms, s.level);
         if (!was_pressed && touch_tracker_.pressed()) {
             touch_press_start_raw_ = s.output1_raw;
@@ -4936,14 +4954,19 @@ private:
         touch_recal_snapshot_.store(touch_tracker_.recalibrations(), std::memory_order_relaxed);
         touch_in_grace_snapshot_.store(touch_tracker_.in_boot_grace(), std::memory_order_relaxed);
 
-        if (o.recal_mask != 0) {
+        if (o.recal_mask != 0 && o.settle_reset) {
+            si12t_->ResetReference(o.recal_mask);
+            ESP_LOGI(TAG, "touch: baseline reset after charging/backlight switch (raw=0x%02X, total %u)",
+                     s.output1_raw, (unsigned)touch_tracker_.settle_resets());
+        } else if (o.recal_mask != 0) {
             si12t_->ResetReference(o.recal_mask);
             ESP_LOGW(TAG, "touch: channel stuck >= 15 s, reset Si12T baseline mask=0x%02X raw=0x%02X (total %u)",
                      o.recal_mask, s.output1_raw, (unsigned)touch_tracker_.recalibrations());
         }
         if (o.ended_without_event) {
-            ESP_LOGI(TAG, "touch press ignored: start_raw=0x%02X release_raw=0x%02X duration=%u ms",
-                     touch_press_start_raw_, s.output1_raw, (unsigned)o.duration_ms);
+            ESP_LOGI(TAG, "touch press ignored%s: start_raw=0x%02X release_raw=0x%02X peak=L%u duration=%u ms",
+                     o.dropped_weak ? " (weak L-only)" : "", touch_press_start_raw_, s.output1_raw,
+                     (unsigned)o.peak_level, (unsigned)o.duration_ms);
         }
         if (!touch_sensor_enabled_.load(std::memory_order_acquire)) {
             return;

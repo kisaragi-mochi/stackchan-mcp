@@ -14,9 +14,15 @@
 //   - classifies one press (OR of usable channels) as
 //       STROKE: the finger left a zone it started on AND reached a zone it did
 //               not start on (moved across zones),
-//       TAP:    no movement, `tap_min_ms`..`tap_max_ms` hold,
+//       TAP:    no movement, `tap_min_ms`..`tap_max_ms` hold, and either some
+//               channel reached level M (2) or more, or the press stayed on
+//               for `tap_low_min_ms` (a lone short level-L blip is dropped),
 //       none:   stationary hold longer than `tap_max_ms` (e.g. a stuck
-//               channel or a resting hand).
+//               channel or a resting hand), or a short L-only blip.
+//   - NotifySettle() is called when charging or the backlight switches: the
+//     tracker drops any press, ignores input for `settle_ms`, then asks the
+//     caller to reset the chip reference of all channels (`recal_mask`) and
+//     keeps them masked until they read 0 for `unmask_zero_ms`.
 
 #include <cstdint>
 
@@ -33,6 +39,9 @@ struct TouchGestureConfig {
     uint32_t move_release_confirm_ticks = 2;  // start zone must stay off (100 ms)
     uint32_t tap_min_ms = 40;
     uint32_t tap_max_ms = 500;
+    uint32_t tap_low_min_ms = 300;          // L-only (peak level 1) needs this long
+    uint8_t tap_strong_level = 2;           // a peak at this level or above counts at once
+    uint32_t settle_ms = 1000;              // ignore input after a power/backlight switch
     uint32_t cooldown_ms = 300;
 };
 
@@ -49,6 +58,9 @@ struct TouchGestureOutput {
     bool ended_without_event = false;  // a press ended and was not a TAP/STROKE
     uint8_t recal_mask = 0;         // bit i = CH(i+1): reset the chip reference now
     uint8_t start_zones = 0;        // zones touched at press start (valid with event)
+    uint8_t peak_level = 0;         // highest level seen on a usable channel in the press
+    bool dropped_weak = false;      // a short L-only press was discarded (log it)
+    bool settle_reset = false;      // recal_mask is for the post-switch reference reset
 };
 
 class TouchGestureTracker {
@@ -68,6 +80,21 @@ public:
 
     uint8_t masked_channels() const { return masked_; }
     uint32_t recalibrations() const { return recalibrations_; }
+    uint32_t settle_resets() const { return settle_resets_; }
+    bool in_settle() const { return settle_active_; }
+
+    // Charging / backlight just changed: power rails move and the capacitive
+    // readings wobble, so drop any press and ignore input for settle_ms.
+    void NotifySettle(uint32_t now_ms) {
+        if (!started_ || in_grace_) return;
+        settle_active_ = true;
+        settle_until_ms_ = now_ms + cfg_.settle_ms;
+        pressed_ = false;
+        press_dirty_ = false;
+        moved_ = false;
+        zero_ticks_ = 0;
+        cooldown_valid_ = false;
+    }
     bool in_boot_grace() const { return in_grace_; }
     bool pressed() const { return pressed_; }
 
@@ -99,6 +126,22 @@ public:
 
         const uint32_t dt = last_tick_ms_ == 0 ? cfg_.tick_ms : (now_ms - last_tick_ms_);
         last_tick_ms_ = now_ms;
+
+        if (settle_active_) {
+            if (now_ms < settle_until_ms_) {
+                return out;
+            }
+            settle_active_ = false;
+            settle_resets_++;
+            masked_ = 0x07;
+            for (int i = 0; i < kChannels; i++) {
+                nonzero_ms_[i] = 0;
+                zero_ms_[i] = 0;
+            }
+            out.recal_mask = 0x07;
+            out.settle_reset = true;
+            return out;
+        }
 
         // ---- stuck watch / unmask -------------------------------------
         for (int i = 0; i < kChannels; i++) {
@@ -133,6 +176,10 @@ public:
             press_start_ms_ = now_ms;
             last_active_ms_ = now_ms;
             start_zones_ = active;
+            peak_level_ = 0;
+            for (int i = 0; i < kChannels; i++) {
+                if ((active & (1u << i)) && levels[i] > peak_level_) peak_level_ = levels[i];
+            }
             seen_new_ = 0;
             vacated_ = 0;
             moved_ = false;
@@ -151,6 +198,10 @@ public:
             last_active_ms_ = now_ms;
         } else {
             zero_ticks_++;
+        }
+
+        for (int i = 0; i < kChannels; i++) {
+            if ((active & (1u << i)) && levels[i] > peak_level_) peak_level_ = levels[i];
         }
 
         // Movement: left a start zone, reached a zone that was not a start zone.
@@ -187,11 +238,16 @@ public:
                 out.duration_ms = duration;
                 out.start_zones = start_zones_;
             } else if (duration >= cfg_.tap_min_ms && duration <= cfg_.tap_max_ms) {
-                out.event = TouchGestureEvent::TAP;
-                out.duration_ms = duration;
-                out.start_zones = start_zones_;
+                if (peak_level_ >= cfg_.tap_strong_level || duration >= cfg_.tap_low_min_ms) {
+                    out.event = TouchGestureEvent::TAP;
+                    out.duration_ms = duration;
+                    out.start_zones = start_zones_;
+                } else {
+                    out.dropped_weak = true;
+                }
             }
         }
+        out.peak_level = peak_level_;
         // moved_now never fires without a matching STROKE unless the press was
         // dirty, and dirty presses suppress movement.
         if (out.event == TouchGestureEvent::NONE) {
@@ -211,6 +267,10 @@ private:
 
     uint8_t masked_ = 0;
     uint32_t recalibrations_ = 0;
+    uint32_t settle_resets_ = 0;
+    bool settle_active_ = false;
+    uint32_t settle_until_ms_ = 0;
+    uint8_t peak_level_ = 0;
     uint32_t nonzero_ms_[kChannels] = {0, 0, 0};
     uint32_t zero_ms_[kChannels] = {0, 0, 0};
 

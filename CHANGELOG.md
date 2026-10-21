@@ -78,11 +78,14 @@ documented-only.
     already held, and CH2/CH3 were often "pressed" from power-up.
   - TAP / STROKE are decided by finger movement, not hold time. STROKE means
     the finger slid from the zone it started on to another zone; TAP is a
-    40..500 ms press with no movement. A hand resting on the head, or a
+    40..500 ms press with no movement that reached level M or lasted
+    300 ms or more (a lone short level-L blip is dropped). A hand resting on the head, or a
     channel stuck "pressed", no longer produces events. A channel that stays
     non-zero for 15 s has its baseline reset on the chip and is ignored until
     it reads 0 again. The first 10 s after boot (the chip's fast-calibration
-    window) never produce events.
+    window) never produce events. When charging or the backlight switches,
+    touch is ignored for 1 s and the chip baseline is reset afterwards
+    (power-rail changes made single channels flicker at level L).
   - Polling is now every 50 ms (was 100 ms) and the screen-off timer is only
     woken by a confirmed TAP/STROKE, so a stuck channel can no longer keep the
     display on. Face reactions are shorter (TAP 1.2 s, STROKE 1.5 s).

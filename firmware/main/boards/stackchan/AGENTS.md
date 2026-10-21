@@ -41,10 +41,11 @@ The Si12T keeps its registers across an ESP32 reset, so a stuck baseline or the 
 | Boot grace | first 10 s after init (the chip's fast-calibration window): nothing is reported; a channel still non-zero when the window ends stays unusable until it reads 0 for 1 s |
 | Press / release confirm | press = 1 sample, release = 3 samples (150 ms) |
 | **STROKE** | during one press the finger left a zone it started on **and** reached a zone it did not start on (each held ≥ 100 ms). Reported on release; the face changes the moment the movement is seen |
-| **TAP** | no movement, held 40..500 ms |
+| **TAP** | no movement, held 40..500 ms, **and** some channel reached level M (2) or more, or the press lasted ≥ 300 ms. A short press that never got past L (1) is dropped (`touch press ignored (weak L-only)`, still logged) |
 | Stationary hold > 500 ms | no event (logged as `touch press ignored`). A resting hand or a stuck channel therefore never fires |
 | Stuck channel | a channel non-zero for 15 s gets `Si12T::ResetReference()` (Ref_rst bit), is dropped from the decision, and is used again after 1 s of zeros. The press in progress is not reported. Count in `get_touch_state.recalibrations` |
 | Cooldown | 300 ms after the physical release |
+| Charging / backlight switch | when the PMIC charging state or the screen on/off state changes, the tracker drops any press, ignores touch for 1 s, then resets the baseline of CH1-3 (`Ref_rst`) and keeps them unusable until each reads 0 for 1 s. Count in `touch: baseline reset after charging/backlight switch` log lines |
 | Reaction | TAP: `surprised`, idle after 1.2 s. STROKE: `embarrassed` + servo wobble, idle 1.5 s after the last movement |
 
 The screen is woken (`HandleScreenActivity`) only by a confirmed TAP/STROKE while touch is enabled, so a stuck channel no longer keeps the display on. With touch disabled (`touch/enabled` = false, the default) the poll and the stuck-channel recovery still run — `get_touch_state` stays useful for diagnostics — but nothing is reported, no reaction is shown and the screen-off timer is untouched.
