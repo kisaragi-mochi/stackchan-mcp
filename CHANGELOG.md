@@ -30,6 +30,10 @@ documented-only.
 
 ## [Unreleased]
 
+### Dependency maintenance
+
+- Update cryptography to 50, setuptools to 83, and image-converter Pillow to 13. Pillow 13 requires Python 3.11 or newer for the image helper; gateway Python compatibility is unchanged.
+
 ### Gateway
 
 - `get_status` now reports the WebSocket `session_id` alongside the
