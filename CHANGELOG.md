@@ -40,6 +40,24 @@ documented-only.
   Edge TTS no `ffmpeg` — the `tts-fish-audio` extra is a no-op alias over
   `[tts]`. Configured through `STACKCHAN_FISH_AUDIO_KEY` (required) plus
   optional `_MODEL`, `_BACKEND`, and `_URL` overrides.
+- Expose `set_charge_protection(enabled)`, `get_charge_protection`, and
+  `set_charge_thresholds(on_below, off_above)` in `tools/list` and relay them
+  to the device's `self.power.*` tools. Requires a firmware that includes the
+  persistent charge protection below.
+
+### Firmware
+
+- Added a persistent, opt-in runtime toggle for the AXP2101 charge protection
+  introduced in firmware-v1.17.0. `charge_protection` is stored in NVS
+  (namespace `stackchan`, key `chg_protect`) and is **off when unset**, so
+  existing devices behave exactly as before. When on, charging is disabled at
+  the upper threshold (70% by default) and resumes at the lower threshold
+  (30% by default); both thresholds are runtime-configurable and persisted
+  (`chg_on_below` / `chg_off_above`). Turning protection off enables the
+  charger immediately so the PMIC can finish a full charge; turning it back
+  on re-evaluates the current battery level at once. New device tools
+  `self.power.set_charge_protection`, `self.power.get_charge_protection`,
+  `self.power.set_charge_thresholds`.
 
 ## [0.18.0] - 2026-10-03
 
