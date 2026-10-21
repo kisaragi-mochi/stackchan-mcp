@@ -30,6 +30,8 @@ documented-only.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-22
+
 ### Gateway
 
 - Bump the locked `certifi` to 2026.10.19, which drops the
@@ -63,6 +65,16 @@ documented-only.
   `set_charge_thresholds(on_below, off_above)` in `tools/list` and relay them
   to the device's `self.power.*` tools. Requires a firmware that includes the
   persistent charge protection below.
+
+### Compatibility and known limitations
+
+- Recommended pairing: gateway **0.19.0** with firmware **1.18.0**.
+  The charge-protection tools need firmware 1.18.0 or later; everything else
+  in this release works with firmware 1.17.0.
+- Audio recording (`listen`) is still one gateway-wide slot across devices
+  (see the multi-device entry above).
+
+## [firmware-v1.18.0] - 2026-10-22
 
 ### Firmware
 
@@ -116,6 +128,17 @@ documented-only.
     reacts differently: the chip is always re-initialised at boot, resting
     hands and stuck channels no longer count, very short or weak touches are
     dropped, and while the screen is off only a firm touch (level H) wakes it.
+
+### Compatibility and known limitations
+
+- Recommended pairing: firmware **1.18.0** with gateway **0.19.0**.
+  Firmware 1.18.0 also works with gateway 0.18.0, but the charge-protection
+  controls are only reachable through gateway 0.19.0.
+- Charge protection stays **off** until enabled; existing devices behave
+  as before. Head-touch keeps its `touch/enabled` setting, but see the
+  behavior change above for how the default settings now react.
+- Existing devices should use the app-only `xiaozhi.bin` update at `0x20000`
+  to preserve NVS/Wi-Fi configuration.
 
 ## [0.18.0] - 2026-10-03
 
@@ -2005,7 +2028,9 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.18.0...v0.19.0
+[firmware-v1.18.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.17.0...firmware-v1.18.0
 [0.18.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.17.0...v0.18.0
 [firmware-v1.17.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.16.0...firmware-v1.17.0
 [0.17.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.16.0...v0.17.0
