@@ -929,7 +929,7 @@ private:
                                                        // bus hangs.
     static constexpr int SERVO_WOBBLE_AMPLITUDE_DEG = 20;
     // Value used when NVS touch/enabled has never been written.
-    static constexpr bool TOUCH_ENABLED_DEFAULT = false;
+    static constexpr bool TOUCH_ENABLED_DEFAULT = true;
 
     std::atomic<bool> touch_sensor_enabled_{TOUCH_ENABLED_DEFAULT};
     std::unique_ptr<Si12T> si12t_;

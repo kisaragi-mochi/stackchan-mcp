@@ -77,9 +77,15 @@ documented-only.
     and logged). Previously the ESP32 reset left whatever baseline the chip
     already held, and CH2/CH3 were often "pressed" from power-up.
   - TAP / STROKE are decided by finger movement, not hold time. STROKE means
-    the finger slid from the zone it started on to another zone; TAP is a
-    40..500 ms press with no movement that reached level M or lasted
-    300 ms or more (a lone short level-L blip is dropped). A hand resting on the head, or a
+    the finger slid from the zone it started on to another zone, or the
+    level-weighted centre of the touched zones moved by one zone or more (a
+    wide, fast finger never fully leaves its start zone); TAP is a
+    100..500 ms press with no movement that reached level M or lasted
+    300 ms or more (a one-tick spike or a lone short level-L blip is dropped).
+    While the screen is off, a press that started asleep must reach level H to
+    count as a TAP and wake the screen: on a still, untouched head the sensor
+    shows short bursts of L/M readings across several channels (measured up to
+    ~18 per minute with the screen off) and none of them reaches H. A hand resting on the head, or a
     channel stuck "pressed", no longer produces events. A channel that stays
     non-zero for 15 s has its baseline reset on the chip and is ignored until
     it reads 0 again. The first 10 s after boot (the chip's fast-calibration
@@ -97,10 +103,12 @@ documented-only.
     `boot_grace`. The event sent to the gateway keeps its shape
     (`touch` / `tap|stroke` / `duration_ms`); a STROKE `duration_ms` is now
     the length of the press in which the finger moved.
-  - **Behavior change:** head-touch is now **off when `touch/enabled` was never
-    saved** (it used to be on). Existing devices that never changed the setting
-    stop reacting after the update; call `set_touch_sensor_enabled(true)` to
-    turn it back on. A saved value is kept as is.
+  - **Behavior change:** head-touch stays **on when `touch/enabled` was never
+    saved**, as before (`set_touch_sensor_enabled(false)` still turns it off and
+    a saved value is kept as is), but with the default settings the robot now
+    reacts differently: the chip is always re-initialised at boot, resting
+    hands and stuck channels no longer count, very short or weak touches are
+    dropped, and while the screen is off only a firm touch (level H) wakes it.
 
 ## [0.18.0] - 2026-10-03
 
