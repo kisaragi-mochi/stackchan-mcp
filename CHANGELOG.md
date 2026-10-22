@@ -30,6 +30,11 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Tests only: merge the duplicated `move_head` pitch-rejection tests into one
+  parametrized test (same boundaries and type cases; no runtime change). (#421)
+
 ## [0.19.0] - 2026-10-22
 
 ### Gateway
