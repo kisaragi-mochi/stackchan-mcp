@@ -171,7 +171,7 @@ jobs:
         run: ls -la dist/
 
       - name: Upload distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-package-distributions-linux
           path: gateway/dist/
@@ -353,7 +353,7 @@ jobs:
           Get-ChildItem dist\
 
       - name: Upload Windows wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-package-distributions-windows
           path: gateway/dist/*-win_amd64.whl

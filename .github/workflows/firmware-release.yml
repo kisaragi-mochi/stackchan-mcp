@@ -138,7 +138,7 @@ jobs:
         # Uploaded for both tag-push and workflow_dispatch so a manual
         # run can still be inspected end-to-end. The release job below
         # is the only step gated on the tag-push event.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stackchan-firmware-${{ github.sha }}
           retention-days: 14
