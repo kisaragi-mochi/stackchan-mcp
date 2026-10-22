@@ -1,4 +1,4 @@
-matplotlib==3.10.5
-numpy==2.3.2
-PyQt6==6.9.1
-qasync==0.27.1
+matplotlib==3.11.2
+numpy==2.5.4
+PyQt6==6.11.0
+qasync==0.28.0
