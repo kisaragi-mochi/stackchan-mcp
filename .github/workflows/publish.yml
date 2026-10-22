@@ -54,7 +54,7 @@ jobs:
         # `astral-sh/setup-uv` ships immutable releases starting with
         # v8 — no `@v8` alias exists, so a full version pin is required.
         # See CONTRIBUTING.md "Pinning policy for the publish workflow".
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -282,7 +282,7 @@ jobs:
           "OPUS_DLL_SHA256=$actual" | Out-File -Append -FilePath $env:GITHUB_ENV
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
