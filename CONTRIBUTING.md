@@ -62,6 +62,13 @@ not apply, and explain anything you could not test.
 Small, focused PRs are easier to review. Prefer one issue per PR, or one small
 maintenance purpose per PR.
 
+Open an issue to discuss before sending a PR that adds a new feature, changes
+how the robot looks (faces, avatars, images, icons, sample assets), or adds a
+new documentation page. These depend on the project's direction and visual
+identity, so a PR that was not discussed first may be closed even if the code
+is fine. Bug fixes and small improvements to existing behavior do not need
+this step.
+
 ## CI
 
 The build workflow in `.github/workflows/build.yml` runs on pull requests and
