@@ -181,7 +181,7 @@ Same shape, under `mcpServers`.
 | `set_brightness(brightness)` | Screen brightness 0-100 |
 | `set_off_timeout(seconds)` | Set the idle screen-off timeout (integer 0..86400 seconds; default 300, 0 disables). Applied immediately and saved in NVS across reboots. Requires firmware 1.17.0+ |
 | `get_off_timeout` | Read the effective persistent timeout, whether it is enabled, and whether the screen is off. Requires firmware 1.17.0+ |
-| `set_external_power_auto_off(enabled)` | Persistently choose whether the idle auto-dim (60 s) and auto power-off (300 s) also run on external power. Default `false`: on USB/external power the device stays on; on battery it always dims and powers off when idle. Requires firmware newer than 1.18.0. |
+| `set_external_power_auto_off(enabled)` | Persistently choose whether the idle auto-dim (60 s) and auto power-off (300 s) also run on external power. Default `false`: on USB/external power the device stays on; on battery it always dims and powers off when idle. Requires firmware-v1.18.0 or later. |
 | `get_external_power_auto_off` | Read that setting, whether the battery is discharging, and whether the idle dim/power-off timer is running. |
 | `set_charge_protection(enabled)` | Persistently enable/disable the opt-in battery-protection hysteresis. Set `false` before going out when you want the PMIC to finish a full charge. |
 | `get_charge_protection` | Read the persistent/effective protection setting and current charger-enable state. |

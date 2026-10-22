@@ -1548,7 +1548,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "dims (60 s idle) and powers off (300 s idle) while on "
                     "external power. Off by default: on external power it "
                     "never does this automatically; on battery it always does. "
-                    "Requires firmware newer than 1.18.0."
+                    "Requires firmware-v1.18.0 or later."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1571,7 +1571,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "Get the persistent external_power_auto_off setting, "
                     "whether the battery is discharging, and whether the "
                     "idle dim/power-off timer is running. "
-                    "Requires firmware newer than 1.18.0."
+                    "Requires firmware-v1.18.0 or later."
                 ),
                 inputSchema={"type": "object", "properties": {}},
             ),
