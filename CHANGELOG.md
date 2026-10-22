@@ -30,6 +30,18 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- Head touch: a TAP or STROKE now needs level H (3) on some channel, whether
+  the screen is on or off. Before, a lit screen also accepted taps that only
+  reached level M, or level L held for 300 ms, and a STROKE needed no
+  particular level. An untouched head produced 17 phantom TAPs in 3.5 minutes
+  on firmware-v1.18.0 (L/M bursts on one or all channels, often every ~4 s)
+  and one phantom STROKE from a two-channel M burst; none of them reached H.
+  In the recorded hands-on sessions 40 of 43 finger taps and 47 of 49 strokes
+  reached H, so normal and light touches still register; a very light touch
+  that never gets past M no longer does.
+
 ### Gateway
 
 - Tests only: merge the duplicated `move_head` pitch-rejection tests into one

@@ -40,8 +40,8 @@ The Si12T keeps its registers across an ESP32 reset, so a stuck baseline or the 
 | `TOUCH_POLL_MS` | 50 |
 | Boot grace | first 10 s after init (the chip's fast-calibration window): nothing is reported; a channel still non-zero when the window ends stays unusable until it reads 0 for 1 s |
 | Press / release confirm | press = 1 sample, release = 3 samples (150 ms) |
-| **STROKE** | during one press the finger left a zone it started on **and** reached a zone it did not start on (each held ≥ 100 ms). Reported on release; the face changes the moment the movement is seen |
-| **TAP** | no movement, held 40..500 ms, **and** some channel reached level M (2) or more, or the press lasted ≥ 300 ms. A short press that never got past L (1) is dropped (`touch press ignored (weak L-only)`, still logged) |
+| **STROKE** | during one press the finger left a zone it started on **and** reached a zone it did not start on (each held ≥ 100 ms), or the level-weighted centre moved by one zone, **and** some channel reached level H (3). Reported on release; the face changes the moment the movement is seen |
+| **TAP** | no movement, held 100..500 ms, **and** some channel reached level H (3), screen on or off. A press that stayed at L/M is dropped (`touch press ignored (below H)`, still logged): an untouched head shows L/M bursts (sometimes every ~4 s for minutes), while 40 of 43 finger taps recorded in hands-on sessions reached H (a very light tap that peaks at M is the accepted loss) |
 | Stationary hold > 500 ms | no event (logged as `touch press ignored`). A resting hand or a stuck channel therefore never fires |
 | Stuck channel | a channel non-zero for 15 s gets `Si12T::ResetReference()` (Ref_rst bit), is dropped from the decision, and is used again after 1 s of zeros. The press in progress is not reported. Count in `get_touch_state.recalibrations` |
 | Cooldown | 300 ms after the physical release |
