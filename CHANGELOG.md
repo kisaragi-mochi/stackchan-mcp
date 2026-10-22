@@ -40,7 +40,10 @@ documented-only.
   and one phantom STROKE from a two-channel M burst; none of them reached H.
   In the recorded hands-on sessions 40 of 43 finger taps and 47 of 49 strokes
   reached H, so normal and light touches still register; a very light touch
-  that never gets past M no longer does.
+  that never gets past M no longer does. A press that lights all three zones
+  on its first sample is a TAP only if two of them are at H then: the rarer
+  burst `0x3A` (M, M, H on all zones at once, 150 ms) also reached H, while
+  the real taps that started on all zones had two at H.
 
 ### Gateway
 

@@ -25,7 +25,13 @@
 //               channels for up to ~400 ms, sometimes every ~4 s for minutes,
 //               and never reaches H; 40 of 43 finger taps recorded on the
 //               device reached H on at least one tick, so L/M-only presses
-//               are never a TAP (a very light tap peaking at M is lost);
+//               are never a TAP (a very light tap peaking at M is lost).
+//               A press whose first sample lights all three zones at once is
+//               a TAP only if at least `all_zone_start_min_high` of them are
+//               at H on that sample: the untouched-head bursts rise on every
+//               zone together with at most one at H (0x15, 0x29, 0x2A, 0x3A),
+//               while the real taps that started on all zones had two at H
+//               (0x1F, 0x2F, 0x3D);
 //       none:   stationary hold longer than `tap_max_ms` (e.g. a stuck
 //               channel or a resting hand), or a press that stayed below H.
 //   - NotifySettle() is called when charging or the backlight switches. The
@@ -57,6 +63,7 @@ struct TouchGestureConfig {
     uint32_t tap_min_ms = 100;              // two ticks; a one-tick spike is never a tap
     uint32_t tap_max_ms = 500;
     uint8_t event_min_level = 3;            // a TAP or STROKE must reach this level (H) on some channel
+    uint8_t all_zone_start_min_high = 2;    // a TAP that starts on all 3 zones needs this many at H then
     uint32_t settle_ms = 1000;              // tap-proof window after a power/backlight switch
     uint32_t settle_unmask_zero_ms = 300;   // zeros needed to unmask after that reset
     uint32_t cooldown_ms = 300;
@@ -204,6 +211,13 @@ public:
             last_active_ms_ = now_ms;
             start_zones_ = active;
             press_in_settle_ = in_window;
+            {
+                int high = 0;
+                for (int i = 0; i < kChannels; i++) {
+                    if ((active & (1u << i)) && levels[i] >= 3) high++;
+                }
+                press_all_zones_weak_ = (active == 0x07 && high < cfg_.all_zone_start_min_high);
+            }
             peak_level_ = 0;
             for (int i = 0; i < kChannels; i++) {
                 if ((active & (1u << i)) && levels[i] > peak_level_) peak_level_ = levels[i];
@@ -272,7 +286,7 @@ public:
                 out.start_zones = start_zones_;
             } else if (!press_in_settle_ && duration >= cfg_.tap_min_ms &&
                        duration <= cfg_.tap_max_ms) {
-                if (peak_level_ >= cfg_.event_min_level) {
+                if (peak_level_ >= cfg_.event_min_level && !press_all_zones_weak_) {
                     out.event = TouchGestureEvent::TAP;
                     out.duration_ms = duration;
                     out.start_zones = start_zones_;
@@ -340,6 +354,7 @@ private:
     uint32_t last_active_ms_ = 0;
     uint32_t zero_ticks_ = 0;
     uint8_t start_zones_ = 0;
+    bool press_all_zones_weak_ = false;
     uint8_t seen_new_ = 0;
     uint8_t vacated_ = 0;
     uint32_t new_ticks_[kChannels] = {0, 0, 0};

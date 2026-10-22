@@ -731,6 +731,25 @@ TEST(TouchGestureNoiseBurst, MediumBurstThatShiftsTheCentreIsNotAStroke) {
     EXPECT_EQ(s.taps, 0);
 }
 
+TEST(TouchGestureNoiseBurst, AllZoneBurstWithOneHighIsNotATap) {
+    // 10/23 03:10:40 (fixed build, screen off, nobody near) and 10/21 j log
+    // 255.8 s (screen on): 0x3A = CH1 M, CH2 M, CH3 H for 150 ms.
+    Sim s;
+    ReplayPress(s, {0x3A, 0x3A, 0x3A});
+    EXPECT_EQ(s.taps, 0);
+}
+
+TEST(TouchGestureNoiseBurst, RealTapsStartingOnAllZonesStillTap) {
+    // c log 1487.8 s / 1535.2 s and k log 359.8 s / 362.6 s.
+    Sim s;
+    ReplayPress(s, {0x1F, 0x0F});
+    ReplayPress(s, {0x2F, 0x0F});
+    ReplayPress(s, {0x3D, 0x0C});
+    ReplayPress(s, {0x3D, 0x3D});
+    EXPECT_EQ(s.taps, 4);
+    EXPECT_EQ(s.strokes, 0);
+}
+
 TEST(TouchGestureNoiseBurst, MediumPulseEveryFourSecondsGivesNothing) {
     // 00:49:23-00:49:47: CH1 at M, on for 0.4 s or ~3.2 s, every ~4 s.
     Sim s;
