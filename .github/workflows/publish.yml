@@ -383,13 +383,13 @@ jobs:
 
     steps:
       - name: Download Linux distributions (sdist + py3-none-any wheel)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: python-package-distributions-linux
           path: dist/
 
       - name: Download Windows wheel (win_amd64)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: python-package-distributions-windows
           path: dist/
