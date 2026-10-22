@@ -45,7 +45,7 @@ dependencies = [
     # future SDK release cannot silently break the gateway via PyPI
     # auto-resolution. Bump the upper bound after verifying the next
     # major line.
-    "mcp>=1.27,<2.0",
+    "mcp>=1.27,<3.0",
     "aiohttp>=3",
     "zeroconf>=0.149",
 ]
