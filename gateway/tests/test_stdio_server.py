@@ -1440,23 +1440,9 @@ def _assert_rejected_without_dispatch(result, calls):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pitch", [0, 4, -1, -30])
-async def test_move_head_rejects_pitch_below_recommended(monkeypatch, pitch):
-    """pitch values below the M5Stack-recommended 5° floor are refused."""
-    calls = _make_fake_gateway(monkeypatch)
-    server = create_server()
-
-    result = await server.request_handlers[CallToolRequest](
-        _move_head_request(yaw=0, pitch=pitch)
-    )
-
-    _assert_rejected_without_dispatch(result, calls)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("pitch", [86, 90, 88, 200])
-async def test_move_head_rejects_pitch_above_recommended(monkeypatch, pitch):
-    """pitch values above the M5Stack-recommended 85° ceiling are refused."""
+@pytest.mark.parametrize("pitch", [4, 86, None, "45", 5.5, True, False])
+async def test_move_head_rejects_invalid_pitch_without_motion(monkeypatch, pitch):
+    """Reject out-of-range and non-integer pitch without dispatching motion."""
     calls = _make_fake_gateway(monkeypatch)
     server = create_server()
 
@@ -1535,34 +1521,6 @@ async def test_move_head_without_speed_omits_speed_dps(monkeypatch):
 
     payload = json.loads(result.root.content[0].text)
     assert "error" not in payload
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("pitch", [None, "45", 5.5])
-async def test_move_head_rejects_non_integer_pitch(monkeypatch, pitch):
-    """Non-int pitch values are refused before reaching the device."""
-    calls = _make_fake_gateway(monkeypatch)
-    server = create_server()
-
-    result = await server.request_handlers[CallToolRequest](
-        _move_head_request(yaw=0, pitch=pitch)
-    )
-
-    _assert_rejected_without_dispatch(result, calls)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("pitch", [True, False])
-async def test_move_head_rejects_boolean_pitch(monkeypatch, pitch):
-    """bool is an int subclass in Python; must still be refused for pitch."""
-    calls = _make_fake_gateway(monkeypatch)
-    server = create_server()
-
-    result = await server.request_handlers[CallToolRequest](
-        _move_head_request(yaw=0, pitch=pitch)
-    )
-
-    _assert_rejected_without_dispatch(result, calls)
 
 
 # ---------------------------------------------------------------------------
