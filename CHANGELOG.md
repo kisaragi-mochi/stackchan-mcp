@@ -30,8 +30,26 @@ documented-only.
 
 ## [Unreleased]
 
+### Firmware
+
+- **Behaviour change:** on external power (USB, battery not discharging) the
+  device no longer dims after 60 s idle or powers itself off after 300 s idle.
+  On battery it still does. Previously the idle timer was meant to stop on
+  external power but only reacted to a battery/external *transition*, so a
+  device that booted on USB kept dimming and powering off. The current power
+  source is now applied from the first battery poll after boot and on every
+  change. The idle timer still never counts while the gateway is connected.
+- New persistent opt-in `external_power_auto_off` (NVS namespace `stackchan`,
+  key `ext_auto_off`, **off when unset**) restores the idle dim/power-off on
+  external power too. Applied immediately. New device tools
+  `self.power.set_external_power_auto_off` and
+  `self.power.get_external_power_auto_off`.
+
 ### Gateway
 
+- Expose `set_external_power_auto_off(enabled)` and
+  `get_external_power_auto_off` in `tools/list`, relayed to the device's
+  `self.power.*` tools. Requires a firmware with the change above.
 - Tests only: merge the duplicated `move_head` pitch-rejection tests into one
   parametrized test (same boundaries and type cases; no runtime change). (#421)
 

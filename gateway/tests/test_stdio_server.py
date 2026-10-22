@@ -341,6 +341,84 @@ async def test_charge_protection_tools_propagate_device_error(
 
 
 @pytest.mark.asyncio
+async def test_list_tools_includes_external_power_auto_off_tools():
+    """The external-power auto-off toggle exposes set/get schemas."""
+    server = create_server()
+
+    result = await server.request_handlers[ListToolsRequest](
+        ListToolsRequest(method="tools/list")
+    )
+
+    tools = {tool.name: tool for tool in result.root.tools}
+    assert _schema_without_device_id(tools["set_external_power_auto_off"]) == {
+        "type": "object",
+        "properties": {
+            "enabled": {
+                "type": "boolean",
+                "description": (
+                    "True to dim and power off on idle even on external "
+                    "power; false to stay on while powered."
+                ),
+            },
+        },
+        "required": ["enabled"],
+    }
+    assert _schema_without_device_id(tools["get_external_power_auto_off"]) == {
+        "type": "object",
+        "properties": {},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("gateway_tool", "request_args", "device_tool", "device_args"),
+    [
+        (
+            "set_external_power_auto_off",
+            {"enabled": True},
+            "self.power.set_external_power_auto_off",
+            {"enabled": True},
+        ),
+        (
+            "get_external_power_auto_off",
+            {},
+            "self.power.get_external_power_auto_off",
+            {},
+        ),
+    ],
+)
+async def test_external_power_auto_off_tools_relay(
+    monkeypatch, gateway_tool, request_args, device_tool, device_args
+):
+    """Set forwards its boolean, get forwards {}, and response text survives."""
+    calls = []
+    payload = {"ok": True, "external_power_auto_off": True, "persistent": True}
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments, *, device_id=None):
+            calls.append((name, arguments))
+            return {"content": [{"type": "text", "text": json.dumps(payload)}]}, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": gateway_tool, "arguments": request_args},
+        )
+    )
+
+    assert calls == [(device_tool, device_args)]
+    assert json.loads(result.root.content[0].text) == payload
+
+
+@pytest.mark.asyncio
 async def test_list_tools_includes_gateway_config_tools():
     """gateway_config_get/set are exposed with the expected schemas."""
     server = create_server()

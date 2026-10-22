@@ -9,6 +9,7 @@
 #include "mcp_server.h"
 #include "settings.h"
 #include "touch_gesture.h"
+#include "power_save_gate.h"
 #include "led_strip.h"
 // Issue #79: servo driver is selectable at build time via Kconfig.
 //   - CONFIG_STACKCHAN_SERVO_SCSCL  (default): GPL-3.0 SCServo_lib
@@ -57,6 +58,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -117,6 +119,10 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #define STACKCHAN_CHARGE_PROTECTION_NVS_KEY "chg_protect"
 #define STACKCHAN_CHARGE_ON_BELOW_NVS_KEY "chg_on_below"
 #define STACKCHAN_CHARGE_OFF_ABOVE_NVS_KEY "chg_off_above"
+// Public name external_power_auto_off; same namespace as charge_protection.
+#define STACKCHAN_EXTERNAL_POWER_AUTO_OFF_NVS_KEY "ext_auto_off"
+#define STACKCHAN_POWER_SAVE_SLEEP_SECONDS 60
+#define STACKCHAN_POWER_SAVE_SHUTDOWN_SECONDS 300
 
 class Pmic : public Axp2101 {
 public:
@@ -769,6 +775,13 @@ private:
     EspVideo* camera_;
     esp_timer_handle_t touchpad_timer_;
     PowerSaveTimer* power_save_timer_;
+    // Opt-in: also dim / power off automatically on external power.
+    std::atomic<bool> external_power_auto_off_{false};
+    // Guards power_save_gate_ and the SetEnabled() calls it drives
+    // (battery poll from the display task, setter from the MCP task).
+    std::mutex power_save_gate_mutex_;
+    // InitializePowerSaveTimer() starts the timer enabled.
+    stackchan::power::PowerSaveGate power_save_gate_{true};
     esp_lcd_panel_io_handle_t lcd_panel_io_ = nullptr;
     esp_lcd_panel_handle_t lcd_panel_ = nullptr;
     esp_timer_handle_t screen_off_timer_ = nullptr;
@@ -2360,7 +2373,17 @@ private:
     };
 
     void InitializePowerSaveTimer() {
-        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
+        {
+            Settings settings(
+                STACKCHAN_CHARGE_PROTECTION_NVS_NAMESPACE, false);
+            external_power_auto_off_.store(
+                settings.GetBool(STACKCHAN_EXTERNAL_POWER_AUTO_OFF_NVS_KEY,
+                                 false),
+                std::memory_order_release);
+        }
+        power_save_timer_ = new PowerSaveTimer(
+            -1, STACKCHAN_POWER_SAVE_SLEEP_SECONDS,
+            STACKCHAN_POWER_SAVE_SHUTDOWN_SECONDS);
         power_save_timer_->OnEnterSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(10);
@@ -2372,7 +2395,81 @@ private:
         power_save_timer_->OnShutdownRequest([this]() {
             pmic_->PowerOff();
         });
+        // Start enabled so a device on battery is protected even before
+        // the first battery poll; that poll disables it on external power.
         power_save_timer_->SetEnabled(true);
+    }
+
+    // Applies the dim / power-off policy for the current power source.
+    void ApplyPowerSaveGate(bool discharging) {
+        std::lock_guard<std::mutex> lock(power_save_gate_mutex_);
+        bool enable = false;
+        if (power_save_gate_.Update(
+                discharging,
+                external_power_auto_off_.load(std::memory_order_acquire),
+                &enable)) {
+            ESP_LOGI(TAG,
+                     "Power save timer %s (discharging=%d external_power_auto_off=%d)",
+                     enable ? "on" : "off", discharging ? 1 : 0,
+                     external_power_auto_off_.load(std::memory_order_acquire)
+                         ? 1
+                         : 0);
+            power_save_timer_->SetEnabled(enable);
+        }
+    }
+
+    esp_err_t SetExternalPowerAutoOff(bool enabled) {
+        esp_err_t err;
+        {
+            Settings settings(
+                STACKCHAN_CHARGE_PROTECTION_NVS_NAMESPACE, true);
+            err = settings.SetBoolAndCommit(
+                STACKCHAN_EXTERNAL_POWER_AUTO_OFF_NVS_KEY, enabled);
+        }
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to persist external_power_auto_off: %s",
+                     esp_err_to_name(err));
+            return err;
+        }
+        external_power_auto_off_.store(enabled, std::memory_order_release);
+        ApplyPowerSaveGate(pmic_->IsDischarging());
+        return ESP_OK;
+    }
+
+    cJSON* GetExternalPowerAutoOffJson(bool saved,
+                                       esp_err_t error = ESP_OK) {
+        bool discharging = pmic_->IsDischarging();
+        bool timer_enabled;
+        {
+            std::lock_guard<std::mutex> lock(power_save_gate_mutex_);
+            timer_enabled = power_save_gate_.applied();
+        }
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", error == ESP_OK);
+        cJSON_AddBoolToObject(root, "saved", saved);
+        cJSON_AddBoolToObject(
+            root, "external_power_auto_off",
+            external_power_auto_off_.load(std::memory_order_acquire));
+        cJSON_AddBoolToObject(root, "discharging", discharging);
+        cJSON_AddBoolToObject(root, "power_save_timer_enabled",
+                              timer_enabled);
+        cJSON_AddNumberToObject(root, "sleep_seconds",
+                                STACKCHAN_POWER_SAVE_SLEEP_SECONDS);
+        cJSON_AddNumberToObject(root, "shutdown_seconds",
+                                STACKCHAN_POWER_SAVE_SHUTDOWN_SECONDS);
+        cJSON_AddBoolToObject(root, "persistent", true);
+        cJSON_AddStringToObject(root, "persistence", "nvs");
+        cJSON_AddBoolToObject(root, "default", false);
+        cJSON_AddStringToObject(
+            root, "nvs_namespace",
+            STACKCHAN_CHARGE_PROTECTION_NVS_NAMESPACE);
+        cJSON_AddStringToObject(root, "nvs_key",
+                                STACKCHAN_EXTERNAL_POWER_AUTO_OFF_NVS_KEY);
+        cJSON_AddStringToObject(root, "takes_effect", "immediate");
+        if (error != ESP_OK) {
+            cJSON_AddStringToObject(root, "error", esp_err_to_name(error));
+        }
+        return root;
     }
 
     void StopScreenOffTimerLocked() {
@@ -7871,6 +7968,33 @@ private:
             });
 
         mcp_server.AddTool(
+            "self.power.set_external_power_auto_off",
+            "Persist and immediately apply whether StackChan also dims "
+            "(after 60 s idle) and powers off (after 300 s idle) while on "
+            "external power. Default false: on external power it never "
+            "dims or powers off automatically; on battery it always does. "
+            "The idle timer never counts while the gateway is connected. "
+            "Stored in NVS (namespace stackchan, key ext_auto_off). A "
+            "failed NVS save returns ok=false and leaves the setting "
+            "unchanged.",
+            PropertyList({Property("enabled", kPropertyTypeBoolean)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                bool enabled = properties["enabled"].value<bool>();
+                esp_err_t err = SetExternalPowerAutoOff(enabled);
+                return GetExternalPowerAutoOffJson(err == ESP_OK, err);
+            });
+
+        mcp_server.AddTool(
+            "self.power.get_external_power_auto_off",
+            "Get the NVS-backed external_power_auto_off setting, whether "
+            "the battery is discharging, and whether the automatic dim / "
+            "power-off timer is currently running.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                return GetExternalPowerAutoOffJson(true);
+            });
+
+        mcp_server.AddTool(
             "self.power.set_charge_protection",
             "Persist and immediately apply StackChan battery charge "
             "protection. The unset NVS default follows the compile-time "
@@ -8087,13 +8211,9 @@ public:
             return false;
         }
 
-        static bool last_discharging = false;
         charging = pmic_->IsCharging();
         discharging = pmic_->IsDischarging();
-        if (discharging != last_discharging) {
-            power_save_timer_->SetEnabled(discharging);
-            last_discharging = discharging;
-        }
+        ApplyPowerSaveGate(discharging);
 
         return true;
     }

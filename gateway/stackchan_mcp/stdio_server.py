@@ -1096,6 +1096,14 @@ async def _dispatch_mcp_tool(
             "self.screen.get_off_timeout",
             {},
         ),
+        "set_external_power_auto_off": (
+            "self.power.set_external_power_auto_off",
+            arguments,
+        ),
+        "get_external_power_auto_off": (
+            "self.power.get_external_power_auto_off",
+            {},
+        ),
         "set_charge_protection": (
             "self.power.set_charge_protection",
             arguments,
@@ -1530,6 +1538,40 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "Get the persistent idle screen-off timeout in seconds. "
                     "0 means disabled; default: 300. "
                     "Requires firmware 1.17.0 or later."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="set_external_power_auto_off",
+                description=(
+                    "Persist and immediately apply whether the device also "
+                    "dims (60 s idle) and powers off (300 s idle) while on "
+                    "external power. Off by default: on external power it "
+                    "never does this automatically; on battery it always does. "
+                    "Requires firmware newer than 1.18.0."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True to dim and power off on idle even on "
+                                "external power; false to stay on while "
+                                "powered."
+                            ),
+                        },
+                    },
+                    "required": ["enabled"],
+                },
+            ),
+            Tool(
+                name="get_external_power_auto_off",
+                description=(
+                    "Get the persistent external_power_auto_off setting, "
+                    "whether the battery is discharging, and whether the "
+                    "idle dim/power-off timer is running. "
+                    "Requires firmware newer than 1.18.0."
                 ),
                 inputSchema={"type": "object", "properties": {}},
             ),

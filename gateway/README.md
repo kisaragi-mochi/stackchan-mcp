@@ -181,6 +181,8 @@ Same shape, under `mcpServers`.
 | `set_brightness(brightness)` | Screen brightness 0-100 |
 | `set_off_timeout(seconds)` | Set the idle screen-off timeout (integer 0..86400 seconds; default 300, 0 disables). Applied immediately and saved in NVS across reboots. Requires firmware 1.17.0+ |
 | `get_off_timeout` | Read the effective persistent timeout, whether it is enabled, and whether the screen is off. Requires firmware 1.17.0+ |
+| `set_external_power_auto_off(enabled)` | Persistently choose whether the idle auto-dim (60 s) and auto power-off (300 s) also run on external power. Default `false`: on USB/external power the device stays on; on battery it always dims and powers off when idle. Requires firmware newer than 1.18.0. |
+| `get_external_power_auto_off` | Read that setting, whether the battery is discharging, and whether the idle dim/power-off timer is running. |
 | `set_charge_protection(enabled)` | Persistently enable/disable the opt-in battery-protection hysteresis. Set `false` before going out when you want the PMIC to finish a full charge. |
 | `get_charge_protection` | Read the persistent/effective protection setting and current charger-enable state. |
 | `set_charge_thresholds(on_below, off_above)` | Persist the charge-protection ON/OFF percentages (defaults: 30/70). |
@@ -234,6 +236,20 @@ on immediately re-evaluates the current battery level. The firmware keeps the
 public names; their physical NVS mapping is namespace `stackchan`, keys
 `chg_protect`, `chg_on_below`, and `chg_off_above`, because ESP-IDF NVS names
 allow at most 15 characters.
+
+### Idle auto-dim / power-off
+
+While no gateway is connected, the firmware dims the screen after 60 s idle
+and powers the device off after 300 s idle. This runs **only on battery** by
+default; on external power (USB) the device stays on.
+`external_power_auto_off` (NVS namespace `stackchan`, key `ext_auto_off`,
+`false` when unset) opts in to the same behaviour on external power as well.
+It takes effect immediately and survives restarts.
+
+```text
+set_external_power_auto_off({"enabled": true})
+get_external_power_auto_off({})
+```
 
 ## Architecture
 
