@@ -32,6 +32,19 @@ documented-only.
 
 ### Gateway
 
+- Reload a configured avatar set on every ESP32 connect via
+  `STACKCHAN_AVATAR_SET_PATH` (optional `STACKCHAN_AVATAR_SET_MODE` /
+  `STACKCHAN_AVATAR_SET_TIMEOUT`). Custom faces live in PSRAM, so this
+  is what brings them back after a robot reboot without a manual
+  `load_avatar_set`. Mode is inferred only from an exact layered or
+  matrix file size; unknown sizes fail closed unless mode is set.
+  The transfer runs in the background: the built-in idle face and the
+  ready log are not held for the fetch timeout. After a successful load
+  the idle face is rendered again from the new set. The task is cancelled
+  if that device disconnects, is replaced, or the gateway shuts down.
+  **Behavior change:** when an avatar set is configured, the same hook
+  re-enables autonomous blink on that device (firmware starts with blink
+  off). Blink is not forced on when `STACKCHAN_AVATAR_SET_PATH` is unset.
 - Tests only: merge the duplicated `move_head` pitch-rejection tests into one
   parametrized test (same boundaries and type cases; no runtime change). (#421)
 

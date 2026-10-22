@@ -55,6 +55,16 @@ Environment variables:
   STACKCHAN_AUDIO_HOOK_TOKEN
                            Bearer token for the audio hook endpoint;
                            falls back to STACKCHAN_TOKEN.
+  STACKCHAN_AVATAR_SET_PATH
+                           Local RGB565 file reloaded on every ESP32
+                           connect (custom faces live in PSRAM).
+                           When set, the same hook re-enables blink.
+  STACKCHAN_AVATAR_SET_MODE
+                           layered or matrix. Required unless the file
+                           size matches layered or matrix exactly.
+  STACKCHAN_AVATAR_SET_TIMEOUT
+                           Seconds to wait for the device fetch
+                           (default 180 matrix / 60 layered).
   STACKCHAN_LISTEN_LANGUAGE
                            Default listen() language when the call
                            omits language (default ja).
@@ -597,6 +607,12 @@ def _run_preflight() -> int:
             "  STACKCHAN_AUDIO_HOOK_URL  not set "
             "(device-driven listen capture disabled)"
         )
+
+    avatar_set_path = os.getenv("STACKCHAN_AVATAR_SET_PATH", "").strip()
+    if avatar_set_path:
+        print(f"  STACKCHAN_AVATAR_SET_PATH {avatar_set_path}")
+    else:
+        print("  STACKCHAN_AVATAR_SET_PATH not set")
 
     # --- Ports --------------------------------------------------------------
     print()

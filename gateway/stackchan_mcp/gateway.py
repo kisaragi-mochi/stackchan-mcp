@@ -9,16 +9,85 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from aiohttp import web
 
 from .capture_server import create_capture_app, stage_avatar_set
-from .esp32_client import ESP32Manager
+from .esp32_client import ESP32Connection, ESP32Manager
 from .mdns_advertiser import MdnsAdvertiser
 
 logger = logging.getLogger(__name__)
 
 BEAT_MODE_LISTEN_STOP_TIMEOUT_S = 3.0
+AVATAR_SET_PATH_ENV = "STACKCHAN_AVATAR_SET_PATH"
+AVATAR_SET_MODE_ENV = "STACKCHAN_AVATAR_SET_MODE"
+AVATAR_SET_TIMEOUT_ENV = "STACKCHAN_AVATAR_SET_TIMEOUT"
+_AVATAR_FRAME_BYTES = 160 * 120 * 2
+_AVATAR_LAYERED_BYTES = 14 * _AVATAR_FRAME_BYTES
+_AVATAR_MATRIX_BYTES = 90 * _AVATAR_FRAME_BYTES
+
+
+def resolve_configured_avatar_set() -> dict[str, Any] | None:
+    """Read the optional connect-time avatar-set autoload from the environment.
+
+    ``STACKCHAN_AVATAR_SET_PATH`` is required. Mode comes from
+    ``STACKCHAN_AVATAR_SET_MODE`` when set, otherwise from an exact file
+    size match (layered = 537,600 bytes, matrix = 3,456,000). Unknown
+    sizes fail closed. Timeout defaults to 180 s for matrix and 60 s for
+    layered; ``STACKCHAN_AVATAR_SET_TIMEOUT`` overrides that.
+    """
+    raw_path = os.getenv(AVATAR_SET_PATH_ENV, "").strip()
+    if not raw_path:
+        return None
+
+    path = os.path.expanduser(raw_path)
+    mode_env = os.getenv(AVATAR_SET_MODE_ENV, "").strip().lower()
+    if mode_env in {"layered", "matrix"}:
+        mode = mode_env
+    elif not os.path.isfile(path):
+        logger.warning(
+            "%s=%r is set but the file is missing and %s is unset — "
+            "skipping avatar-set autoload",
+            AVATAR_SET_PATH_ENV,
+            path,
+            AVATAR_SET_MODE_ENV,
+        )
+        return None
+    else:
+        size = os.path.getsize(path)
+        if size == _AVATAR_LAYERED_BYTES:
+            mode = "layered"
+        elif size == _AVATAR_MATRIX_BYTES:
+            mode = "matrix"
+        else:
+            logger.warning(
+                "%s=%r size=%d is neither layered (%d) nor matrix (%d) "
+                "and %s is unset — skipping avatar-set autoload",
+                AVATAR_SET_PATH_ENV,
+                path,
+                size,
+                _AVATAR_LAYERED_BYTES,
+                _AVATAR_MATRIX_BYTES,
+                AVATAR_SET_MODE_ENV,
+            )
+            return None
+
+    timeout_raw = os.getenv(AVATAR_SET_TIMEOUT_ENV, "").strip()
+    if timeout_raw:
+        try:
+            timeout = float(timeout_raw)
+        except ValueError:
+            logger.warning(
+                "invalid %s=%r — using mode default",
+                AVATAR_SET_TIMEOUT_ENV,
+                timeout_raw,
+            )
+            timeout = 180.0 if mode == "matrix" else 60.0
+    else:
+        timeout = 180.0 if mode == "matrix" else 60.0
+
+    return {"path": path, "mode": mode, "timeout": timeout}
 
 
 class Gateway:
@@ -130,6 +199,7 @@ class Gateway:
 
     async def start(self, *, advertise_mdns: bool = True) -> None:
         """Start the ESP32 WebSocket server and HTTP capture server."""
+        self.esp32.set_on_device_ready(self._autoload_configured_avatar_set)
         host = os.getenv("HOST", "0.0.0.0")
         ws_port = int(os.getenv("WS_PORT", os.getenv("PORT", "8765")))
         capture_port = int(os.getenv("CAPTURE_PORT", "8766"))
@@ -304,6 +374,123 @@ class Gateway:
         result.setdefault("checksum", sha256)
         result["bytes_transferred"] = len(payload) if result.get("ok") else 0
         return result
+
+    async def _autoload_configured_avatar_set(
+        self,
+        _connection: ESP32Connection,
+        device_id: str,
+    ) -> None:
+        """Reload STACKCHAN_AVATAR_SET_PATH after every device init.
+
+        Custom sets live in PSRAM and vanish on reboot. This hook runs
+        on connect — including reconnect after the gateway was already
+        up — so the configured face comes back without a manual
+        ``load_avatar_set``. The manager runs it in the background, so
+        the built-in idle face and ``ESP32 ready`` are not held for the
+        transfer. After a successful load the idle face is rendered
+        again from the new set. Failures are logged. When an avatar set
+        is configured, blink is also re-enabled on that device after the
+        load attempt (firmware starts with blink off). A replaced or
+        disconnected socket does not receive the late blink or re-render.
+        """
+        config = resolve_configured_avatar_set()
+        if config is None:
+            return
+        logger.info(
+            "auto-loading avatar set: device=%s path=%s mode=%s timeout=%.0fs",
+            device_id,
+            config["path"],
+            config["mode"],
+            config["timeout"],
+        )
+        result = await self.load_avatar_set(
+            config["path"],
+            config["mode"],
+            config["timeout"],
+            device_id=device_id,
+        )
+        if not self._autoload_still_current(_connection, device_id):
+            logger.info(
+                "auto-loading avatar set abandoned: device=%s",
+                device_id,
+            )
+            return
+        if not result.get("ok"):
+            logger.warning(
+                "auto-loading avatar set failed: device=%s error=%s",
+                device_id,
+                result.get("error", result),
+            )
+        else:
+            await self._rerender_idle_after_autoload(device_id)
+            if not self._autoload_still_current(_connection, device_id):
+                logger.info(
+                    "auto-loading avatar set abandoned: device=%s",
+                    device_id,
+                )
+                return
+        await self._enable_connect_blink(device_id)
+
+    def _autoload_still_current(
+        self, connection: ESP32Connection, device_id: str
+    ) -> bool:
+        """False once this socket has been replaced or disconnected.
+
+        Fakes that do not track connections are treated as still current
+        so direct unit tests of this hook keep working.
+        """
+        check = getattr(self.esp32, "connection_is_current", None)
+        if check is None:
+            return True
+        return bool(check(connection, device_id))
+
+    async def _rerender_idle_after_autoload(self, device_id: str) -> None:
+        """Show the custom idle face after a successful background load."""
+        try:
+            _result, error = await self.esp32.call_tool(
+                "self.display.set_avatar",
+                {"face": "idle"},
+                device_id=device_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "re-rendering idle after avatar autoload failed: "
+                "device=%s error=%s",
+                device_id,
+                exc,
+            )
+            return
+        if error:
+            logger.warning(
+                "re-rendering idle after avatar autoload failed: "
+                "device=%s error=%s",
+                device_id,
+                error,
+            )
+
+    async def _enable_connect_blink(self, device_id: str) -> None:
+        """Turn autonomous blink on after a configured avatar-set autoload."""
+        try:
+            _result, error = await self.esp32.call_tool(
+                "self.display.set_blink",
+                {"enabled": True},
+                device_id=device_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "auto-enabling blink failed: device=%s error=%s",
+                device_id,
+                exc,
+            )
+            return
+        if error:
+            logger.warning(
+                "auto-enabling blink failed: device=%s error=%s",
+                device_id,
+                error,
+            )
+            return
+        logger.info("auto-enabled blink: device=%s", device_id)
 
 
 # Singleton gateway instance, shared between stdio server and ESP32 manager

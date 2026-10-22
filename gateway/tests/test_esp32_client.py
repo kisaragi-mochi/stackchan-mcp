@@ -540,6 +540,11 @@ class _InitDeviceConnection:
         self.initialize_calls = 0
         self.discover_calls = 0
         self.call_tool_calls: list[tuple[str, dict]] = []
+        self.connected = False
+        self.connected_at = None
+
+    def disconnect(self) -> None:
+        self.connected = False
 
     async def initialize(self, *, vision_url: str = "", vision_token: str = "") -> bool:
         self.initialize_calls += 1
@@ -700,6 +705,219 @@ async def test_reconnect_auto_renders_idle_avatar_again():
 
 
 @pytest.mark.asyncio
+async def test_init_renders_idle_without_waiting_for_on_device_ready():
+    """Idle face and ESP32 ready are not held for the avatar transfer."""
+    connection = _InitDeviceConnection()
+    connection.connected = True
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def on_ready(conn, device_id: str) -> None:
+        assert conn is connection
+        assert device_id == "device-test"
+        started.set()
+        await release.wait()
+
+    mgr = ESP32Manager()
+    mgr.set_on_device_ready(on_ready)
+    async with mgr._lock:
+        mgr._register_connection(connection, "device-test")  # type: ignore[arg-type]
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert connection.call_tool_calls == [
+        ("self.display.set_avatar", {"face": "idle"})
+    ]
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task = mgr._avatar_autoload_tasks["device-test"][1]
+    assert not task.done()
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_init_continues_when_on_device_ready_fails(caplog):
+    """A failing autoload hook must not block idle render or ESP32 ready."""
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    connection = _InitDeviceConnection()
+
+    async def boom(_conn, _device_id: str) -> None:
+        raise RuntimeError("avatar fetch failed")
+
+    mgr = ESP32Manager()
+    mgr.set_on_device_ready(boom)
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+
+    assert connection.call_tool_calls == [
+        ("self.display.set_avatar", {"face": "idle"})
+    ]
+    assert "on_device_ready failed" in caplog.text
+    assert "ESP32 ready: device=device-test tools=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_init_skips_on_device_ready_when_tools_discovery_fails():
+    """The autoload hook only runs after a successful tools/list."""
+    called = False
+
+    async def on_ready(_conn, _device_id: str) -> None:
+        nonlocal called
+        called = True
+
+    mgr = ESP32Manager()
+    mgr.set_on_device_ready(on_ready)
+    connection = _InitDeviceConnection(discover_ok=False)
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert called is False
+    assert connection.call_tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_autoload_from_non_default_device_targets_that_device(
+    monkeypatch, tmp_path
+):
+    """A hello from device B must not fetch or blink on default device A."""
+    from stackchan_mcp.gateway import Gateway
+
+    archive = tmp_path / "classic.rgb565"
+    archive.write_bytes(b"x")
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_PATH", str(archive))
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_MODE", "matrix")
+
+    gw = Gateway()
+    mgr = gw.esp32
+    fetches: list[str | None] = []
+    calls: list[tuple[str, str | None]] = []
+
+    async def fake_load(
+        _path: str,
+        _mode: str,
+        timeout: float = 60.0,
+        device_id: str | None = None,
+    ):
+        fetches.append(device_id)
+        return {"ok": True}
+
+    async def recording_call(name: str, _arguments: dict, device_id: str | None = None):
+        calls.append((name, device_id))
+        return {"ok": True}, None
+
+    gw.load_avatar_set = fake_load  # type: ignore[method-assign]
+    mgr.call_tool = recording_call  # type: ignore[method-assign]
+    mgr.set_on_device_ready(gw._autoload_configured_avatar_set)
+
+    device_a = _InitDeviceConnection()
+    device_a.connected = True
+    device_b = _InitDeviceConnection()
+    device_b.connected = True
+    async with mgr._lock:
+        mgr._register_connection(device_a, "device-a")  # type: ignore[arg-type]
+        mgr._register_connection(device_b, "device-b")  # type: ignore[arg-type]
+    assert mgr._default_device_id == "device-a"
+
+    await mgr._init_device(device_b, "device-b")  # type: ignore[arg-type]
+    task = mgr._avatar_autoload_tasks["device-b"][1]
+    await asyncio.wait_for(task, timeout=1)
+
+    assert fetches == ["device-b"]
+    assert calls == [
+        ("self.display.set_avatar", "device-b"),
+        ("self.display.set_blink", "device-b"),
+    ]
+    assert device_a.call_tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconnect_during_autoload_does_not_finish_on_the_new_socket(
+    monkeypatch, tmp_path
+):
+    """Replacing a device mid-transfer cancels the old load."""
+    from stackchan_mcp.gateway import Gateway
+
+    archive = tmp_path / "classic.rgb565"
+    archive.write_bytes(b"x")
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_PATH", str(archive))
+    monkeypatch.setenv("STACKCHAN_AVATAR_SET_MODE", "matrix")
+
+    gw = Gateway()
+    mgr = gw.esp32
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[tuple[str, str | None]] = []
+
+    async def fake_load(
+        _path: str,
+        _mode: str,
+        timeout: float = 60.0,
+        device_id: str | None = None,
+    ):
+        started.set()
+        await release.wait()
+        return {"ok": True}
+
+    async def recording_call(name: str, _arguments: dict, device_id: str | None = None):
+        calls.append((name, device_id))
+        return {"ok": True}, None
+
+    gw.load_avatar_set = fake_load  # type: ignore[method-assign]
+    mgr.call_tool = recording_call  # type: ignore[method-assign]
+    mgr.set_on_device_ready(gw._autoload_configured_avatar_set)
+
+    first = _InitDeviceConnection()
+    first.connected = True
+    async with mgr._lock:
+        mgr._register_connection(first, "device-a")  # type: ignore[arg-type]
+    await mgr._init_device(first, "device-a")  # type: ignore[arg-type]
+    await asyncio.wait_for(started.wait(), timeout=1)
+    first_task = mgr._avatar_autoload_tasks["device-a"][1]
+
+    second = _InitDeviceConnection()
+    second.connected = True
+    async with mgr._lock:
+        mgr._register_connection(second, "device-a")  # type: ignore[arg-type]
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(first_task, timeout=1)
+    assert calls == []
+
+    release.set()
+    await mgr._init_device(second, "device-a")  # type: ignore[arg-type]
+    second_task = mgr._avatar_autoload_tasks["device-a"][1]
+    await asyncio.wait_for(second_task, timeout=1)
+    assert calls == [
+        ("self.display.set_avatar", "device-a"),
+        ("self.display.set_blink", "device-a"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_avatar_autoload():
+    connection = _InitDeviceConnection()
+    connection.connected = True
+    started = asyncio.Event()
+
+    async def on_ready(_conn, _device_id: str) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    mgr = ESP32Manager()
+    mgr.set_on_device_ready(on_ready)
+    async with mgr._lock:
+        mgr._register_connection(connection, "device-test")  # type: ignore[arg-type]
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task = mgr._avatar_autoload_tasks["device-test"][1]
+
+    await mgr.stop()
+
+    assert task.done()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
 async def test_send_avatar_set_fetch_resolves_when_loaded_event_arrives():
     """avatar_set_loaded resolves the matching load_avatar_set waiter."""
     ws = _FakeWebSocket()
@@ -737,6 +955,62 @@ async def test_send_avatar_set_fetch_resolves_when_loaded_event_arrives():
     result = await asyncio.wait_for(task, timeout=1.0)
     assert result == payload
     assert conn._avatar_set_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_send_avatar_set_fetch_task_cancel_is_not_superseded():
+    """Cancelling the transfer task aborts it instead of returning superseded."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-avatar")  # type: ignore[arg-type]
+    task = asyncio.create_task(
+        conn.send_avatar_set_fetch(
+            url="https://example.invalid/avatar-set.bin",
+            token="test-token",
+            mode="matrix",
+            checksum="sha256:avatar-set",
+            expected_size=1234,
+            timeout=30.0,
+        )
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert conn._avatar_set_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_send_avatar_set_fetch_duplicate_checksum_is_superseded():
+    """A second fetch for the same checksum settles the previous waiter."""
+    ws = _FakeWebSocket()
+    conn = ESP32Connection(ws, session_id="session-avatar")  # type: ignore[arg-type]
+    first = asyncio.create_task(
+        conn.send_avatar_set_fetch(
+            url="https://example.invalid/avatar-set.bin",
+            token="test-token",
+            mode="matrix",
+            checksum="sha256:same",
+            expected_size=1234,
+            timeout=30.0,
+        )
+    )
+    await asyncio.sleep(0)
+    second = asyncio.create_task(
+        conn.send_avatar_set_fetch(
+            url="https://example.invalid/avatar-set.bin",
+            token="test-token",
+            mode="matrix",
+            checksum="sha256:same",
+            expected_size=1234,
+            timeout=30.0,
+        )
+    )
+    await asyncio.sleep(0)
+    result = await asyncio.wait_for(first, timeout=1)
+    assert result["error"] == "superseded"
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
 
 
 @pytest.mark.asyncio

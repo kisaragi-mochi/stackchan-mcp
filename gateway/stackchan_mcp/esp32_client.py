@@ -7,7 +7,7 @@ and as an MCP client that sends commands TO the ESP32.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 import json
 import logging
 import os
@@ -348,6 +348,15 @@ class ESP32Connection:
             self._avatar_set_waiters.pop(checksum, None)
             return {"ok": False, "checksum": checksum, "error": "device_timeout"}
         except asyncio.CancelledError:
+            # A duplicate checksum cancels the previous waiter future.
+            # Cancelling this task (disconnect, replacement, shutdown)
+            # must abort the transfer instead of continuing as "superseded".
+            current = self._avatar_set_waiters.get(checksum)
+            if current is future:
+                self._avatar_set_waiters.pop(checksum, None)
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise
             return {"ok": False, "checksum": checksum, "error": "superseded"}
         except ConnectionError:
             self._avatar_set_waiters.pop(checksum, None)
@@ -516,6 +525,16 @@ class ESP32Manager:
         self._lock = asyncio.Lock()
         self._notify_config = notify_config or load_notify_config()
         self._init_tasks: list[asyncio.Task] = []
+        self._on_device_ready: (
+            Callable[[ESP32Connection, str], Awaitable[None]] | None
+        ) = None
+        # In-flight connect-time avatar autoload, keyed by device_id.
+        # The value's connection is the one the task was started for, so a
+        # replacement hello can cancel the old transfer without cancelling
+        # the new device's task.
+        self._avatar_autoload_tasks: dict[
+            str, tuple[ESP32Connection, asyncio.Task]
+        ] = {}
         self._vision_url: str = ""
         self._vision_token: str = ""
         # Fallback audio-path locks used when no device is connected
@@ -562,6 +581,26 @@ class ESP32Manager:
         """Replace the startup notification config used for future events."""
         self._notify_config = notify_config
 
+    def set_on_device_ready(
+        self,
+        callback: Callable[[ESP32Connection, str], Awaitable[None]] | None,
+    ) -> None:
+        """Run ``callback(connection, device_id)`` after a successful init.
+
+        The callback is a per-device background task. Idle-face render and
+        the ``ESP32 ready`` log do not wait for it. Cancelled when that
+        device disconnects, when a new socket replaces it, or on shutdown.
+        """
+        self._on_device_ready = callback
+
+    def connection_is_current(
+        self, connection: ESP32Connection, device_id: str
+    ) -> bool:
+        """True when ``connection`` is still the live socket for ``device_id``."""
+        if not getattr(connection, "connected", False):
+            return False
+        return self._connections.get(device_id) is connection
+
     def _sync_default_connection(self) -> None:
         """Refresh ``_connection`` from ``_default_device_id`` / registry."""
         if self._default_device_id is not None:
@@ -594,6 +633,7 @@ class ESP32Manager:
             logger.warning(
                 "Replacing existing ESP32 connection for device=%s", device_id
             )
+            self._cancel_avatar_autoload(device_id, existing)
             existing.disconnect()
         self._connections[device_id] = connection
         if self._default_device_id is None:
@@ -836,6 +876,14 @@ class ESP32Manager:
         for task in self._init_tasks:
             task.cancel()
         self._init_tasks.clear()
+        autoload_tasks = [
+            task for _connection, task in self._avatar_autoload_tasks.values()
+        ]
+        for task in autoload_tasks:
+            task.cancel()
+        self._avatar_autoload_tasks.clear()
+        if autoload_tasks:
+            await asyncio.gather(*autoload_tasks, return_exceptions=True)
 
         if self._server:
             self._server.close()
@@ -1090,9 +1138,75 @@ class ESP32Manager:
                 # disagrees — clear our local flag without tearing down
                 # the slot, then keep going.
                 self._device_driven_session_id = None
+            self._cancel_avatar_autoload(device_id, connection)
             connection.disconnect()
             async with self._lock:
                 self._unregister_connection(connection, device_id)
+
+    def _cancel_avatar_autoload(
+        self,
+        device_id: str,
+        connection: ESP32Connection | None = None,
+    ) -> None:
+        """Cancel the autoload task for ``device_id``.
+
+        When ``connection`` is given, a task started for a newer socket
+        is left running.
+        """
+        current = self._avatar_autoload_tasks.get(device_id)
+        if current is None:
+            return
+        owner, task = current
+        if connection is not None and owner is not connection:
+            return
+        self._avatar_autoload_tasks.pop(device_id, None)
+        task.cancel()
+
+    def _forget_avatar_autoload(
+        self,
+        device_id: str,
+        connection: ESP32Connection,
+        task: asyncio.Task,
+    ) -> None:
+        current = self._avatar_autoload_tasks.get(device_id)
+        if current is not None and current == (connection, task):
+            self._avatar_autoload_tasks.pop(device_id, None)
+
+    def _schedule_on_device_ready(
+        self, connection: ESP32Connection, device_id: str
+    ) -> None:
+        """Start the connect hook without delaying idle render."""
+        if self._on_device_ready is None:
+            return
+        self._cancel_avatar_autoload(device_id)
+        task = asyncio.create_task(
+            self._run_on_device_ready(connection, device_id),
+            name=f"avatar-autoload-{device_id}",
+        )
+        self._avatar_autoload_tasks[device_id] = (connection, task)
+        task.add_done_callback(
+            lambda done, did=device_id, conn=connection: self._forget_avatar_autoload(
+                did, conn, done
+            )
+        )
+
+    async def _run_on_device_ready(
+        self, connection: ESP32Connection, device_id: str
+    ) -> None:
+        callback = self._on_device_ready
+        if callback is None:
+            return
+        try:
+            await callback(connection, device_id)
+        except asyncio.CancelledError:
+            logger.info("on_device_ready cancelled: device=%s", device_id)
+            raise
+        except Exception as exc:
+            logger.warning(
+                "on_device_ready failed: device=%s error=%s",
+                device_id,
+                exc,
+            )
 
     async def _init_device(self, connection: ESP32Connection, device_id: str) -> None:
         """Initialize MCP session with a newly connected device."""
@@ -1104,6 +1218,7 @@ class ESP32Manager:
             if not connection.tools_discovered:
                 logger.error("ESP32 tools discovery failed")
                 return
+            self._schedule_on_device_ready(connection, device_id)
             await self._auto_render_idle_avatar(connection, device_id)
             logger.info(
                 "ESP32 ready: device=%s tools=%d",
