@@ -30,6 +30,25 @@ documented-only.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-23
+
+### Gateway
+
+- Expose `set_external_power_auto_off(enabled)` and
+  `get_external_power_auto_off` in `tools/list`, relayed to the device's
+  `self.power.*` tools. Requires firmware-v1.18.0 or later. (#424)
+- Tests only: merge the duplicated `move_head` pitch-rejection tests into one
+  parametrized test (same boundaries and type cases; no runtime change). (#421)
+
+### Compatibility and known limitations
+
+- Recommended pairing: gateway **0.20.0** with firmware **1.18.0**.
+  `set_external_power_auto_off` / `get_external_power_auto_off` need
+  firmware-v1.18.0 or later; everything else in this release works as in
+  gateway 0.19.0.
+
+## [firmware-v1.18.0] - 2026-10-23
+
 ### Firmware
 
 - **Behaviour change:** on external power (USB, battery not discharging) the
@@ -43,76 +62,22 @@ documented-only.
   key `ext_auto_off`, **off when unset**) restores the idle dim/power-off on
   external power too. Applied immediately. New device tools
   `self.power.set_external_power_auto_off` and
-  `self.power.get_external_power_auto_off`.
+  `self.power.get_external_power_auto_off`. (#424)
 - Head touch: a TAP or STROKE now needs level H (3) on some channel, whether
   the screen is on or off. Before, a lit screen also accepted taps that only
   reached level M, or level L held for 300 ms, and a STROKE needed no
   particular level. An untouched head produced 17 phantom TAPs in 3.5 minutes
-  on firmware-v1.18.0 (L/M bursts on one or all channels, often every ~4 s)
-  and one phantom STROKE from a two-channel M burst; none of them reached H.
-  In the recorded hands-on sessions 40 of 43 finger taps and 47 of 49 strokes
-  reached H, so normal and light touches still register; a very light touch
-  that never gets past M no longer does. A press that lights all three zones
-  on its first sample is a TAP only if two of them are at H then: the rarer
-  burst `0x3A` (M, M, H on all zones at once, 150 ms) also reached H, while
-  the real taps that started on all zones had two at H.
-
-### Gateway
-
-- Expose `set_external_power_auto_off(enabled)` and
-  `get_external_power_auto_off` in `tools/list`, relayed to the device's
-  `self.power.*` tools. Requires a firmware with the change above.
-- Tests only: merge the duplicated `move_head` pitch-rejection tests into one
-  parametrized test (same boundaries and type cases; no runtime change). (#421)
-
-## [0.19.0] - 2026-10-22
-
-### Gateway
-
-- Bump the locked `certifi` to 2026.10.19, which drops the
-  `emSign ECC Root CA - G3` root after the eMudhra intermediate CA key
-  compromise (October 2026).
-- `listen()` honours `STACKCHAN_LISTEN_LANGUAGE` when the tool call
-  omits `language` (still `ja` when unset). The MCP `listen` schema no
-  longer advertises a `language` default, so clients that materialize
-  schema defaults do not override the env.
-- New `fish-audio` TTS engine backed by the hosted
-  [Fish Audio](https://fish.audio) API, selectable per call with
-  `say(voice="fish-audio")` or globally via
-  `STACKCHAN_TTS_ENGINE=fish-audio`. It requests 16-bit mono PCM at the
-  device's own 16 kHz, so unlike Irodori it needs no decoder and unlike
-  Edge TTS no `ffmpeg` — the `tts-fish-audio` extra is a no-op alias over
-  `[tts]`. Configured through `STACKCHAN_FISH_AUDIO_KEY` (required) plus
-  optional `_MODEL`, `_BACKEND`, and `_URL` overrides.
-- The gateway now holds multiple concurrent ESP32 connections keyed by
-  the `Device-Id` header instead of a single connection slot. An optional
-  `device_id` argument on `say`, `listen`, `load_avatar_set`, and every
-  hardware-relay tool selects which unit a call targets, and is declared in
-  each of those tools' published schemas (the follow/beat streaming helpers
-  and `get_status` always act on the default device). Two new tools, `list_devices` and
-  `set_default_device`, list the connected units and change the default
-  target. Callers that omit `device_id` are unaffected: the default target
-  is the first device that connects, as before. Audio recording (`listen`
-  and device-driven capture) is still one gateway-wide slot: while one unit
-  is recording, a `listen` on another unit waits for the slot instead of
-  running in parallel.
-- Expose `set_charge_protection(enabled)`, `get_charge_protection`, and
-  `set_charge_thresholds(on_below, off_above)` in `tools/list` and relay them
-  to the device's `self.power.*` tools. Requires a firmware that includes the
-  persistent charge protection below.
-
-### Compatibility and known limitations
-
-- Recommended pairing: gateway **0.19.0** with firmware **1.18.0**.
-  The charge-protection tools need firmware 1.18.0 or later; everything else
-  in this release works with firmware 1.17.0.
-- Audio recording (`listen`) is still one gateway-wide slot across devices
-  (see the multi-device entry above).
-
-## [firmware-v1.18.0] - 2026-10-22
-
-### Firmware
-
+  on the untagged 2026-10-22 build of firmware-v1.18.0 (L/M bursts on one or
+  all channels, often every ~4 s) and one phantom STROKE from a two-channel M
+  burst; none of them reached H. In the recorded hands-on sessions 40 of 43
+  finger taps and 47 of 49 strokes reached H, so normal and light touches
+  still register; a very light touch that never gets past M no longer does. A
+  press that lights all three zones on its first sample is a TAP only if two
+  of them are at H then: the rarer burst `0x3A` (M, M, H on all zones at once,
+  150 ms) also reached H, while the real taps that started on all zones had
+  two at H. This replaces the level-M / 300 ms TAP rule and the
+  screen-off-only level-H rule described in the head-touch rework below.
+  (#423)
 - Added a persistent, opt-in runtime toggle for the AXP2101 charge protection
   introduced in firmware-v1.17.0. `charge_protection` is stored in NVS
   (namespace `stackchan`, key `chg_protect`) and is **off when unset**, so
@@ -166,14 +131,61 @@ documented-only.
 
 ### Compatibility and known limitations
 
-- Recommended pairing: firmware **1.18.0** with gateway **0.19.0**.
-  Firmware 1.18.0 also works with gateway 0.18.0, but the charge-protection
-  controls are only reachable through gateway 0.19.0.
+- Recommended pairing: firmware **1.18.0** with gateway **0.20.0**.
+  Firmware 1.18.0 also works with gateways 0.18.0 and 0.19.0, but the
+  charge-protection controls need gateway 0.19.0 or later and the
+  `external_power_auto_off` controls need gateway 0.20.0.
+- On external power the device now stays on when idle; set
+  `external_power_auto_off` to restore the previous dim/power-off.
 - Charge protection stays **off** until enabled; existing devices behave
   as before. Head-touch keeps its `touch/enabled` setting, but see the
   behavior change above for how the default settings now react.
 - Existing devices should use the app-only `xiaozhi.bin` update at `0x20000`
   to preserve NVS/Wi-Fi configuration.
+
+## [0.19.0] - 2026-10-22
+
+### Gateway
+
+- Bump the locked `certifi` to 2026.10.19, which drops the
+  `emSign ECC Root CA - G3` root after the eMudhra intermediate CA key
+  compromise (October 2026).
+- `listen()` honours `STACKCHAN_LISTEN_LANGUAGE` when the tool call
+  omits `language` (still `ja` when unset). The MCP `listen` schema no
+  longer advertises a `language` default, so clients that materialize
+  schema defaults do not override the env.
+- New `fish-audio` TTS engine backed by the hosted
+  [Fish Audio](https://fish.audio) API, selectable per call with
+  `say(voice="fish-audio")` or globally via
+  `STACKCHAN_TTS_ENGINE=fish-audio`. It requests 16-bit mono PCM at the
+  device's own 16 kHz, so unlike Irodori it needs no decoder and unlike
+  Edge TTS no `ffmpeg` — the `tts-fish-audio` extra is a no-op alias over
+  `[tts]`. Configured through `STACKCHAN_FISH_AUDIO_KEY` (required) plus
+  optional `_MODEL`, `_BACKEND`, and `_URL` overrides.
+- The gateway now holds multiple concurrent ESP32 connections keyed by
+  the `Device-Id` header instead of a single connection slot. An optional
+  `device_id` argument on `say`, `listen`, `load_avatar_set`, and every
+  hardware-relay tool selects which unit a call targets, and is declared in
+  each of those tools' published schemas (the follow/beat streaming helpers
+  and `get_status` always act on the default device). Two new tools, `list_devices` and
+  `set_default_device`, list the connected units and change the default
+  target. Callers that omit `device_id` are unaffected: the default target
+  is the first device that connects, as before. Audio recording (`listen`
+  and device-driven capture) is still one gateway-wide slot: while one unit
+  is recording, a `listen` on another unit waits for the slot instead of
+  running in parallel.
+- Expose `set_charge_protection(enabled)`, `get_charge_protection`, and
+  `set_charge_thresholds(on_below, off_above)` in `tools/list` and relay them
+  to the device's `self.power.*` tools. Requires a firmware that includes the
+  persistent charge protection (firmware-v1.18.0).
+
+### Compatibility and known limitations
+
+- Recommended pairing: gateway **0.19.0** with firmware **1.18.0**.
+  The charge-protection tools need firmware 1.18.0 or later; everything else
+  in this release works with firmware 1.17.0.
+- Audio recording (`listen`) is still one gateway-wide slot across devices
+  (see the multi-device entry above).
 
 ## [0.18.0] - 2026-10-03
 
@@ -2063,9 +2075,10 @@ uv tool install stackchan-mcp
   alias, so the previous floating pin no longer resolved. ([#47])
 
 
-[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.19.0...HEAD
-[0.19.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.18.0...v0.19.0
+[Unreleased]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.19.0...v0.20.0
 [firmware-v1.18.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.17.0...firmware-v1.18.0
+[0.19.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.17.0...v0.18.0
 [firmware-v1.17.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/firmware-v1.16.0...firmware-v1.17.0
 [0.17.0]: https://github.com/kisaragi-mochi/stackchan-mcp/compare/v0.16.0...v0.17.0
