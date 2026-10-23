@@ -7,16 +7,46 @@ This module orchestrates both sides.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
+import time
 
 from aiohttp import web
 
-from .capture_server import create_capture_app, stage_avatar_set
+from .capture_server import (
+    create_capture_app,
+    stage_avatar_set,
+    stage_firmware_image,
+    unstage_firmware_image,
+)
 from .esp32_client import ESP32Manager
+from .firmware_image import (
+    DEFAULT_BOARD_NAME,
+    FirmwareImageError,
+    validate_firmware_image,
+)
 from .mdns_advertiser import MdnsAdvertiser
 
 logger = logging.getLogger(__name__)
+
+# The device shows an alert for ~3 s and stops audio before it starts the
+# HTTP GET (Application::UpgradeFirmware), so allow some slack.
+FIRMWARE_FETCH_TIMEOUT_S = 30.0
+
+
+def _tool_text_json(result: object) -> object:
+    """Decode the first text block of a device tools/call result as JSON."""
+    if not isinstance(result, dict):
+        return None
+    for item in result.get("content") or []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            try:
+                return json.loads(item.get("text", ""))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 BEAT_MODE_LISTEN_STOP_TIMEOUT_S = 3.0
 
@@ -304,6 +334,185 @@ class Gateway:
         result.setdefault("checksum", sha256)
         result["bytes_transferred"] = len(payload) if result.get("ok") else 0
         return result
+
+
+    # ---- Over-the-air firmware upgrade ---------------------------------
+
+    def _firmware_base_url(self, connection: object) -> str:
+        """Base URL the device should GET /firmware/{id} from.
+
+        Prefer the gateway address the device's own WebSocket reached:
+        it is on the device's network by construction, whereas
+        VISION_URL may point at a public relay (e.g. Tailscale Funnel)
+        that the device's OTA client cannot download through.
+        """
+        host = getattr(connection, "local_host", None)
+        if host and not host.startswith("127.") and host != "::1":
+            if ":" in host:
+                host = f"[{host}]"
+            port = int(os.getenv("CAPTURE_PORT", "8766"))
+            return f"http://{host}:{port}"
+        return self.avatar_set_base_url
+
+    async def _device_system_info(self, device_id: str) -> dict | None:
+        result, error = await self.esp32.call_tool(
+            "self.get_system_info", {}, device_id=device_id
+        )
+        if error:
+            return None
+        info = _tool_text_json(result)
+        return info if isinstance(info, dict) else None
+
+    async def upgrade_firmware(
+        self,
+        firmware_path: str,
+        timeout: float = 180.0,
+        device_id: str | None = None,
+    ) -> dict:
+        """Validate a local xiaozhi.bin, serve it once, and OTA the device.
+
+        Waits for the device to download it, reboot and reconnect, then
+        confirms the running app's ELF SHA-256 matches the image.
+        """
+        path = os.path.expanduser(firmware_path)
+        if not os.path.isfile(path):
+            return {"ok": False, "error": f"firmware_not_found: {firmware_path}"}
+        with open(path, "rb") as f:
+            payload = f.read()
+
+        connection = self.esp32.connection_for(device_id)
+        if connection is None or not connection.connected:
+            # Still validate so a bad file is reported even when offline.
+            try:
+                validate_firmware_image(payload)
+            except FirmwareImageError as exc:
+                return {"ok": False, "error": str(exc), "sent_to_device": False}
+            return {"ok": False, "error": "no_device_connected", "sent_to_device": False}
+        target_id = connection.device_id
+
+        before = await self._device_system_info(target_id)
+        board_name = DEFAULT_BOARD_NAME
+        if before and isinstance(before.get("board"), dict):
+            board_name = before["board"].get("name") or DEFAULT_BOARD_NAME
+        try:
+            image = validate_firmware_image(payload, board_name=board_name)
+        except FirmwareImageError as exc:
+            return {"ok": False, "error": str(exc), "sent_to_device": False}
+        if self._capture_app is None:
+            return {"ok": False, "error": "gateway_not_started", "sent_to_device": False}
+
+        before_app = (before or {}).get("application") or {}
+        old_session = connection.session_id
+        image_id, fetched = await stage_firmware_image(self._capture_app, payload)
+        url = f"{self._firmware_base_url(connection)}/firmware/{image_id}"
+        logger.info(
+            "OTA upgrade: device=%s image=%s version=%s",
+            target_id, image.sha256[:12], image.version,
+        )
+        base = {
+            "device_id": target_id,
+            "image": image.as_dict(),
+            "before": {
+                "version": before_app.get("version"),
+                "compile_time": before_app.get("compile_time"),
+                "elf_sha256": before_app.get("elf_sha256"),
+                "partition": (before or {}).get("ota", {}).get("label"),
+            },
+        }
+
+        # The device schedules the upgrade on its main loop before the
+        # tools/call reply is queued behind it, so the reply usually never
+        # arrives (the gateway sees a response timeout while the download
+        # is already running). Only an explicit error counts as a refusal;
+        # the download itself is the real acknowledgement.
+        started = time.monotonic()
+        call_task = asyncio.create_task(
+            self.esp32.call_tool(
+                "self.upgrade_firmware", {"url": url}, device_id=target_id
+            )
+        )
+        fetch_task = asyncio.create_task(fetched.wait())
+        try:
+            await asyncio.wait(
+                {call_task, fetch_task},
+                timeout=FIRMWARE_FETCH_TIMEOUT_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if call_task.done() and not fetched.is_set():
+                result, error = call_task.result()
+                timed_out = bool(error) and "Timeout" in str(error.get("message", ""))
+                if (error and not timed_out) or (
+                    isinstance(result, dict) and result.get("isError")
+                ):
+                    await unstage_firmware_image(self._capture_app, image_id)
+                    msg = error.get("message", str(error)) if error else str(result)
+                    return {
+                        **base, "ok": False, "sent_to_device": False,
+                        "error": f"device_rejected: {msg}",
+                    }
+            remaining = FIRMWARE_FETCH_TIMEOUT_S - (time.monotonic() - started)
+            await asyncio.wait_for(fetched.wait(), max(remaining, 0.1))
+        except asyncio.TimeoutError:
+            await unstage_firmware_image(self._capture_app, image_id)
+            return {
+                **base, "ok": False, "sent_to_device": False,
+                "error": f"device_did_not_download: no GET on {url.rsplit('/', 1)[0]}/... "
+                f"within {FIRMWARE_FETCH_TIMEOUT_S:.0f}s (is the capture port reachable from the device?)",
+            }
+        finally:
+            fetch_task.cancel()
+            if not call_task.done():
+                call_task.cancel()
+
+        deadline = started + max(timeout, FIRMWARE_FETCH_TIMEOUT_S + 30.0)
+        new_conn = None
+        while time.monotonic() < deadline:
+            c = self.esp32.connection_for(target_id)
+            if (
+                c is not None and c.connected and c.session_id != old_session
+                and c.initialized and c.tools_discovered
+            ):
+                new_conn = c
+                break
+            await asyncio.sleep(0.5)
+        if new_conn is None:
+            still_same = (
+                (c := self.esp32.connection_for(target_id)) is not None
+                and c.connected and c.session_id == old_session
+            )
+            return {
+                **base, "ok": False, "sent_to_device": True,
+                "error": (
+                    "upgrade_failed_on_device: device downloaded the image but did not "
+                    "reboot (see its screen / serial log); it is still running the old firmware"
+                    if still_same else
+                    "no_reconnect: device downloaded the image but did not reconnect to this "
+                    "gateway in time (it may have joined another gateway via mDNS)"
+                ),
+            }
+
+        after = await self._device_system_info(target_id)
+        after_app = (after or {}).get("application") or {}
+        out = {
+            **base,
+            "sent_to_device": True,
+            "after": {
+                "version": after_app.get("version"),
+                "compile_time": after_app.get("compile_time"),
+                "elf_sha256": after_app.get("elf_sha256"),
+                "partition": (after or {}).get("ota", {}).get("label"),
+            },
+            "elapsed_s": round(time.monotonic() - started, 1),
+        }
+        if after_app.get("elf_sha256") == image.elf_sha256:
+            out["ok"] = True
+        else:
+            out["ok"] = False
+            out["error"] = (
+                "running_image_mismatch: device rebooted but is not running the new "
+                "image (rolled back, or system info unavailable)"
+            )
+        return out
 
 
 # Singleton gateway instance, shared between stdio server and ESP32 manager

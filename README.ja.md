@@ -74,6 +74,7 @@
 | `beat_meta_snapshot()` | beat mode の最新メタデータを polling で取得する。active 状態、BPM、confidence、現在の sensitivity / minimum onset floor、最終 beat/audio timestamp、capture health、counter、現在の motion/LED パラメータを返す | ✅ |
 | `beat_clip_save(seconds?)` | 最新の rolling beat-mode 音声を 16 kHz mono WAV の一時ファイルとして保存し、パスと実際に保存できた秒数を返す。clip ファイルはディスクに残るため、不要になったら caller 側で削除してください | ✅ |
 | `stackchan_follow_pose_stream(action, url, ...)` | 任意の外部 WebSocket pose-stream を購読し、 受信した `yaw` / `pitch` フレームに対して 1:1 で首を追従させる（SCS0009 動作範囲内、 yaw ±90°、 pitch 5..85°）。 `action` は `start` / `stop` / `status` を切替。 軸反転、 pitch センター offset、 ダウンサンプル、 角速度クランプ、 exponential backoff 付き reconnect を内包し、 初期姿勢はデバイス側から seed することで初回フレームから角速度クランプが実サーボ位置を基準に効きます。 上流サーバ側のプロトコル（zero-offset コマンド、 ソース選択、 トランスポート）は本 gateway のスコープ外。 | ✅ |
+| `upgrade_firmware(firmware_path, timeout?)` | 手元の `xiaozhi.bin` を USB ケーブルなしで Wi-Fi 越しに書き込む。ESP32-S3 用の `xiaozhi` イメージで、このボード向け、SHA-256 が正しく、OTA 領域に収まるものでなければ、機体に送る前に gateway が断る。通れば推測できない短命の URL で1回だけ配り、再起動を待って動いているイメージを確かめる。[Wi-Fi 越しの更新](#wi-fi-越しの更新-usb-なし) を参照 | ✅ |
 | `stackchan_follow_led_stream(action, url, target, ...)` | 任意の外部 WebSocket LED-frame stream を購読し、検証済みの `colors` フレームをベース部 12 LED または Port B WS2812 strip に転送する。`event` フレームは rate gate を bypass し、`continuous` フレームは `max_fps` で制限される | ✅ |
 
 詳細スキーマは `gateway/README.md` 参照。
@@ -104,6 +105,20 @@ esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
 ```
 
 ESP-IDF や Docker のセットアップは不要。
+
+#### Wi-Fi 越しの更新 (USB なし)
+
+機体が gateway につながっていれば、2回目以降の更新はケーブルなしでできます。gateway のツール `upgrade_firmware` に、gateway を動かしているマシン上のアプリイメージ（Release の `xiaozhi.bin` か `build/xiaozhi.bin`。`merged-binary.bin` は不可）のパスを渡します。
+
+```text
+upgrade_firmware({"firmware_path": "~/Downloads/xiaozhi.bin"})
+```
+
+gateway はまずファイルを確かめ（ESP32-S3 のアプリイメージ、プロジェクト名 `xiaozhi`、このボードの名前、末尾の SHA-256、OTA 領域 0x3F0000 に収まる）、合わなければ機体には何も送らずに断ります。通れば capture ポート（`CAPTURE_PORT`、既定 8766）で、120 秒で切れる推測できない URL から1回だけ配ります。機体が gateway の WebSocket に使っているアドレスでこのポートに届く必要があります。ツールはダウンロード（約25秒）・再起動・再接続を待ち、`before` / `after`（版、コンパイル時刻、ELF SHA-256、OTA パーティション）を返します。全体で1分ほどです。
+
+機体は使っていない側の OTA 領域に書き、ESP-IDF がイメージを検証してから切り替えます。アプリのロールバックが有効なので、新しいイメージが OTA の版確認まで届く前に再起動した場合は、次のリセットで前のイメージに戻ります。再起動後に機体が別の gateway につながった場合（mDNS の順番）は `no_reconnect` が返ります。その gateway 側を見てください。
+
+OTA の後は機体が `ota_1`（0x410000）で動いていることがあります。そのときは USB で `0x20000` にアプリだけ書いても切り替わりません。`write_flash 0x20000 xiaozhi.bin` の前に `erase_region 0xd000 0x2000`（OTA data の消去。NVS と Wi-Fi 設定は残る）を入れてください。
 
 #### オプション B: ソースから Docker でビルド（コントリビュータ向け）
 

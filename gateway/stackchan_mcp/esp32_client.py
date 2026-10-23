@@ -194,6 +194,17 @@ class ESP32Connection:
         return self._tools_discovered
 
     @property
+    def local_host(self) -> str | None:
+        """Gateway IP this device's WebSocket reached (None if unknown)."""
+        try:
+            addr = self._ws.local_address
+        except Exception:
+            return None
+        if isinstance(addr, (tuple, list)) and addr and isinstance(addr[0], str):
+            return addr[0]
+        return None
+
+    @property
     def avatar_render_sent(self) -> bool:
         return self._avatar_render_sent
 

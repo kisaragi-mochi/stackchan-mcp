@@ -74,6 +74,7 @@ This repository is a monorepo.
 | `beat_meta_snapshot()` | Poll the latest beat-mode metadata: active state, BPM, confidence, active sensitivity/minimum onset floor, last beat/audio timestamps, capture health, counters, and current motion/LED parameters. | ✅ |
 | `beat_clip_save(seconds?)` | Save the latest rolling beat-mode audio window as a 16 kHz mono WAV temp file and return its path plus actual captured duration. Clip files persist on disk; the caller is responsible for deleting them when no longer needed. | ✅ |
 | `stackchan_follow_pose_stream(action, url, ...)` | Subscribe to an arbitrary external WebSocket pose-stream and drive the head to follow incoming `yaw` / `pitch` frames 1:1 within the SCS0009 working range. `action` switches between `start` / `stop` / `status`. Includes per-axis flip, pitch-center offset, downsample rate cap, angular-velocity clamp, and reconnect with exponential backoff; the initial pose is seeded from the device so the angular-velocity clamp is anchored at the real servo position from the first frame. The upstream server's protocol (zero-offset commands, source dispatching, transport) is intentionally outside this gateway's scope. | ✅ |
+| `upgrade_firmware(firmware_path, timeout?)` | Flash a local `xiaozhi.bin` to the device over Wi-Fi, no USB cable. The gateway refuses files that are not an ESP32-S3 `xiaozhi` image for this board with a valid SHA-256 that fits the OTA slot, before contacting the device; then serves it once from a random short-lived URL, waits for the reboot and confirms the running image. See [Updating over Wi-Fi](#updating-over-wi-fi-no-usb). | ✅ |
 | `stackchan_follow_led_stream(action, url, target, ...)` | Subscribe to an arbitrary external WebSocket LED-frame stream and forward validated `colors` frames to either the built-in 12-LED base ring or a Port B WS2812 strip. `event` frames bypass the rate gate; `continuous` frames are capped by `max_fps`. | ✅ |
 
 See `gateway/README.md` for full schemas.
@@ -104,6 +105,38 @@ esptool.py --chip esp32s3 --port /dev/cu.usbmodem1101 -b 460800 \
 ```
 
 No ESP-IDF or Docker setup needed.
+
+#### Updating over Wi-Fi (no USB)
+
+Once the device is connected to your gateway, later updates can skip the
+cable. Call the gateway tool `upgrade_firmware` with the path to the
+app image (`xiaozhi.bin` from a Release or `build/xiaozhi.bin`; not
+`merged-binary.bin`) on the gateway host:
+
+```text
+upgrade_firmware({"firmware_path": "~/Downloads/xiaozhi.bin"})
+```
+
+The gateway first checks the file (ESP32-S3 app image, project
+`xiaozhi`, this board's name, appended SHA-256, fits the 0x3F0000 OTA
+slot) and refuses anything else without touching the device. It then
+serves the file once on the capture port (`CAPTURE_PORT`, default 8766)
+under a random URL that expires after 120 s. The device needs to reach that
+port on the address it uses for the gateway WebSocket. The tool waits for
+the download (~25 s), reboot and reconnect and returns `before` /
+`after` (version, compile time, ELF SHA-256, OTA partition). About a minute
+in total.
+
+The device writes into the inactive OTA slot and only switches over after
+ESP-IDF has verified the image. App rollback is enabled: a new image that
+reboots before it reaches the OTA version check goes back to the previous
+one on the next reset. If the device comes back on a different gateway
+(mDNS order), the tool reports `no_reconnect`; check that gateway.
+
+After an OTA the device may be running from `ota_1` (0x410000). An
+app-only USB flash to `0x20000` then has no effect until the OTA data is
+cleared: add `erase_region 0xd000 0x2000` before `write_flash 0x20000
+xiaozhi.bin` (NVS and Wi-Fi settings are kept).
 
 #### Option B: Build from source with Docker (for contributors)
 

@@ -78,6 +78,22 @@ AVATAR_SETS_LOCK_KEY = web.AppKey("avatar_sets_lock", asyncio.Lock)
 AVATAR_SET_STAGING_TTL_SEC = 120.0
 
 
+# One-time firmware images for the gateway ``upgrade_firmware`` tool. The
+# device's OTA client (firmware/main/ota.cc ``Ota::Upgrade``) sends no
+# Authorization header, so the 128-bit random id in the URL is the
+# credential: it is single-use and expires after the TTL below.
+FIRMWARE_IMAGES_KEY = web.AppKey("firmware_images", dict)
+FIRMWARE_IMAGES_LOCK_KEY = web.AppKey("firmware_images_lock", asyncio.Lock)
+FIRMWARE_STAGING_TTL_SEC = 120.0
+
+
+@dataclass
+class _FirmwareStaging:
+    payload: bytes
+    created_at: float
+    fetched: asyncio.Event
+
+
 @dataclass(frozen=True)
 class _AvatarStaging:
     token: str
@@ -297,6 +313,57 @@ async def handle_avatar_set_fetch(request: web.Request) -> web.Response:
     )
 
 
+async def stage_firmware_image(
+    app: web.Application, payload: bytes
+) -> tuple[str, asyncio.Event]:
+    """Stage a firmware image for one unauthenticated, one-time download.
+
+    Returns (image_id, fetched). ``fetched`` is set when the device has
+    started downloading the image (the entry is consumed at that point).
+    """
+    image_id = secrets.token_urlsafe(16)
+    staging = _FirmwareStaging(
+        payload=payload, created_at=time.time(), fetched=asyncio.Event()
+    )
+    images = app[FIRMWARE_IMAGES_KEY]
+    async with app[FIRMWARE_IMAGES_LOCK_KEY]:
+        now = time.time()
+        for k in [
+            k for k, v in images.items()
+            if now - v.created_at > FIRMWARE_STAGING_TTL_SEC
+        ]:
+            images.pop(k, None)
+        images[image_id] = staging
+    logger.info("Staged firmware image: bytes=%d", len(payload))
+    return image_id, staging.fetched
+
+
+async def unstage_firmware_image(app: web.Application, image_id: str) -> None:
+    async with app[FIRMWARE_IMAGES_LOCK_KEY]:
+        app[FIRMWARE_IMAGES_KEY].pop(image_id, None)
+
+
+async def handle_firmware_fetch(request: web.Request) -> web.Response:
+    """Serve a staged firmware image exactly once."""
+    image_id = request.match_info.get("image_id", "")
+    async with request.app[FIRMWARE_IMAGES_LOCK_KEY]:
+        staging = request.app[FIRMWARE_IMAGES_KEY].pop(image_id, None)
+    if staging is None:
+        return web.Response(status=404, text="not_found_or_consumed")
+    if time.time() - staging.created_at > FIRMWARE_STAGING_TTL_SEC:
+        return web.Response(status=410, text="staging_expired")
+    staging.fetched.set()
+    logger.info(
+        "Serving firmware image to %s: bytes=%d",
+        request.remote, len(staging.payload),
+    )
+    return web.Response(
+        body=staging.payload,
+        content_type="application/octet-stream",
+        headers={"Content-Length": str(len(staging.payload))},
+    )
+
+
 async def _pcm_chunks_from_request(
     request: web.Request,
 ) -> AsyncIterator[bytes]:
@@ -473,9 +540,12 @@ def create_capture_app(
     app[CAPTURE_TOKEN_KEY] = capture_token
     app[AVATAR_SETS_KEY] = {}
     app[AVATAR_SETS_LOCK_KEY] = asyncio.Lock()
+    app[FIRMWARE_IMAGES_KEY] = {}
+    app[FIRMWARE_IMAGES_LOCK_KEY] = asyncio.Lock()
     app[PCM_TOKEN_KEY] = pcm_token
     app[GATEWAY_KEY] = gateway
     app.router.add_post("/capture", handle_capture)
     app.router.add_get("/avatar_set/{short_id}", handle_avatar_set_fetch)
+    app.router.add_get("/firmware/{image_id}", handle_firmware_fetch)
     app.router.add_post("/pcm", handle_pcm)
     return app

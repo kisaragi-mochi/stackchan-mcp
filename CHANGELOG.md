@@ -30,6 +30,17 @@ documented-only.
 
 ## [Unreleased]
 
+### Gateway
+
+- Add `upgrade_firmware(firmware_path)` to flash a local `xiaozhi.bin` over
+  Wi-Fi without USB. Before contacting the device the gateway checks the
+  image (ESP32-S3 app image, project `xiaozhi`, board name, appended
+  SHA-256, fits the OTA slot); it then serves the file once from a random
+  `/firmware/{id}` URL on the capture port that expires after 120 s, calls
+  the device's `self.upgrade_firmware`, waits for the reboot and reconnect,
+  and confirms the running ELF SHA-256. Works with existing firmware
+  (firmware-v1.18.0 tested); no firmware change.
+
 ## [0.20.0] - 2026-10-23
 
 ### Gateway

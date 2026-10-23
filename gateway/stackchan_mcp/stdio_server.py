@@ -947,6 +947,26 @@ async def _dispatch_mcp_tool(
         )
         return [TextContent(type="text", text=json.dumps(result))]
 
+    if name == "upgrade_firmware":
+        firmware_path = arguments.get("firmware_path", "")
+        if not firmware_path or not isinstance(firmware_path, str):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {"ok": False, "error": "firmware_path is required"}
+                    ),
+                )
+            ]
+        try:
+            timeout = float(arguments.get("timeout", 180.0))
+        except (TypeError, ValueError):
+            timeout = 180.0
+        result = await gateway.upgrade_firmware(
+            firmware_path, timeout, device_id=device_id
+        )
+        return [TextContent(type="text", text=json.dumps(result))]
+
     if name == "stackchan_follow_pose_stream":
         return await _handle_follow_pose_stream(gateway, arguments)
 
@@ -3153,6 +3173,47 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                     },
                     "required": ["archive_path", "mode"],
+                },
+            ),
+            Tool(
+                name="upgrade_firmware",
+                description=(
+                    "Flash new firmware to the device over Wi-Fi (no USB). "
+                    "``firmware_path`` is a local app image on the gateway "
+                    "host (``build/xiaozhi.bin`` or the Release asset "
+                    "``xiaozhi.bin``; not merged-binary.bin). The gateway "
+                    "first checks it is an ESP32-S3 xiaozhi image for this "
+                    "board with a valid SHA-256 and that it fits the OTA "
+                    "slot, and refuses it otherwise without contacting the "
+                    "device. It then serves the file once from a random, "
+                    "short-lived URL on the capture port, asks the device "
+                    "to download and install it, waits for the reboot and "
+                    "reconnect, and confirms the running image. Returns "
+                    "ok / before / after (version, compile_time, "
+                    "elf_sha256, partition) / error. Takes about a minute."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "firmware_path": {
+                            "type": "string",
+                            "description": (
+                                "Filesystem path on the gateway host to "
+                                "xiaozhi.bin."
+                            ),
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": (
+                                "Max seconds to wait for download, reboot "
+                                "and reconnect."
+                            ),
+                            "default": 180.0,
+                            "minimum": 60.0,
+                            "maximum": 600.0,
+                        },
+                    },
+                    "required": ["firmware_path"],
                 },
             ),
         ]
