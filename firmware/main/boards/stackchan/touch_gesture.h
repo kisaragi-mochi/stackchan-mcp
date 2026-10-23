@@ -16,17 +16,24 @@
 //               not start on (moved across zones),
 //               OR the level-weighted centre of the touched channels shifted by
 //               `centroid_move_ch` (a wide, fast finger never fully leaves its
-//               start zone, so the zone test alone misses it);
-//       TAP:    no movement, `tap_min_ms`..`tap_max_ms` hold, and either some
-//               channel reached level M (2) or more, or the press stayed on
-//               for `tap_low_min_ms` (a lone short level-L blip is dropped),
-//               While the screen is off (SetAsleep(true)) a press that started
-//               asleep only counts as a TAP if it reached level H
-//               (`wake_tap_level`): bursts of M-level readings on several
-//               channels at once show up now and then on a still, untouched
-//               head, and a hand that really wakes the robot always gets to H;
+//               start zone, so the zone test alone misses it); either way
+//               only once some channel reached `event_min_level` (H, 3), as
+//               two-channel M bursts on an untouched head also shift the centre;
+//       TAP:    no movement, `tap_min_ms`..`tap_max_ms` hold, and some
+//               channel reached `event_min_level` (H, 3). An untouched head
+//               (screen on or off) now and then reads L/M on one or all
+//               channels for up to ~400 ms, sometimes every ~4 s for minutes,
+//               and never reaches H; 40 of 43 finger taps recorded on the
+//               device reached H on at least one tick, so L/M-only presses
+//               are never a TAP (a very light tap peaking at M is lost).
+//               A press whose first sample lights all three zones at once is
+//               a TAP only if at least `all_zone_start_min_high` of them are
+//               at H on that sample: the untouched-head bursts rise on every
+//               zone together with at most one at H (0x15, 0x29, 0x2A, 0x3A),
+//               while the real taps that started on all zones had two at H
+//               (0x1F, 0x2F, 0x3D);
 //       none:   stationary hold longer than `tap_max_ms` (e.g. a stuck
-//               channel or a resting hand), or a short L-only blip.
+//               channel or a resting hand), or a press that stayed below H.
 //   - NotifySettle() is called when charging or the backlight switches. The
 //     capacitive readings wobble for up to ~1 s afterwards, but only as a
 //     stationary blip on a single channel; a finger sliding across zones is
@@ -55,9 +62,8 @@ struct TouchGestureConfig {
     uint32_t move_release_confirm_ticks = 2;  // start zone must stay off (100 ms)
     uint32_t tap_min_ms = 100;              // two ticks; a one-tick spike is never a tap
     uint32_t tap_max_ms = 500;
-    uint32_t tap_low_min_ms = 300;          // L-only (peak level 1) needs this long
-    uint8_t tap_strong_level = 2;           // a peak at this level or above counts at once
-    uint8_t wake_tap_level = 3;             // a TAP that starts while the screen is off must reach this
+    uint8_t event_min_level = 3;            // a TAP or STROKE must reach this level (H) on some channel
+    uint8_t all_zone_start_min_high = 2;    // a TAP that starts on all 3 zones needs this many at H then
     uint32_t settle_ms = 1000;              // tap-proof window after a power/backlight switch
     uint32_t settle_unmask_zero_ms = 300;   // zeros needed to unmask after that reset
     uint32_t cooldown_ms = 300;
@@ -79,8 +85,7 @@ struct TouchGestureOutput {
     uint8_t recal_mask = 0;         // bit i = CH(i+1): reset the chip reference now
     uint8_t start_zones = 0;        // zones touched at press start (valid with event)
     uint8_t peak_level = 0;         // highest level seen on a usable channel in the press
-    bool dropped_weak = false;      // a short L-only press was discarded (log it)
-    bool dropped_asleep = false;    // a press that started asleep never reached wake_tap_level
+    bool dropped_weak = false;      // a tap-length press never reached event_min_level (log it)
     bool settle_reset = false;      // recal_mask is for the post-switch reference reset
 };
 
@@ -111,8 +116,6 @@ public:
         settle_active_ = true;
         settle_until_ms_ = now_ms + cfg_.settle_ms;
     }
-    // Tell the tracker whether the screen is off (call before each Update()).
-    void SetAsleep(bool asleep) { asleep_ = asleep; }
     bool in_boot_grace() const { return in_grace_; }
     bool pressed() const { return pressed_; }
 
@@ -208,7 +211,13 @@ public:
             last_active_ms_ = now_ms;
             start_zones_ = active;
             press_in_settle_ = in_window;
-            press_asleep_ = asleep_;
+            {
+                int high = 0;
+                for (int i = 0; i < kChannels; i++) {
+                    if ((active & (1u << i)) && levels[i] >= 3) high++;
+                }
+                press_all_zones_weak_ = (active == 0x07 && high < cfg_.all_zone_start_min_high);
+            }
             peak_level_ = 0;
             for (int i = 0; i < kChannels; i++) {
                 if ((active & (1u << i)) && levels[i] > peak_level_) peak_level_ = levels[i];
@@ -254,7 +263,7 @@ public:
             }
         }
         TrackCentroid(active, levels);
-        if (!moved_ && !press_dirty_ &&
+        if (!moved_ && !press_dirty_ && peak_level_ >= cfg_.event_min_level &&
             ((vacated_ != 0 && seen_new_ != 0) ||
              (cen_valid_ && cen_max_ - cen_min_ >= cfg_.centroid_move_ch))) {
             moved_ = true;
@@ -277,9 +286,7 @@ public:
                 out.start_zones = start_zones_;
             } else if (!press_in_settle_ && duration >= cfg_.tap_min_ms &&
                        duration <= cfg_.tap_max_ms) {
-                if (press_asleep_ && peak_level_ < cfg_.wake_tap_level) {
-                    out.dropped_asleep = true;
-                } else if (peak_level_ >= cfg_.tap_strong_level || duration >= cfg_.tap_low_min_ms) {
+                if (peak_level_ >= cfg_.event_min_level && !press_all_zones_weak_) {
                     out.event = TouchGestureEvent::TAP;
                     out.duration_ms = duration;
                     out.start_zones = start_zones_;
@@ -321,8 +328,6 @@ private:
     }
 
     TouchGestureConfig cfg_;
-    bool asleep_ = false;
-    bool press_asleep_ = false;
     bool cen_valid_ = false;
     float cen_min_ = 0.0f;
     float cen_max_ = 0.0f;
@@ -349,6 +354,7 @@ private:
     uint32_t last_active_ms_ = 0;
     uint32_t zero_ticks_ = 0;
     uint8_t start_zones_ = 0;
+    bool press_all_zones_weak_ = false;
     uint8_t seen_new_ = 0;
     uint8_t vacated_ = 0;
     uint32_t new_ticks_[kChannels] = {0, 0, 0};

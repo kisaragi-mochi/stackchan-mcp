@@ -5043,7 +5043,6 @@ private:
         last_zone_snapshot_[2] = s.zone[2];
 
         const bool was_pressed = touch_tracker_.pressed();
-        touch_tracker_.SetAsleep(screen_off != 0);
         stackchan::touch::TouchGestureOutput o = touch_tracker_.Update(now_ms, s.level);
         if (!was_pressed && touch_tracker_.pressed()) {
             touch_press_start_raw_ = s.output1_raw;
@@ -5063,7 +5062,7 @@ private:
         }
         if (o.ended_without_event) {
             ESP_LOGI(TAG, "touch press ignored%s: start_raw=0x%02X release_raw=0x%02X peak=L%u duration=%u ms",
-                     o.dropped_weak ? " (weak L-only)" : (o.dropped_asleep ? " (screen off, below H)" : ""), touch_press_start_raw_, s.output1_raw,
+                     o.dropped_weak ? " (below H)" : "", touch_press_start_raw_, s.output1_raw,
                      (unsigned)o.peak_level, (unsigned)o.duration_ms);
         }
         if (!touch_sensor_enabled_.load(std::memory_order_acquire)) {

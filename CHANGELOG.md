@@ -44,6 +44,18 @@ documented-only.
   external power too. Applied immediately. New device tools
   `self.power.set_external_power_auto_off` and
   `self.power.get_external_power_auto_off`.
+- Head touch: a TAP or STROKE now needs level H (3) on some channel, whether
+  the screen is on or off. Before, a lit screen also accepted taps that only
+  reached level M, or level L held for 300 ms, and a STROKE needed no
+  particular level. An untouched head produced 17 phantom TAPs in 3.5 minutes
+  on firmware-v1.18.0 (L/M bursts on one or all channels, often every ~4 s)
+  and one phantom STROKE from a two-channel M burst; none of them reached H.
+  In the recorded hands-on sessions 40 of 43 finger taps and 47 of 49 strokes
+  reached H, so normal and light touches still register; a very light touch
+  that never gets past M no longer does. A press that lights all three zones
+  on its first sample is a TAP only if two of them are at H then: the rarer
+  burst `0x3A` (M, M, H on all zones at once, 150 ms) also reached H, while
+  the real taps that started on all zones had two at H.
 
 ### Gateway
 

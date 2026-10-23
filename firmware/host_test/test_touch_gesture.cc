@@ -31,12 +31,10 @@ struct Sim {
     int recal_requests = 0;
     uint8_t recal_union = 0;
     uint32_t last_stroke_ms = 0;
-    bool asleep = false;
 
     Sim() { tracker.Begin(0); }
 
     void Feed(const uint8_t levels[3]) {
-        tracker.SetAsleep(asleep);
         TouchGestureOutput o = tracker.Update(now, levels);
         if (o.event == TouchGestureEvent::TAP) taps++;
         if (o.event == TouchGestureEvent::STROKE) {
@@ -206,12 +204,14 @@ TEST(TouchGestureTap, EachZoneAndDurationGivesOneTap) {
     }
 }
 
-TEST(TouchGestureTap, LowLevelTapNeedsThreeHundredMilliseconds) {
-    Sim s;
-    s.PastGrace();
-    s.Raw(0x10, 300);  // CH3 = L for 300 ms
-    s.Idle(1000);
-    EXPECT_EQ(s.taps, 1);
+TEST(TouchGestureTap, LowLevelPressIsNeverATap) {
+    for (uint32_t ms : {300u, 400u, 500u}) {
+        Sim s;
+        s.PastGrace();
+        s.Raw(0x10, ms);  // CH3 = L
+        s.Idle(1000);
+        EXPECT_EQ(s.taps, 0) << "ms=" << ms;
+    }
 }
 
 TEST(TouchGestureTap, ShortLowLevelBlipsAreDropped) {
@@ -230,16 +230,17 @@ TEST(TouchGestureTap, ShortLowLevelBlipsAreDropped) {
     }
 }
 
-TEST(TouchGestureTap, ShortPressReachingMediumLevelIsATap) {
+TEST(TouchGestureTap, PressMustReachHighLevelToTap) {
     Sim s;
     s.PastGrace();
-    s.Raw(0x01, 50);  // L, then M within the press
+    s.Raw(0x01, 50);  // L, then M within the press: not a tap
     s.Raw(0x02, 50);
     s.Idle(1000);
-    EXPECT_EQ(s.taps, 1);
+    EXPECT_EQ(s.taps, 0);
     Sim t;
     t.PastGrace();
-    t.Raw(0x20, 100);  // CH3 = M (level 2) straight away
+    t.Raw(0x04, 50);  // L, then H for one tick (the light touches of 10/22)
+    t.Raw(0x0C, 100);
     t.Idle(1000);
     EXPECT_EQ(t.taps, 1);
 }
@@ -685,9 +686,8 @@ TEST(TouchGestureNoiseBurst, OneTickMhhSpikeIsNotATap) {
     EXPECT_EQ(s.taps, 0);
 }
 
-TEST(TouchGestureNoiseBurst, MediumBurstsWhileTheScreenIsOffAreNotTaps) {
+TEST(TouchGestureNoiseBurst, MediumBurstsAreNotTaps) {
     Sim s;
-    s.asleep = true;
     ReplayPress(s, {0x29, 0x29});                                  // 967.1 s
     ReplayPress(s, {0x26, 0x26, 0x26, 0x26, 0x26, 0x2A, 0x2A, 0x0A});  // 1355.6 s
     ReplayPress(s, {0x29, 0x29, 0x29, 0x29});                      // 1943.4 s
@@ -699,22 +699,72 @@ TEST(TouchGestureNoiseBurst, MediumBurstsWhileTheScreenIsOffAreNotTaps) {
 TEST(TouchGestureNoiseBurst, FirmTouchWakesAScreenThatIsOff) {
     // c log 1479.7 s and h log 665.6 s: the real wake-up taps reached H.
     Sim s;
-    s.asleep = true;
     ReplayPress(s, {0x30, 0x30, 0x30});
     ReplayPress(s, {0x38, 0x30, 0x30});
     EXPECT_EQ(s.taps, 2);
 }
 
-TEST(TouchGestureNoiseBurst, SameMediumTouchStillTapsWhileTheScreenIsOn) {
+// 10/23 00:47-00:51 (CI build, screen on, nobody near): 17 TAPs, all of
+// them L/M only. Each press below is one of them, sample by sample.
+TEST(TouchGestureNoiseBurst, IdleBurstsWithTheScreenOnAreNotTaps) {
     Sim s;
-    ReplayPress(s, {0x29, 0x29});
-    ReplayPress(s, {0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20});
-    EXPECT_EQ(s.taps, 2);
+    ReplayPress(s, std::vector<uint8_t>(8, 0x15));                // LLL 400 ms
+    ReplayPress(s, {0x25, 0x25});                                 // LLM 100 ms
+    ReplayPress(s, {0x19, 0x19, 0x19, 0x29, 0x29, 0x19});         // LML 300 ms
+    ReplayPress(s, std::vector<uint8_t>(8, 0x02));                // M000 400 ms
+    ReplayPress(s, {0x12, 0x12, 0x12, 0x12, 0x12});               // M0L0 250 ms
+    ReplayPress(s, {0x28, 0x28, 0x28, 0x28, 0x28, 0x18, 0x18, 0x18});  // 0MM0 400 ms
+    ReplayPress(s, {0x18, 0x18});                                 // 0ML0 100 ms
+    ReplayPress(s, {0x15, 0x25, 0x26, 0x26, 0x16});               // LLL->LMM 250 ms
+    ReplayPress(s, {0x20, 0x20});                                 // 00M0 100 ms
+    EXPECT_EQ(s.taps, 0);
+    EXPECT_EQ(s.strokes, 0);
 }
 
-TEST(TouchGestureNoiseBurst, StrokeStillWorksWhileTheScreenIsOff) {
+TEST(TouchGestureNoiseBurst, MediumBurstThatShiftsTheCentreIsNotAStroke) {
+    // 10/23 02:37:36-40 (CI build, nobody near): CH1+CH3 at M, then CH3 only.
+    // The level-weighted centre moves by one zone, but nothing reached H.
     Sim s;
-    s.asleep = true;
+    ReplayPress(s, {0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x20});
+    EXPECT_EQ(s.strokes, 0);
+    EXPECT_EQ(s.moved, 0);
+    EXPECT_EQ(s.taps, 0);
+}
+
+TEST(TouchGestureNoiseBurst, AllZoneBurstWithOneHighIsNotATap) {
+    // 10/23 03:10:40 (fixed build, screen off, nobody near) and 10/21 j log
+    // 255.8 s (screen on): 0x3A = CH1 M, CH2 M, CH3 H for 150 ms.
+    Sim s;
+    ReplayPress(s, {0x3A, 0x3A, 0x3A});
+    EXPECT_EQ(s.taps, 0);
+}
+
+TEST(TouchGestureNoiseBurst, RealTapsStartingOnAllZonesStillTap) {
+    // c log 1487.8 s / 1535.2 s and k log 359.8 s / 362.6 s.
+    Sim s;
+    ReplayPress(s, {0x1F, 0x0F});
+    ReplayPress(s, {0x2F, 0x0F});
+    ReplayPress(s, {0x3D, 0x0C});
+    ReplayPress(s, {0x3D, 0x3D});
+    EXPECT_EQ(s.taps, 4);
+    EXPECT_EQ(s.strokes, 0);
+}
+
+TEST(TouchGestureNoiseBurst, MediumPulseEveryFourSecondsGivesNothing) {
+    // 00:49:23-00:49:47: CH1 at M, on for 0.4 s or ~3.2 s, every ~4 s.
+    Sim s;
+    s.PastGrace();
+    for (int i = 0; i < 10; i++) {
+        s.Raw(0x02, (i % 3 == 0) ? 3200 : 400);
+        s.Idle(4000 - ((i % 3 == 0) ? 3200 : 400));
+    }
+    s.Idle(1000);
+    EXPECT_EQ(s.taps, 0);
+    EXPECT_EQ(s.strokes, 0);
+}
+
+TEST(TouchGestureNoiseBurst, FirmStrokeIsStillAStroke) {
+    Sim s;
     ReplayPress(s, {0x30, 0x3C, 0x0F, 0x03});
     EXPECT_EQ(s.strokes, 1);
 }
