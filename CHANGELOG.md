@@ -40,6 +40,16 @@ documented-only.
   the device's `self.upgrade_firmware`, waits for the reboot and reconnect,
   and confirms the running ELF SHA-256. Works with existing firmware
   (firmware-v1.18.0 tested); no firmware change.
+- Security: bump the locked `cryptography` to 50.0.2 and `setuptools` to
+  83.0.0 (PYSEC-2026-3447). `pip-audit` on the all-extras lock export reports
+  no known vulnerabilities. Re-locking also moves `onnxruntime` for
+  Python 3.10 only from 1.24.3 to 1.23.2 (the STT extra); Python 3.11+ keeps
+  1.26.0. Supersedes #396.
+
+### Tools
+
+- `firmware/scripts/Image_Converter`: Pillow 11.3.0 -> 13.0.0 (security
+  advisories). The converter already uses `Image.Resampling.LANCZOS`.
 
 ## [0.20.0] - 2026-10-23
 
