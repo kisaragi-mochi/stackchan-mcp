@@ -874,15 +874,19 @@ jsonl:
 ファイルが存在しない場合は作成され、既存のエントリは保持されます。
 1 行に含まれる field:
 
-- `event_type` — top-level event type（現状は `"touch"`）。
-- `subtype` — event type 内の subtype（現状は `"tap"` または
-  `"stroke"`）。
-- `duration_ms` — firmware が報告したイベントの継続時間（ミリ秒）。
+- `event_type` — top-level event type（`"touch"` または `"presence"`）。
+- `subtype` — event type 内の subtype（`touch` は `"tap"` / `"stroke"`、
+  `presence` は `"approach"`）。
+- `duration_ms` / `ps` — frame の数値 payload。値の実体に合った名前で
+  出力されます。firmware は常に frame の `duration_ms` field にこの数値を
+  入れますが、`presence` ではその field が生の 11-bit 近接センサ値
+  （`ps`, 0–2047）であって継続時間ではないため、gateway は `ps` として
+  forward / 永続化します（起きていない停止時間を記録しないため）。
 - `ts` — firmware uptime（ミリ秒、monotonic）。
 - `ts_unix` — gateway がイベントを記録した壁時計時刻。
 - `session_id` — gateway session 識別子。
 - `action` — event subtype に対応する avatar action keyword（例:
-  `head_pat`, `head_stroke`）。組み込みの default template は常に
+  `head_pat`, `head_stroke`, `look_up`）。組み込みの default template は常に
   この値を埋めるほか、`messages:` override 側でも `action` の指定が
   必須であるため、対応する全 subtype で必ず含まれます。
 
@@ -893,6 +897,7 @@ jsonl:
 ```json
 {"event_type": "touch", "subtype": "tap", "duration_ms": 0, "ts": 123456, "ts_unix": 1717862400.0, "session_id": "abc-123", "action": "head_pat"}
 {"event_type": "touch", "subtype": "stroke", "duration_ms": 720, "ts": 124000, "ts_unix": 1717862400.7, "session_id": "abc-123", "action": "head_stroke"}
+{"event_type": "presence", "subtype": "approach", "ps": 45, "ts": 125000, "ts_unix": 1717862401.4, "session_id": "abc-123", "action": "look_up"}
 ```
 
 最上位の `event_type` / `subtype` は下記「Supported event subtypes」
@@ -930,12 +935,19 @@ legacy notification には含まれません）。受信側の notification の
 | --- | --- | --- | --- |
 | `touch` | `tap` | `head_pat` | `head was tapped` |
 | `touch` | `stroke` | `head_stroke` | `head was stroked for {duration_ms}ms` |
+| `presence` | `approach` | `look_up` | `something came close to the face (ps={ps})` |
 
 組み込みのデフォルトは「機械的なイベント名」ではなく「デバイスが
 何を感じたか」を表す体験的な表現にしてあり、受信側のエージェントが
 一人称のナレーションとして読めるようになっています。`{duration_ms}`
-プレースホルダは event payload から置換され、未知のプレースホルダは
-そのまま保持されます。
+と `{ps}` のプレースホルダは event payload から置換され、未知の
+プレースホルダはそのまま保持されます。
+
+`presence`/`approach` はファームウェア搭載の LTR-553 近接センサ
+（`get_proximity_state` ツールと同じセンサ）が発行します。顔の数センチ
+以内に何かが近づくと、ロボットは無言で一瞬だけ頭を上げます。イベントは
+生のセンサ値を `ps` として運ぶため、consumer は 1cm の手と 3cm の手を
+区別できます。
 
 ##### 文言の上書き
 
@@ -954,6 +966,10 @@ messages:
     stroke:
       action: head_stroke
       template: "head being stroked for {duration_ms}ms"
+  presence:
+    approach:
+      action: look_up
+      template: "someone leaned in (ps={ps})"
 ```
 
 上書きする各 subtype には `action` と `template` の両方が必要です。

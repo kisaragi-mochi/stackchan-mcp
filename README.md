@@ -55,6 +55,8 @@ This repository is a monorepo.
 | `get_off_timeout` | Read the persistent screen-off timeout and current screen state. Requires firmware 1.17.0+ | ✅ |
 | `move_head(yaw, pitch, speed?)` | Move the neck (servos). `pitch` is constrained to `5..85` — the M5Stack-recommended operating range. For the wider firmware hard clamp (`0..88`), use the firmware-side `set_head_angles` device tool instead. | ✅ |
 | `get_touch_state` | Touch sensor state (press / release / stroke / etc.) | ✅ |
+| `get_proximity_state` | Onboard LTR-553 proximity / ambient-light state: raw 11-bit `ps`, saturation flag, ALS channels, enter/exit thresholds, presence flag, reaction count, sample age. Range is a few centimetres — a hand in front of the face. | ✅ |
+| `set_proximity_config(enabled?, enter?, exit?)` | NVS-backed approach-reaction settings for the LTR-553. `enter`/`exit` are raw `ps` thresholds (0..2047, default 400/150); only the fields passed change. Reaction is a silent look-up + happy face (never speech). Live on the next 100 ms poll tick, persists across reboot. | ✅ |
 | `get_touch_sensor_enabled` | Read whether head-touch detection is enabled. The NVS-backed setting persists across reboot. | ✅ |
 | `set_touch_sensor_enabled(enabled)` | Enable or disable head-touch detection. Disabling stops both the firmware local motion response and MCP `stackchan/event` emission, and persists across reboot. Head-touch is **off until enabled**. | ✅ |
 | `set_avatar(face)` | Switch avatar expression (`idle` / `happy` / `thinking` / `sad` / `surprised` / `embarrassed`), or `off` to hide the avatar and disable blink so the underlying WiFi config / OTA / settings screens are visible. Any other face brings the avatar back and restores blink. | ✅ |
@@ -966,17 +968,21 @@ Each event is appended as one JSON line to the configured path. The
 file is created if it does not exist, and existing entries are
 preserved. Each line carries:
 
-- `event_type` — top-level event type (currently `"touch"`).
-- `subtype` — subtype within the event type (currently `"tap"` or
-  `"stroke"`).
-- `duration_ms` — firmware-reported duration of the event in
-  milliseconds.
+- `event_type` — top-level event type (`"touch"` or `"presence"`).
+- `subtype` — subtype within the event type (`"tap"` / `"stroke"` for
+  `touch`, `"approach"` for `presence`).
+- `duration_ms` / `ps` — the frame's numeric payload, written under the
+  name that matches what the number actually is. The firmware always sends it
+  inside the frame's `duration_ms` field, but for `presence` that field
+  carries the raw 11-bit proximity reading (`ps`, 0–2047), not a duration — so
+  the gateway forwards and persists it as `ps` rather than recording a pause
+  that never happened.
 - `ts` — firmware uptime in milliseconds (monotonic).
 - `ts_unix` — wall-clock timestamp when the gateway recorded the
   event.
 - `session_id` — gateway session identifier.
 - `action` — avatar action keyword for the event subtype (e.g.
-  `head_pat`, `head_stroke`). The built-in default templates always
+  `head_pat`, `head_stroke`, `look_up`). The built-in default templates always
   populate this, and `messages:` overrides are also required to
   specify `action`, so this field is present for every supported
   subtype.
@@ -988,6 +994,7 @@ the JSONL record itself. A delivered tap-and-stroke pair looks like:
 ```json
 {"event_type": "touch", "subtype": "tap", "duration_ms": 0, "ts": 123456, "ts_unix": 1717862400.0, "session_id": "abc-123", "action": "head_pat"}
 {"event_type": "touch", "subtype": "stroke", "duration_ms": 720, "ts": 124000, "ts_unix": 1717862400.7, "session_id": "abc-123", "action": "head_stroke"}
+{"event_type": "presence", "subtype": "approach", "ps": 45, "ts": 125000, "ts_unix": 1717862401.4, "session_id": "abc-123", "action": "look_up"}
 ```
 
 The top-level `event_type` and `subtype` correspond to the rows in
@@ -1025,12 +1032,19 @@ releases without rewriting this section.
 | --- | --- | --- | --- |
 | `touch` | `tap` | `head_pat` | `head was tapped` |
 | `touch` | `stroke` | `head_stroke` | `head was stroked for {duration_ms}ms` |
+| `presence` | `approach` | `look_up` | `something came close to the face (ps={ps})` |
 
 The built-in defaults are phrased experientially — describing what the
 device felt rather than naming a mechanical event — so the consuming
-agent reads them as first-person narration. The `{duration_ms}`
-placeholder is substituted from the event payload; unknown
+agent reads them as first-person narration. The `{duration_ms}` and
+`{ps}` placeholders are substituted from the event payload; unknown
 placeholders are preserved verbatim.
+
+`presence`/`approach` is emitted by the firmware's onboard LTR-553 proximity
+sensor (the `get_proximity_state` tool reads the same sensor): the robot
+silently lifts its head for a moment when something comes within a few
+centimetres of its face. The event carries the raw reading in `ps`, so a
+consumer can tell a hand at 1 cm from one at 3 cm.
 
 ##### Overriding the wording
 
@@ -1048,6 +1062,10 @@ messages:
     stroke:
       action: head_stroke
       template: "head being stroked for {duration_ms}ms"
+  presence:
+    approach:
+      action: look_up
+      template: "someone leaned in (ps={ps})"
 ```
 
 Both `action` and `template` are required for each overridden subtype.

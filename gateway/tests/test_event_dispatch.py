@@ -89,6 +89,7 @@ async def test_emit_stackchan_event_dispatches_selected_paths(
                 "event_type": "touch",
                 "subtype": "tap",
                 "duration_ms": 350,
+                "value_field": "duration_ms",
                 "ts": 123456,
                 "session_id": "session-1",
                 "action": "head_pat",
@@ -322,6 +323,94 @@ def _expected_meta() -> dict:
         "ts_unix": "1717000000.25",
         "session_id": "session-1",
     }
+
+
+def _presence_payload() -> dict:
+    """A presence/approach frame, as the firmware actually emits it.
+
+    The third field is the frame's ``duration_ms`` key carrying the raw
+    proximity reading — the same wire key touch events use for a duration.
+    """
+    return {
+        "event_type": "presence",
+        "subtype": "approach",
+        "duration_ms": 45,
+        "ts": 123456,
+        "session_id": "session-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_presence_approach_reaches_all_paths_named_ps(monkeypatch):
+    """presence/approach must be forwarded, and its number named for what it is.
+
+    Regression guard: the gateway used to accept only ``event_type == "touch"``
+    and dropped every presence frame as malformed, so the firmware's approach
+    event reached no consumer at all (while the device-side reaction still
+    happened, which made the drop silent). The firmware reuses the frame's
+    ``duration_ms`` field for the proximity reading, so the forwarded payload
+    and the persisted JSONL line must call it ``ps`` — recording it as a
+    duration would persist a pause that never happened.
+    """
+    notify_calls: list[tuple[str, dict]] = []
+    log_calls: list[dict] = []
+
+    async def fake_notify(method, params):
+        notify_calls.append((method, params))
+
+    def fake_log_event(**kwargs):
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(stdio_server, "notify_stackchan_event", fake_notify)
+    monkeypatch.setattr(event_log, "log_event", fake_log_event)
+    monkeypatch.setattr(esp32_client.time, "time", lambda: 1717000000.25)
+
+    manager = ESP32Manager(
+        notify_config=_notify_config(legacy=True, channels=True, jsonl=True)
+    )
+    await manager._emit_stackchan_event(_presence_payload())
+
+    assert notify_calls == [
+        (
+            stdio_server.STACKCHAN_EVENT_METHOD,
+            {
+                "event_type": "presence",
+                "subtype": "approach",
+                "ps": 45,
+                "action": "look_up",
+                "ts": 123456,
+                "session_id": "session-1",
+            },
+        ),
+        (
+            stdio_server.CHANNEL_NOTIFICATION_METHOD,
+            {
+                "content": "something came close to the face (ps=45)",
+                "meta": {
+                    "event_type": "presence",
+                    "subtype": "approach",
+                    "ps": "45",
+                    "action": "look_up",
+                    "ts": "123456",
+                    "ts_unix": "1717000000.25",
+                    "session_id": "session-1",
+                },
+            },
+        ),
+    ]
+    assert log_calls == [
+        {
+            "event_type": "presence",
+            "subtype": "approach",
+            "duration_ms": 45,
+            "value_field": "ps",
+            "ts": 123456,
+            "session_id": "session-1",
+            "action": "look_up",
+            "path": Path("/tmp/stackchan-events-test.jsonl"),
+            "ts_unix": 1717000000.25,
+        }
+    ]
 
 
 class _FakeESP32:
