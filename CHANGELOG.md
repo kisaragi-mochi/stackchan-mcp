@@ -45,6 +45,9 @@ documented-only.
   no known vulnerabilities. Re-locking also moves `onnxruntime` for
   Python 3.10 only from 1.24.3 to 1.23.2 (the STT extra); Python 3.11+ keeps
   1.26.0. Supersedes #396.
+- Pin the gateway's ruff lint rules to the previous default (`E4`, `E7`,
+  `E9`, `F`) in `gateway/pyproject.toml`, so bumping `ruff` to 0.17 does
+  not expand CI lint to its new rule groups.
 
 ### Tools
 
