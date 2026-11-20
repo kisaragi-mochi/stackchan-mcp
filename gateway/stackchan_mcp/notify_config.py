@@ -42,6 +42,10 @@ DEFAULT_MESSAGE_TEMPLATES: Final[dict[tuple[str, str], MessageTemplate]] = {
         action="head_stroke",
         template="head was stroked for {duration_ms}ms",
     ),
+    ("presence", "approach"): MessageTemplate(
+        action="look_up",
+        template="something came close to the face (ps={ps})",
+    ),
 }
 
 

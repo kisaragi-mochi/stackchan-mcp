@@ -48,6 +48,8 @@ The gateway translates between two tool naming conventions:
 | `set_brightness` | `self.screen.set_brightness` |
 | `move_head` | `self.robot.set_head_angles` |
 | `get_touch_state` | `self.touch.get_touch_state` |
+| `get_proximity_state` | `self.proximity.get_state` |
+| `set_proximity_config` | `self.proximity.set_config` |
 | `set_avatar` | `self.avatar.set_face` |
 | `set_blink` | `self.avatar.set_blink` |
 | `set_mouth` | `self.avatar.set_mouth` |

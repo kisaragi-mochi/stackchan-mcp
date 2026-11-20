@@ -8,9 +8,13 @@ jsonl:
   path: ~/.claude/stackchan-events.jsonl
 # messages: override the wording delivered for each physical event.
 # Omit this block entirely to keep the built-in experiential defaults
-# ("head was tapped" / "head was stroked for {duration_ms}ms").
+# ("head was tapped" / "head was stroked for {duration_ms}ms" /
+# "something came close to the face (ps={ps})").
 # The examples below customize the phrasing per event type; {duration_ms}
-# is substituted from the event payload.
+# and {ps} are substituted from the event payload. Note the payload field
+# name differs by event type: touch events carry a duration in
+# `duration_ms`, presence/approach carries the raw proximity reading in
+# `ps` (the firmware frame puts both in its `duration_ms` field).
 messages:
   touch:
     tap:
@@ -19,3 +23,7 @@ messages:
     stroke:
       action: head_stroke
       template: "head being stroked for {duration_ms}ms"
+  presence:
+    approach:
+      action: look_up
+      template: "someone leaned in (ps={ps})"

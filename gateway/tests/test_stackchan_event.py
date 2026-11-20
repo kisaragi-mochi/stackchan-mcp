@@ -62,14 +62,87 @@ async def test_stackchan_event_frame_dispatches_to_notify_bridge(monkeypatch):
     ]
 
 
+@pytest.mark.asyncio
+async def test_presence_approach_frame_dispatches_with_ps(monkeypatch):
+    """A presence frame must be forwarded, not treated as a malformed touch.
+
+    Regression guard: the gateway once accepted only ``event_type == "touch"``,
+    so every approach frame the firmware sent was logged as malformed and
+    dropped — the device reaction still ran, which is exactly why the loss went
+    unnoticed. The frame carries the raw proximity reading in its
+    ``duration_ms`` field, so the forwarded params must call it ``ps``.
+    """
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_notify(method, params):
+        calls.append((method, params))
+
+    monkeypatch.setattr(stdio_server, "notify_stackchan_event", fake_notify)
+    monkeypatch.setattr(esp32_client.time, "time", lambda: 1717000000.25)
+    manager = ESP32Manager(notify_config=_notify_config(legacy=True))
+
+    await manager._handler(
+        _FakeWebSocket(
+            [
+                json.dumps(
+                    {
+                        "session_id": "session-1",
+                        "type": "stackchan-event",
+                        "event_type": "presence",
+                        "subtype": "approach",
+                        "duration_ms": 45,
+                        "ts": 123456,
+                    }
+                )
+            ]
+        )
+    )
+
+    assert calls == [
+        (
+            STACKCHAN_EVENT_METHOD,
+            {
+                "event_type": "presence",
+                "subtype": "approach",
+                "ps": 45,
+                "action": "look_up",
+                "ts": 123456,
+                "session_id": "session-1",
+            },
+        )
+    ]
+    assert "duration_ms" not in calls[0][1]
+
+
 @pytest.mark.parametrize(
     ("overrides", "warning"),
     [
         ({"event_type": "motion"}, "event_type='motion'"),
+        ({"event_type": None}, "event_type=None"),
         ({"subtype": "press"}, "subtype='press'"),
         ({"duration_ms": "350"}, "duration_ms='350'"),
         ({"duration_ms": True}, "duration_ms=True"),
         ({"duration_ms": -1}, "duration_ms=-1"),
+        # presence frames are accepted, but only subtype 'approach' — and
+        # their number is reported as ps, so that is the field the warning
+        # must name.
+        ({"event_type": "presence", "subtype": "tap"}, "subtype='tap'"),
+        (
+            {"event_type": "presence", "subtype": "approach", "duration_ms": None},
+            "ps=None",
+        ),
+        (
+            {"event_type": "presence", "subtype": "approach", "duration_ms": "45"},
+            "ps='45'",
+        ),
+        (
+            {"event_type": "presence", "subtype": "approach", "duration_ms": True},
+            "ps=True",
+        ),
+        (
+            {"event_type": "presence", "subtype": "approach", "duration_ms": -1},
+            "ps=-1",
+        ),
         ({"ts": "123456"}, "ts='123456'"),
         ({"ts": True}, "ts=True"),
         ({"ts": -1}, "ts=-1"),

@@ -46,8 +46,11 @@ _WS2812_COLOR_ORDER_BY_PORT = {
 STACKCHAN_EVENT_INSTRUCTIONS = (
     "Stack-chan physical events arrive as server-initiated "
     "notifications with method='stackchan/event'. Params include "
-    "event_type ('touch'), subtype ('tap' or 'stroke'), "
-    "duration_ms, ts, session_id. When such a notification "
+    "event_type ('touch' or 'presence'), subtype ('tap'/'stroke' for "
+    "touch, 'approach' for presence), the numeric payload under its own "
+    "name (duration_ms for touch, ps — the raw proximity reading — for "
+    "presence), "
+    "ts, session_id. When such a notification "
     "arrives, react naturally using existing tools "
     "(set_avatar, say, set_mouth, set_leds, move_head). There is "
     "no dedicated reply tool — the existing tool palette is the "
@@ -56,7 +59,8 @@ STACKCHAN_EVENT_INSTRUCTIONS = (
 STACKCHAN_CHANNEL_INSTRUCTIONS = (
     'Stack-chan physical events arrive as Channels notifications under '
     '<channel source="plugin:stackchanmcp:stackchanmcp" action="..." '
-    'subtype="..." duration_ms="...">. React naturally using existing '
+    'subtype="..." duration_ms="..." ps="..."> (duration_ms for touch, '
+    'ps for presence). React naturally using existing '
     'tools (set_avatar, say, set_mouth, set_leds, move_head).'
 )
 STACKCHAN_JSONL_INSTRUCTIONS = (
@@ -1200,6 +1204,14 @@ async def _dispatch_mcp_tool(
             "self.touch.get_touch_state",
             {},
         ),
+        "get_proximity_state": (
+            "self.proximity.get_state",
+            {},
+        ),
+        "set_proximity_config": (
+            "self.proximity.set_config",
+            arguments,
+        ),
         "set_led": (
             "self.led.set_color",
             arguments,
@@ -2274,6 +2286,69 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 inputSchema={
                     "type": "object",
                     "properties": {},
+                },
+            ),
+            Tool(
+                name="get_proximity_state",
+                description=(
+                    "Read the onboard LTR-553 (CoreS3, I2C 0x23) proximity and "
+                    "ambient-light sensor: raw 11-bit ps value (bigger = object "
+                    "closer; range is a few centimetres), saturation flag, ALS "
+                    "channels, the configured enter/exit thresholds, the debounced "
+                    "presence flag, the reaction count, and the age of the last "
+                    "sample and last reaction. Use it to calibrate thresholds "
+                    "against the real room: hold a hand in front of the face and "
+                    "watch ps rise."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="set_proximity_config",
+                description=(
+                    "Update the NVS-backed LTR-553 approach-reaction settings. "
+                    "enabled gates the reaction (approach still gets logged and "
+                    "reported in get_proximity_state). enter is the rising "
+                    "threshold and exit the falling one, both on the raw 11-bit ps "
+                    "scale (0..2047). Only the fields passed are changed; new "
+                    "values apply on the next 100 ms poll tick and persist across "
+                    "reboot. A reaction is a silent look-up plus a happy face — "
+                    "it never speaks."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": (
+                                "True to let an approach trigger the reaction, "
+                                "false to keep sensing but stay still."
+                            ),
+                        },
+                        "enter": {
+                            "type": "integer",
+                            "description": (
+                                "Rising threshold on the raw ps scale (0..2047). "
+                                "Default 400; a hand a few centimetres away reads "
+                                "far higher on this unit."
+                            ),
+                            "minimum": 0,
+                            "maximum": 2047,
+                        },
+                        "exit": {
+                            "type": "integer",
+                            "description": (
+                                "Falling threshold on the raw ps scale (0..2047). "
+                                "Default 150 — must stay below enter to keep the "
+                                "hysteresis gap."
+                            ),
+                            "minimum": 0,
+                            "maximum": 2047,
+                        },
+                    },
+                    "required": [],
                 },
             ),
             Tool(
